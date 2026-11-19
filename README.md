@@ -9,6 +9,12 @@
 3. 浏览器打开后，在侧栏选择角色。游戏保存后可点击「重新读取存档」更新。
 4. 使用期间保留启动窗口。退出时可以关闭窗口。
 
+网页默认使用 English，可在右上角的「语言 / Language」切换成简体中文。动作、物品和商店名称优先读取本机对应语言的游戏数据。
+
+## Quick start in English
+
+On Windows, install Node.js, unzip the calculator, and run `Start-GP-Calculator.cmd`. If the game is not found, drag the folder containing `Melvor2.exe` onto the launcher. Choose **English** in the top-right corner and select your character save in the sidebar. Click **Reload Save** after the game saves any changes.
+
 ## 功能
 
 - **挂机收益**按指定时长比较到手金币和净收益，计入材料可能提前用完的情况。

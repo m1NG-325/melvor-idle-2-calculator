@@ -41,7 +41,7 @@ function shopVisibility(upgrade, character, purchased) {
   return { state: 'unknown' };
 }
 
-function calculateShoppingList(shop, items, selected, character, scope = 'all', purchaseFilter = 'pending') {
+function calculateShoppingList(shop, items, selected, character, scope = 'all', purchaseFilter = 'pending', language = 'zh') {
   const resources = new Map();
   let upgradeCount = 0;
   let hiddenCount = 0;
@@ -69,7 +69,9 @@ function calculateShoppingList(shop, items, selected, character, scope = 'all', 
         const isCurrency = cost.type === 'currency';
         resource = {
           ...cost, total: 0, spent: 0, uses: [],
-          name: (isCurrency ? shop.currencies[cost.id] : items[cost.id]?.name) ?? cost.id,
+          names: isCurrency ? shop.currencyLabels?.[cost.id] : items[cost.id]?.names,
+          name: (isCurrency ? shop.currencyLabels?.[cost.id]?.[language] ?? shop.currencies[cost.id]
+            : items[cost.id]?.names?.[language] ?? items[cost.id]?.name) ?? cost.id,
           available: character.date
             ? (isCurrency ? character.currencies[cost.id] : character.stock[cost.id]) ?? 0
             : null
@@ -86,14 +88,29 @@ function calculateShoppingList(shop, items, selected, character, scope = 'all', 
   for (const resource of resources.values()) {
     resource.shortage = resource.available === null ? null : Math.max(0, resource.total - resource.available);
   }
-  const sorted = [...resources.values()].sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name, 'zh-CN'));
+  const sorted = [...resources.values()].sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name, language));
   return { upgradeCount, pendingCount, purchasedCount, hiddenCount, unknownCount, resources: sorted };
 }
 
 let shopView;
 
+function shopCurrencyName(id) {
+  const shop = shopView?.shop;
+  return shop?.currencyLabels?.[id]?.[uiLanguage] ?? shop?.currencies?.[id] ??
+    (id === 'GoldPieces' ? t('金币') : id);
+}
+
+function localizeShop() {
+  if (!shopView) return;
+  const labels = new Map(shopView.shop.groups.map(group => [group.id, gameName(group)]));
+  shopView.categoryNames = labels;
+  for (const input of byId('shopCategories').querySelectorAll('input')) {
+    input.nextElementSibling.textContent = labels.get(input.value);
+  }
+}
+
 function initShop(shop, items) {
-  const categoryNames = new Map(shop.groups.map(group => [group.id, group.name]));
+  const categoryNames = new Map(shop.groups.map(group => [group.id, gameName(group)]));
   const selected = new Set(categoryNames.keys());
   shopView = { shop, items, categoryNames, selected, character: null };
   const categoryControls = new Map();
@@ -116,7 +133,7 @@ function initShop(shop, items) {
       else selected.delete(group.id);
       refreshSelection();
     });
-    label.append(box, create('span', group.name));
+    label.append(box, create('span', gameName(group)));
     categoryControls.set(group.id, box);
     return label;
   }));
@@ -150,45 +167,46 @@ function renderShop() {
   const purchaseFilter = purchases.disabled ? 'pending' : purchases.value;
   const showPurchased = purchaseFilter !== 'pending';
   const showPending = purchaseFilter !== 'purchased';
-  const list = calculateShoppingList(shop, items, selected, character, scope, purchaseFilter);
+  const list = calculateShoppingList(shop, items, selected, character, scope, purchaseFilter, uiLanguage);
   const search = byId('shopSearch').value.trim().toLocaleLowerCase();
   const shortages = byId('shopShortages');
   shortages.disabled = !character.date || !showPending;
   const showShortages = shortages.checked && !shortages.disabled;
   const matches = list.resources.filter(resource => (!showShortages || resource.shortage > 0) && (
-    !search || resource.name.toLocaleLowerCase().includes(search) || resource.id.toLowerCase().includes(search) ||
-    resource.uses.some(({ upgrade }) => [upgrade.name, upgrade.id, upgrade.section, categoryNames.get(upgrade.group)]
+    !search || [resource.name, resource.id, ...Object.values(resource.names ?? {})].some(name => name.toLocaleLowerCase().includes(search)) ||
+    resource.uses.some(({ upgrade }) => [upgrade.name, upgrade.id, upgrade.section, categoryNames.get(upgrade.group),
+      ...Object.values(upgrade.names ?? {}), ...Object.values(upgrade.sectionNames ?? {})]
       .some(text => text?.toLocaleLowerCase().includes(search)))
   ));
 
   byId('shopStatus').textContent = [
-    selected.size + ' 个已选类别',
-    ...(list.hiddenCount ? [(scope === 'all' ? '其中 ' : '已排除 ') + list.hiddenCount + ' 项当前隐藏'] : []),
-    ...(character.date && list.unknownCount ? [list.unknownCount + ' 项显示状态待核对'] : []),
-    character.purchases ? '存档 ' + character.name :
-      (character.date ? '未读到购买记录，按未购计算' : '未载入存档，仅显示总需求')
+    t('{count} 个已选类别', { count: selected.size }),
+    ...(list.hiddenCount ? [t(scope === 'all' ? '其中 {count} 项当前隐藏' : '已排除 {count} 项当前隐藏', { count: list.hiddenCount })] : []),
+    ...(character.date && list.unknownCount ? [t('{count} 项显示状态待核对', { count: list.unknownCount })] : []),
+    character.purchases ? t('存档 {name}', { name: character.name }) :
+      t(character.date ? '未读到购买记录，按未购计算' : '未载入存档，仅显示总需求')
   ].join(' · ');
   byId('shopPendingCount').textContent = fullNumber(list.pendingCount);
   byId('shopPurchasedCount').textContent = showPurchased ? fullNumber(list.purchasedCount) : '—';
   byId('shopResourceCount').textContent = fullNumber(list.resources.length);
   byId('shopTable').classList.toggle('show-spent', showPurchased);
   byId('shopTable').classList.toggle('purchased-only', !showPending);
-  byId('shopCostHelp').textContent = showPurchased
+  byId('shopCostHelp').textContent = t(showPurchased
     ? '已购用量按存档购买次数和本版标价估算。还缺只计算尚未购买的部分。'
-    : '带已购标记的商品按首次购买规划。普通可重复购买的补给不计入。';
-  byId('shopScopeHelp').textContent = {
+    : '带已购标记的商品按首次购买规划。普通可重复购买的补给不计入。');
+  byId('shopScopeHelp').textContent = t({
     visible: '按存档的商店显示设置筛选。游戏开启「显示锁定项」时，这里也会统计可见但尚未解锁的升级。',
     all: '统计本版正式商店里所有升级，包含还没显示或解锁的项目。展开资源可查看显示状态和前置条件。',
     reference: '这里只列安装数据中有价格的未上架或旧测试条目，费用单独统计。'
-  }[scope];
+  }[scope]);
   byId('shopTable').hidden = !matches.length;
   const empty = byId('shopEmpty');
   empty.hidden = !!matches.length;
-  empty.textContent = !selected.size ? '请选择至少一个商店类别。' :
+  empty.textContent = t(!selected.size ? '请选择至少一个商店类别。' :
     scope === 'visible' && !character.date ? '载入角色存档后可判断当前显示的升级。也可以切换到「全部已知」。' :
     list.upgradeCount === 0 ? (showPending ? '所选类别没有匹配的升级。' : '所选类别没有已购升级。') :
       !list.resources.length ? '所选升级无需支付资源。' :
-        search ? '没有匹配的资源或升级。' : '所选升级的资源已经够用。';
+        search ? '没有匹配的资源或升级。' : '所选升级的资源已经够用。');
 
   const container = byId('shopResources');
   const expanded = new Set([...container.querySelectorAll('details[open]')].map(row => row.dataset.resource));
@@ -196,18 +214,18 @@ function renderShop() {
 }
 
 function describeShopGate(requirement, shop) {
-  const target = requirement.name ?? requirement.id;
+  const target = gameName(requirement) ?? requirement.id;
   switch (requirement.type) {
     case 'Level':
-      return (shop.skillNames[requirement.skill] ?? requirement.skill) + ' ' + requirement.level + ' 级';
+      return t('{skill} {level} 级', { skill: skillName(requirement.skill, shop.skillNames), level: requirement.level });
     case 'ShopPurchase':
-      return '先购买「' + target + '」' + (requirement.amount > 1 ? ' ' + requirement.amount + ' 次' : '');
+      return t(requirement.amount > 1 ? '先购买「{name}」 {count} 次' : '先购买「{name}」', { name: target, count: requirement.amount });
     case 'DungeonStatistic':
-      return '通关「' + target + '」' + requirement.amount + ' 次';
+      return t('通关「{name}」{count} 次', { name: target, count: requirement.amount });
     case 'SlayerMasterStatistic':
-      return '完成「' + target + '」的任务 ' + requirement.amount + ' 次';
+      return t('完成「{name}」的任务 {count} 次', { name: target, count: requirement.amount });
     case 'QuestComplete':
-      return '完成任务「' + target + '」';
+      return t('完成任务「{name}」', { name: target });
     default:
       return null;
   }
@@ -222,7 +240,7 @@ function renderShopResource(resource, expanded, showPurchased, showPending) {
   const columns = create('div', undefined, 'shop-row shop-row-content');
   const value = number => number === null ? '—' : fullNumber(number);
   columns.append(
-    create('span', resource.name + ' · ' + resource.uses.length + ' 项', 'resource-name'),
+    create('span', resource.name + ' · ' + t('{count} 项', { count: resource.uses.length }), 'resource-name'),
     create('span', value(resource.spent), 'number spent-col'),
     create('span', value(resource.total), 'number pending-col'),
     create('span', value(resource.available), 'number'),
@@ -234,30 +252,31 @@ function renderShopResource(resource, expanded, showPurchased, showPending) {
   const table = create('table');
   const header = create('thead');
   const headings = create('tr');
-  headings.append(create('th', '升级'), create('th', '商店位置'));
-  if (showPurchased) headings.append(create('th', '已购用量', 'number'));
-  if (showPending) headings.append(create('th', '未购需求', 'number'));
+  headings.append(create('th', t('升级')), create('th', t('商店位置')));
+  if (showPurchased) headings.append(create('th', t('已购用量'), 'number'));
+  if (showPending) headings.append(create('th', t('未购需求'), 'number'));
   header.append(headings);
   const body = create('tbody');
   body.append(...resource.uses.map(({ upgrade, remaining, total, purchased, spent, visibility }) => {
     const row = create('tr');
-    const name = create('td', upgrade.name);
+    const name = create('td', gameName(upgrade));
     const requirements = [...new Set([...upgrade.requirements, ...upgrade.displayRequirements.flat()]
       .map(requirement => describeShopGate(requirement, shop)).filter(Boolean))];
-    if (remaining > 1) requirements.push('剩余 ' + remaining + ' 次');
+    if (remaining > 1) requirements.push(t('剩余 {count} 次', { count: remaining }));
     const status = {
-      hidden: '当前隐藏 · ' + visibility.reason,
-      visible: visibility.unlocked === false ? '当前显示 · 尚未解锁' : '当前显示',
-      unknown: '显示状态待核对',
-      reference: upgrade.referenceReason
+      hidden: t('当前隐藏') + ' · ' + t(visibility.reason ?? ''),
+      visible: t(visibility.unlocked === false ? '当前显示 · 尚未解锁' : '当前显示'),
+      unknown: t('显示状态待核对'),
+      reference: t(upgrade.referenceReason ?? '')
     }[visibility.state];
-    if (purchased) name.append(create('small', '已购买' + (purchased > 1 ? ' × ' + purchased : ''), 'purchase-badge'));
+    if (purchased) name.append(create('small', t('已购买') + (purchased > 1 ? ' × ' + purchased : ''), 'purchase-badge'));
     if (remaining || visibility.state === 'reference') {
       name.append(create('small', status, visibility.state === 'hidden' ? 'gold' : undefined));
     }
     if (requirements.length) name.append(create('small', requirements.join(' · ')));
     const category = categoryNames.get(upgrade.group);
-    const location = category === upgrade.section ? category : category + ' › ' + upgrade.section;
+    const section = upgrade.sectionNames?.[uiLanguage] ?? upgrade.section;
+    const location = category === section ? category : category + ' › ' + section;
     row.append(name, create('td', location));
     if (showPurchased) row.append(create('td', purchased ? fullNumber(spent) : '—', 'number'));
     if (showPending) row.append(create('td', remaining ? fullNumber(total) : '—', 'number'));

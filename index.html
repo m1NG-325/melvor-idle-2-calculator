@@ -9,7 +9,16 @@
 <body>
 <div class="top-bar">
   <div class="app-brand"><span class="brand-emblem" aria-hidden="true">M2</span><strong>梅尔沃放置 2</strong><span class="crumb-divider" aria-hidden="true">/</span><span id="activePage">挂机收益</span></div>
-  <p id="source" class="muted">正在读取本机游戏数据</p>
+  <div class="top-bar-controls">
+    <p id="source" class="muted">正在读取本机游戏数据</p>
+    <label class="language-control" for="language">
+      <span>语言 / Language</span>
+      <select id="language">
+        <option value="en">English</option>
+        <option value="zh">简体中文</option>
+      </select>
+    </label>
+  </div>
 </div>
 <div class="workspace">
   <aside class="side-panel">
@@ -141,6 +150,7 @@
   </div>
   </main>
 </div>
+<script src="language.js"></script>
 <script src="rank.js"></script>
 <script src="experience.js"></script>
 <script src="shop.js"></script>

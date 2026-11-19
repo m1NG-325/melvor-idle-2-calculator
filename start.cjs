@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const { findSteamGame, getBuild, readPackage } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
+const { addGameLabels } = require('./game-labels.cjs');
 const { findSaves, readHeader, readProfile } = require('./saves.cjs');
 
 function main() {
@@ -15,13 +16,15 @@ function main() {
   const catalog = makeCatalog(data);
   const shop = makeShopCatalog(data);
   catalog.build = getBuild(game);
+  addGameLabels(game, catalog.build, catalog, shop);
   const assets = {
     '': ['text/html', 'index.html'],
     'app.css': ['text/css', 'app.css'],
     'rank.js': ['text/javascript', 'rank.js'],
     'experience.js': ['text/javascript', 'experience.js'],
     'shop.js': ['text/javascript', 'shop.js'],
-    'ui.js': ['text/javascript', 'ui.js']
+    'ui.js': ['text/javascript', 'ui.js'],
+    'language.js': ['text/javascript', 'language.js']
   };
   const token = randomBytes(20).toString('hex');
   const prefix = '/' + token + '/';
@@ -36,11 +39,12 @@ function main() {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Content-Security-Policy', "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'");
     const host = '127.0.0.1:' + server.address().port;
-    if (request.headers.host !== host || request.method !== 'GET' || !request.url.startsWith(prefix)) {
+    const pathname = request.url.split('?', 1)[0];
+    if (request.headers.host !== host || request.method !== 'GET' || !pathname.startsWith(prefix)) {
       json(response, { error: '页面不存在' }, 404);
       return;
     }
-    const route = request.url.slice(prefix.length);
+    const route = pathname.slice(prefix.length);
     try {
       if (route === 'catalog') return json(response, catalog);
       if (route === 'shop') return json(response, shop);
@@ -51,7 +55,7 @@ function main() {
             const { name } = readHeader(fs.readFileSync(file));
             return { index, name };
           } catch {
-            return { index, name: '存档 ' + (index + 1) + '（格式未知）' };
+            return { index, unknown: true };
           }
         }));
       }

@@ -41,6 +41,8 @@ h2 { font-size: 17px; margin-bottom: 12px; }
 }
 .crumb-divider, #activePage { color: var(--muted); }
 #source { font-size: 12px; }
+.top-bar-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.language-control { display: inline-flex; align-items: center; gap: 8px; }
 .workspace { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 26px; padding: 23px 0 42px; align-items: start; }
 .side-panel {
   position: sticky; top: 18px; padding: 12px; border: 1px solid var(--line);

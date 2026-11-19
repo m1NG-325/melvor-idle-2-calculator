@@ -10,7 +10,7 @@ let xpView;
 function initExperience(catalog) {
   xpView = { catalog, character: null, bonusesByCharacter: new Map() };
   const skillInput = byId('xpSkill');
-  skillInput.replaceChildren(...Object.entries(catalog.xpSkills).map(([id, name]) => new Option(name, id)));
+  skillInput.replaceChildren(...Object.keys(catalog.xpSkills).map(id => new Option(skillName(id, catalog.xpSkills), id)));
   skillInput.addEventListener('change', setExperienceSkill);
   byId('xpHours').addEventListener('input', renderExperience);
   for (const button of document.querySelectorAll('[data-xp-hours]')) {
@@ -26,6 +26,11 @@ function initExperience(catalog) {
     renderExperience();
   });
   byId('xpBonus').addEventListener('blur', () => { byId('xpBonus').value = experienceBonuses()[skillInput.value] ?? 0; });
+}
+
+function localizeExperience() {
+  if (!xpView) return;
+  for (const option of byId('xpSkill').options) option.text = skillName(option.value, xpView.catalog.xpSkills);
 }
 
 function experienceBonuses() {
@@ -55,8 +60,9 @@ function renderExperience() {
   const skillInput = byId('xpSkill');
   const groups = compareExperience(catalog, { ...character, xpBonuses: experienceBonuses() }, hours);
   const recommendations = Object.values(groups).filter(rows => rows.length).length;
-  byId('xpStatus').textContent = recommendations + ' / ' + Object.keys(groups).length +
-    ' 个技能有可比较的行动 · 按所选时长内的总经验排序';
+  byId('xpStatus').textContent = t('{count} / {total} 个技能有可比较的行动 · 按所选时长内的总经验排序', {
+    count: recommendations, total: Object.keys(groups).length
+  });
   const supportedSkills = new Set(catalog.xpActions.map(action => action.skill));
   byId('xpBest').replaceChildren(...Object.entries(groups).map(([skill, rows]) => {
     const card = create('button', undefined, 'xp-card');
@@ -64,37 +70,37 @@ function renderExperience() {
     card.setAttribute('aria-pressed', String(skill === skillInput.value));
     const top = rows[0];
     const heading = create('span', undefined, 'xp-card-heading');
-    heading.append(create('span', catalog.xpSkills[skill], 'muted'));
-    if (top?.risky) heading.append(create('span', '受伤风险', 'xp-risk'));
-    const actionName = top?.action.name ?? (supportedSkills.has(skill) ? '暂无可用行动' : '暂未支持');
+    heading.append(create('span', skillName(skill, catalog.xpSkills), 'muted'));
+    if (top?.risky) heading.append(create('span', t('受伤风险'), 'xp-risk'));
+    const actionName = gameName(top?.action) ?? t(supportedSkills.has(skill) ? '暂无可用行动' : '暂未支持');
     const actionLabel = create('strong', actionName);
     actionLabel.title = actionName;
-    card.append(heading, actionLabel, create('span', top ? fullNumber(top.xpPerHour) + ' XP / 小时' : '', 'xp-rate'));
+    card.append(heading, actionLabel, create('span', top ? t('{value} XP / 小时', { value: fullNumber(top.xpPerHour) }) : '', 'xp-rate'));
     card.addEventListener('click', () => { skillInput.value = skill; setExperienceSkill(); });
     return card;
   }));
 
   const rows = groups[skillInput.value];
-  byId('xpDetailHeading').textContent = catalog.xpSkills[skillInput.value] + '行动排行';
+  byId('xpDetailHeading').textContent = t('{skill}行动排行', { skill: skillName(skillInput.value, catalog.xpSkills) });
   byId('xpTable').hidden = !rows.length;
   byId('xpEmpty').hidden = !!rows.length;
-  byId('xpEmpty').textContent = supportedSkills.has(skillInput.value)
+  byId('xpEmpty').textContent = t(supportedSkills.has(skillInput.value)
     ? '没有同时满足等级、解锁条件和库存的行动。'
-    : '这项技能暂未支持经验排行。';
+    : '这项技能暂未支持经验排行。');
   byId('xpRows').replaceChildren(...rows.slice(0, 20).map(row => {
     const item = create('tr');
-    const note = ['识别加成 ' + decimals.format(row.knownXpPercent) + '%'];
-    if (row.manualXpPercent) note.push('额外 ' + decimals.format(row.manualXpPercent) + '%');
+    const note = [t('识别加成 {value}%', { value: decimals.format(row.knownXpPercent) })];
+    if (row.manualXpPercent) note.push(t('额外 {value}%', { value: decimals.format(row.manualXpPercent) }));
     if (row.wood) {
       const percent = value => decimals.format(value * 100) + '%';
-      note.push('双倍伤害 ' + percent(row.wood.doubleDamage), '弱点 ' + percent(row.wood.weak),
-        '直接砍倒 ' + percent(row.wood.instant), '产出翻倍 ' + percent(row.wood.output),
-        '每击 ' + decimals.format(row.wood.interval) + ' 秒',
-        '固定经验 ' + decimals.format(row.flatXp), '砍倒经验 ' + decimals.format(row.xpPerCycle));
+      note.push(t('双倍伤害 {value}', { value: percent(row.wood.doubleDamage) }), t('弱点 {value}', { value: percent(row.wood.weak) }),
+        t('直接砍倒 {value}', { value: percent(row.wood.instant) }), t('产出翻倍 {value}', { value: percent(row.wood.output) }),
+        t('每击 {value} 秒', { value: decimals.format(row.wood.interval) }),
+        t('固定经验 {value}', { value: decimals.format(row.flatXp) }), t('砍倒经验 {value}', { value: decimals.format(row.xpPerCycle) }));
     }
-    if (row.limit) note.push(formattedHours(row.activeHours) + '后缺' + row.limit);
-    if (row.risky) note.push('失败可受伤，未计生存时间');
-    item.append(create('td', row.action.name), create('td', fullNumber(row.xp), 'number'),
+    if (row.limit) note.push(t('{time}后缺{item}', { time: formattedHours(row.activeHours), item: limitName(row) }));
+    if (row.risky) note.push(t('失败可受伤，未计生存时间'));
+    item.append(create('td', gameName(row.action)), create('td', fullNumber(row.xp), 'number'),
       create('td', fullNumber(row.xpPerHour), 'number gold'), create('td', note.join(' · ')));
     return item;
   }));

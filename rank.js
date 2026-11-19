@@ -164,14 +164,14 @@ function evaluate(action, profile, catalog, settings) {
     const possible = Math.floor(available / qty);
     if (possible < cycles) {
       cycles = possible;
-      limit = catalog.items[id]?.name ?? id;
+      limit = id;
     }
   }
   for (const [id, qty] of action.currencyCosts) {
     const possible = Math.floor((currencies[id] ?? 0) / qty);
     if (possible < cycles) {
       cycles = possible;
-      limit = id === 'GoldPieces' ? '金币' : id;
+      limit = id;
     }
   }
   if (cycles <= 0 || !Number.isFinite(cycles)) return;
