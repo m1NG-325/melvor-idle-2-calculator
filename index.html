@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>梅尔沃放置 2 · 工具台</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="top-bar">
+  <div class="app-brand"><span class="brand-emblem" aria-hidden="true">M2</span><strong>梅尔沃放置 2</strong><span class="crumb-divider" aria-hidden="true">/</span><span id="activePage">挂机收益</span></div>
+  <p id="source" class="muted">正在读取本机游戏数据</p>
+</div>
+<div class="workspace">
+  <aside class="side-panel">
+    <nav class="page-nav" aria-label="工具">
+      <a id="rankLink" href="#ranking-page" aria-current="page"><span class="nav-symbol" aria-hidden="true">↗</span>挂机收益</a>
+      <a id="xpLink" href="#experience"><span class="nav-symbol" aria-hidden="true">↑</span>经验效率</a>
+      <a id="shopLink" href="#shop"><span class="nav-symbol" aria-hidden="true">▤</span>商店升级</a>
+    </nav>
+    <div class="save-controls"><label>角色存档<select id="save"></select></label><button id="reload" type="button">重新读取存档</button></div>
+  </aside>
+  <main>
+  <div id="rankPage">
+  <h1>挂机收益</h1>
+  <form id="options" class="panel">
+    <div class="inputs">
+      <label>挂机时长（小时）<input required id="hours" type="number" min=".01" max="720" step="any" value="8"></label>
+      <div class="quick"><button type="button" data-hours="2">2 小时</button><button type="button" data-hours="8">8 小时</button><button type="button" data-hours="24">24 小时</button></div>
+      <label>离线上限（小时）<input required id="cap" type="number" min="0" max="720" step="any" value="24"></label>
+      <label>排行依据<select id="metric"><option value="net">净收益</option><option value="payout">到手金币</option></select></label>
+      <label class="check"><input id="sell" type="checkbox" checked>回归后卖产物</label>
+      <button type="submit" class="primary">计算</button>
+    </div>
+    <p class="status muted" id="status" role="status"></p>
+  </form>
+  <section id="winner" class="panel" hidden>
+    <h2 class="muted">本次首选</h2>
+    <p class="winner" id="winnerName"></p>
+    <div class="metrics" id="metrics"></div>
+    <p class="status muted" id="winnerDetail"></p>
+  </section>
+  <section class="panel">
+    <div class="inputs"><label>按技能查看<select id="filter"><option value="">全部技能</option></select></label><label>搜索方案<input id="search" type="search" placeholder="动作名或地点"></label></div>
+    <p id="empty" class="empty muted">正在读取数据…</p>
+    <div class="scroll" id="ranking" hidden><table>
+      <thead><tr><th>方案</th><th class="number">净收益</th><th class="number">到手 GP</th><th class="number">净 GP/小时</th><th>预计停机</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <button id="more" type="button" hidden>显示更多</button>
+  </section>
+  <details class="panel">
+    <summary>等级与加成</summary>
+    <p class="muted">等级 0 表示技能不可用。可手填相对基础值的间隔变化和平均产量变化。偷窃只有成功率为 100% 或失败无伤害时才参与排名。</p>
+    <div class="scroll"><table>
+      <thead><tr><th>技能</th><th>等级</th><th>间隔变化 %</th><th>产量变化 %</th><th>额外加成</th></tr></thead>
+      <tbody id="levels"></tbody>
+    </table></div>
+  </details>
+  <details class="panel">
+    <summary>库存与解锁条件</summary>
+    <p class="muted">可以调整参与计算的库存。产出会按游戏内卖价折算。净收益扣除材料卖价，已锁定的仓库物品保留。</p>
+    <div class="inputs">
+      <label>物品（可搜索）<input id="item" list="items" placeholder="输入物品名称或 ID"></label>
+      <datalist id="items"></datalist>
+      <label>可用数量<input id="quantity" type="number" min="0" step="1" value="0"></label>
+      <button id="setItem" type="button">设定库存</button>
+      <label>游戏里已确认可做的动作<input id="action" list="actions" placeholder="输入动作名或 ID"></label>
+      <datalist id="actions"></datalist>
+      <button id="confirmAction" type="button">确认解锁</button>
+      <button id="excludeAction" type="button">排除动作</button>
+    </div>
+    <p id="editStatus" role="status"></p>
+  </details>
+  <details class="panel">
+    <summary>计算范围</summary>
+    <p class="muted">每次挂机只运行一项动作，以存档快照和基础机制计算期望值。离线上限 0 表示在线挂机。当前版本未完整模拟装备、专精、药水与天气、银行格数耗尽、自动停手、挂机升级或被动技能。战斗、宝箱、劫案、草药学、农业和狩猎未纳入。结果适合用来对比方案，实际结算会有波动。</p>
+  </details>
+  </div>
+  <div id="xpPage" hidden>
+    <h1>经验效率</h1>
+    <section class="panel" aria-label="经验计算设置">
+      <div class="inputs">
+        <label>比较时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
+        <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+        <label>技能<select id="xpSkill"></select></label>
+        <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
+      </div>
+      <p class="status muted">按角色等级、库存和可识别的加成计算。未自动识别的修正可以填入额外加成。</p>
+    </section>
+    <section class="panel" aria-labelledby="xpBestHeading">
+      <h2 id="xpBestHeading">各技能首选</h2>
+      <p id="xpStatus" class="status muted" role="status"></p>
+      <div id="xpBest" class="xp-grid"></div>
+    </section>
+    <section class="panel" aria-labelledby="xpDetailHeading">
+      <h2 id="xpDetailHeading">行动排行</h2>
+      <p id="xpEmpty" class="muted"></p>
+      <div id="xpTable" class="scroll" hidden><table>
+        <thead><tr><th>行动</th><th class="number">预计 XP</th><th class="number">XP / 小时</th><th>数据和限制</th></tr></thead>
+        <tbody id="xpRows"></tbody>
+      </table></div>
+    </section>
+  </div>
+  <div id="shopPage" hidden>
+    <h1>商店升级</h1>
+    <div class="shop-overview">
+      <div><span>未购升级</span><strong id="shopPendingCount">—</strong></div>
+      <div><span>已购升级</span><strong id="shopPurchasedCount">—</strong></div>
+      <div><span>涉及资源</span><strong id="shopResourceCount">—</strong></div>
+    </div>
+    <section class="panel" aria-labelledby="shopCategoriesTitle">
+      <h2 id="shopCategoriesTitle">商店类别</h2>
+      <div class="inputs">
+        <label>统计范围<select id="shopScope"><option value="visible">当前显示</option><option value="all">全部已知（含隐藏）</option><option value="reference">未上架数据（参考）</option></select></label>
+        <label>购买状态<select id="shopPurchaseFilter"><option value="pending">仅未购买</option><option value="both">显示已购买和未购买</option><option value="purchased">仅已购买</option></select></label>
+        <div class="category-actions">
+          <label class="check"><input id="shopSelectAll" type="checkbox">全选类别</label>
+          <button id="shopClear" type="button">清空选择</button>
+        </div>
+      </div>
+      <div id="shopCategories" class="category-grid"></div>
+      <p id="shopStatus" class="status muted" role="status">正在读取商店数据…</p>
+      <p id="shopScopeHelp" class="muted"></p>
+    </section>
+    <section class="panel" aria-labelledby="shopResourcesTitle">
+      <h2 id="shopResourcesTitle">升级资源清单</h2>
+      <div class="inputs">
+        <label>搜索资源或升级<input id="shopSearch" type="search" placeholder="例如铁锭、仓库、斧头"></label>
+        <label class="check"><input id="shopShortages" type="checkbox">只看有缺口</label>
+      </div>
+      <p id="shopEmpty" class="empty muted" hidden></p>
+      <div class="scroll" id="shopTable" hidden>
+        <div class="shop-items">
+          <div class="shop-row shop-header muted"><span>资源 · 点击查看用途</span><span class="number spent-col">已购用量</span><span class="number pending-col">未购总需</span><span class="number">仓库 / 余额</span><span class="number pending-col">还缺</span></div>
+          <div id="shopResources"></div>
+        </div>
+      </div>
+      <p id="shopCostHelp" class="status muted">带已购标记的商品按首次购买规划。普通可重复购买的补给不计入。</p>
+    </section>
+  </div>
+  </main>
+</div>
+<script src="rank.js"></script>
+<script src="experience.js"></script>
+<script src="shop.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>

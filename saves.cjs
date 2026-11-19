@@ -1,0 +1,265 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const { brotliDecompressSync, constants } = require('node:zlib');
+const { localId } = require('./game-data.cjs');
+
+class SaveCursor {
+  constructor(buffer) {
+    this.buffer = buffer;
+    this.offset = 0;
+  }
+  take(length) {
+    if (!Number.isInteger(length) || length < 0 || length > this.buffer.length - this.offset) {
+      throw new Error('存档区域不完整');
+    }
+    const bytes = this.buffer.subarray(this.offset, this.offset + length);
+    this.offset += length;
+    return bytes;
+  }
+  byte() { return this.take(1)[0]; }
+  int() { return this.take(4).readInt32LE(); }
+  long() { return this.take(8).readBigInt64LE(); }
+  double() { return this.take(8).readDoubleLE(); }
+  count(maximum = 100000) {
+    const value = this.int();
+    if (value < 0 || value > maximum) throw new Error('存档列表长度无效');
+    return value;
+  }
+  string() {
+    let length = 0;
+    for (let shift = 0; shift < 35; shift += 7) {
+      const byte = this.byte();
+      length += (byte & 127) * 2 ** shift;
+      if (byte < 128) return this.take(length).toString('utf8');
+    }
+    throw new Error('存档字符串长度无效');
+  }
+  region() { return new SaveCursor(this.take(this.int())); }
+  regions() {
+    const count = this.count();
+    const out = new Map();
+    for (let index = 0; index < count; index++) out.set(this.string(), this.region());
+    return out;
+  }
+}
+
+function readHeader(bytes) {
+  // This build flushes the Brotli stream when saving, before its final marker.
+  const data = brotliDecompressSync(bytes, { finishFlush: constants.BROTLI_OPERATION_FLUSH, maxOutputLength: 32 * 1024 * 1024 });
+  const reader = new SaveCursor(data);
+  if (reader.int() !== 31) throw new Error('此存档版本暂不支持。请先用当前游戏保存一次。');
+  const characterId = reader.take(16).toString('hex');
+  const name = reader.string();
+  reader.string();
+  reader.take(8);
+  for (let i = 0; i < 4; i++) reader.string();
+  const totalLevel = reader.int();
+  const gp = Number(reader.long());
+  const slayerCoins = Number(reader.long());
+  reader.byte();
+  return { name, characterId, totalLevel, currencies: { GoldPieces: gp, SlayerCoins: slayerCoins }, reader };
+}
+
+function levelFor(xp) {
+  if (!Number.isFinite(xp) || xp < 0) throw new Error('存档技能经验无效');
+  let sum = 0;
+  const base = 2 ** (1 / 7);
+  for (let level = 1; level < 99; level++) {
+    sum += Math.floor(level + 300 * base ** level);
+    if (xp < Math.floor(sum / 4)) return level;
+  }
+  return 99;
+}
+
+function readBank(reader) {
+  const stock = Object.create(null);
+  const keep = new Set();
+  reader.int();
+  const tabs = reader.count(100);
+  for (let tab = 0; tab < tabs; tab++) {
+    reader.take(14);
+    const stacks = reader.count();
+    for (let stack = 0; stack < stacks; stack++) {
+      const quantity = reader.int();
+      reader.byte(); // Placeholder
+      const locked = reader.byte();
+      const id = localId(reader.string());
+      if (locked) keep.add(id);
+      if (quantity > 0) stock[id] = (stock[id] ?? 0) + quantity;
+    }
+    reader.string();
+    const tags = reader.count();
+    for (let tag = 0; tag < tags; tag++) {
+      reader.take(2);
+      reader.string();
+    }
+  }
+  const locked = reader.count();
+  for (let i = 0; i < locked; i++) keep.add(localId(reader.string()));
+  return { stock, keep: [...keep] };
+}
+
+function readShopPurchases(reader) {
+  if (!reader) return { purchases: null, shopShowLocked: null };
+  reader.byte(); // Show purchased
+  const shopShowLocked = !!reader.byte();
+  reader.take(9); // Hold to buy, quantity and quantity mode.
+  const count = reader.count();
+  const purchases = Object.create(null);
+  for (let i = 0; i < count; i++) {
+    const quantity = reader.count(Number.MAX_SAFE_INTEGER);
+    purchases[localId(reader.string())] = quantity;
+  }
+  return { purchases, shopShowLocked };
+}
+
+function readShopStatistic(reader, precedingLists, statistic) {
+  if (!reader) return null;
+  try {
+    for (let i = 0; i < precedingLists; i++) reader.regions();
+    const region = reader.regions().get('MelvorBase:' + statistic);
+    if (!region) return null;
+    const values = Object.create(null);
+    const count = region.count();
+    for (let i = 0; i < count; i++) {
+      const value = region.double();
+      values[localId(region.string())] = value;
+    }
+    return values;
+  } catch {
+    return null;
+  }
+}
+
+function readCurrencies(reader, fallback) {
+  if (!reader) return fallback;
+  const currencies = Object.assign(Object.create(null), fallback);
+  const count = reader.count();
+  for (let i = 0; i < count; i++) {
+    const quantity = Number(reader.long());
+    currencies[localId(reader.string())] = quantity;
+  }
+  return currencies;
+}
+
+function readAstrologyNodes(reader) {
+  if (!reader) return [];
+  // Action started flag, tick timer, and two constellation display flags.
+  reader.take(16);
+  const unlocked = [];
+  for (const constellation of reader.regions().values()) {
+    constellation.double(); // Accumulated knowledge.
+    for (let kind = 0; kind < 2; kind++) {
+      const count = constellation.count();
+      for (let i = 0; i < count; i++) unlocked.push(localId(constellation.string()));
+    }
+  }
+  return unlocked;
+}
+
+function readWoodcuttingMastery(components, levels, description) {
+  const reader = components?.get('MasteryGuild');
+  if (!description || !reader) return [];
+  if (reader.byte()) reader.string();
+  const saved = new Map();
+  for (const [key, task] of reader.regions()) {
+    let goal;
+    if (task.byte()) {
+      const id = task.string();
+      const region = task.region();
+      goal = { id, progress: region.double(), complete: !!region.byte() };
+    }
+    saved.set(localId(key), { goal, triggered: !!task.byte() });
+  }
+  const items = readShopStatistic(components.get('Statistics'), 1, 'WoodcuttingItemGained');
+  const pets = components.get('Pets')?.regions();
+  function conditionMet(condition) {
+    if (!condition) return true;
+    const { Type, Data } = condition;
+    if (Type === 'MelvorBase:Level') return (levels[localId(Data.Component.Entity)] ?? 0) >= Data.Level;
+    if (Type === 'MelvorBase:PetUnlocked') return !!pets?.get(Data.Pet)?.buffer[0];
+    if (Type === 'MelvorBase:ItemStatistic' && Data.Statistic === 'MelvorBase:WoodcuttingItemGained') {
+      return (items?.[localId(Data.Item)] ?? 0) >= Data.Value;
+    }
+    return false;
+  }
+  const total = description.tasks.reduce((sum, task) => sum + task.points, 0);
+  let earned = 0;
+  const lookup = new Map(description.tasks.map(task => [task.id, task]));
+  function progressFor(task) {
+    let max = 0;
+    for (let current = task; current; current = lookup.get(current.linked)) {
+      const goal = saved.get(current.id)?.goal;
+      if (goal?.id === current.goal) max = Math.max(max, goal?.progress ?? 0);
+    }
+    return max;
+  }
+  for (const task of description.tasks) {
+    const state = saved.get(task.id);
+    const complete = !task.goal || (state?.goal?.id === task.goal && state.goal.complete) ||
+      progressFor(task) >= task.max;
+    if (complete && conditionMet(task.condition) && (!task.trigger || state?.triggered)) earned += task.points;
+  }
+  return description.ranks.filter(rank => earned >= Math.ceil(total * rank.percent)).map(rank => rank.id);
+}
+
+function readProfile(file, skills, shopSkills = [], woodMastery) {
+  const { reader, ...header } = readHeader(fs.readFileSync(file));
+  const entities = reader.regions();
+  const componentMaps = new Map();
+  const componentsFor = id => {
+    if (!componentMaps.has(id)) componentMaps.set(id, entities.get('MelvorBase:' + id)?.regions());
+    return componentMaps.get(id);
+  };
+  const levels = {};
+  const equipped = {};
+  const bankComponents = componentsFor('Bank');
+  const bank = bankComponents?.get('Inventory');
+  if (!bank) throw new Error('存档里找不到仓库');
+  for (const skill of new Set([...Object.keys(skills), ...shopSkills])) {
+    const components = componentsFor(skill);
+    const xp = components?.get('Experience');
+    if (xp) levels[skill] = levelFor(xp.double());
+    if (!Object.hasOwn(skills, skill)) continue;
+    const slots = components?.get('Toolbelt')?.regions();
+    equipped[skill] = [];
+    for (const slot of slots?.values() ?? []) {
+      slot.int();
+      if (!slot.byte()) continue;
+      const item = localId(slot.string());
+      equipped[skill].push(item);
+    }
+  }
+  if (!levels.Woodcutting) throw new Error('存档里找不到技能经验');
+  const shopReader = componentsFor('Shop')?.get('Shop');
+  const combatStats = componentsFor('Combat')?.get('Statistics');
+  const slayerStats = componentsFor('Slayer')?.get('Statistics');
+  const astrologyNodes = readAstrologyNodes(componentsFor('Astrology')?.get('Action'));
+  const woodRanks = readWoodcuttingMastery(componentsFor('Woodcutting'), levels, woodMastery);
+  return {
+    ...header, levels, equipped, ...readBank(bank), ...readShopPurchases(shopReader),
+    dungeonCompletions: readShopStatistic(combatStats, 4, 'CombatDungeonCompleted'),
+    slayerCompletions: readShopStatistic(slayerStats, 3, 'SlayerMasterTasksCompleted'),
+    astrologyNodes, ranks: { Woodcutting: woodRanks },
+    currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
+    date: fs.statSync(file).mtime.toISOString()
+  };
+}
+
+function findSaves() {
+  const gameSaves = path.join(process.env.APPDATA || '', 'Games By Malcs', 'Melvor Idle 2');
+  const steam = path.join(gameSaves, 'steam');
+  const directories = [path.join(gameSaves, 'saves')];
+  if (fs.existsSync(steam)) {
+    for (const entry of fs.readdirSync(steam, { withFileTypes: true })) {
+      if (entry.isDirectory()) directories.push(path.join(steam, entry.name, 'saves'));
+    }
+  }
+  return directories.filter(directory => fs.existsSync(directory))
+    .flatMap(directory => fs.readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^save_.*\.sav$/i.test(entry.name))
+      .map(entry => path.join(directory, entry.name)))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+}
+
+module.exports = { findSaves, readProfile, readHeader };
