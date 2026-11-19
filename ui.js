@@ -11,6 +11,22 @@ let profile;
 let results = [];
 let showCount = 15;
 let profileRequest = 0;
+let profileReading = false;
+let savesRefreshing = false;
+let autoSaveReadFailed = false;
+let runtimeStatus;
+let reportedBrowserError = false;
+
+function reportBrowserError(event) {
+  if (reportedBrowserError) return;
+  reportedBrowserError = true;
+  const script = event?.filename?.split('/').pop();
+  const source = ['language.js', 'rank.js', 'ui.js', 'shop.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'preferences.js', 'choices.js'].includes(script)
+    ? '/' + script + '/' + (event.lineno || 0) : '';
+  fetch('diagnostics/client-error' + source, { method: 'POST', keepalive: true }).catch(() => {});
+}
+window.addEventListener('error', reportBrowserError);
+window.addEventListener('unhandledrejection', reportBrowserError);
 
 function create(tag, content, className) {
   const element = document.createElement(tag);
@@ -30,12 +46,26 @@ function manualProfile() {
   return { name: '', levels: { Woodcutting: 1 }, stock: {}, currencies: {}, keep: [] };
 }
 
-function configureProfile(data) {
-  profile = { ...data, bonuses: data.bonuses ?? {}, confirmed: [], excluded: [] };
-  renderProfile();
+function configureProfile(data, automatic = false) {
+  const edits = characterEdits(data);
+  profile = { ...data, levels: { ...data.levels, ...edits.levels }, stock: { ...data.stock, ...edits.stock },
+    bonuses: edits.bonuses, confirmed: [...edits.confirmed], excluded: [...edits.excluded] };
+  renderProfile(automatic, automatic);
+  queuePreferences();
 }
 
-function renderProfile(keepCount = false) {
+function renderProfile(keepCount = false, automatic = false) {
+  if (!automatic || !byId('levels').contains(document.activeElement)) {
+    renderSkillSettings();
+  }
+  if (!automatic) byId('editStatus').textContent = '';
+  calculate(keepCount);
+  updateShop(profile);
+  updateExperience(profile, automatic);
+  updateCombat(profile);
+}
+
+function renderSkillSettings() {
   byId('levels').replaceChildren(...Object.keys(catalog.skills).map(id => {
     const row = create('tr');
     const bonus = profile.bonuses[id] ?? {};
@@ -54,10 +84,6 @@ function renderProfile(keepCount = false) {
     row.append(extra ? numberCell(t(extra[1]), id, extra[0], bonus[extra[0]] ?? 0, 0, 10000, t(extra[1])) : create('td', '—'));
     return row;
   }));
-  byId('editStatus').textContent = '';
-  calculate(keepCount);
-  updateShop(profile);
-  updateExperience(profile);
 }
 
 function numberCell(label, skill, key, value, min, max, placeholder) {
@@ -75,10 +101,11 @@ function numberCell(label, skill, key, value, min, max, placeholder) {
       input.value = key === 'level' ? profile.levels[skill] ?? 0 : profile.bonuses[skill]?.[key] ?? 0;
       return;
     }
-    if (key === 'level') profile.levels[skill] = input.valueAsNumber;
+    if (key === 'level') characterEdits().levels[skill] = profile.levels[skill] = input.valueAsNumber;
     else (profile.bonuses[skill] ??= {})[key] = input.valueAsNumber;
     calculate();
     updateExperience(profile);
+    queuePreferences();
   });
   cell.append(input);
   return cell;
@@ -89,8 +116,10 @@ function calculate(keepCount = false) {
   const hours = byId('hours').valueAsNumber;
   const offlineCap = byId('cap').valueAsNumber;
   const sell = byId('sell').checked;
+  byId('sellFishingSpecial').disabled = !sell;
+  const sellSpecial = byId('sellFishingSpecial').checked;
   const metric = byId('metric').value;
-  results = rank(catalog, profile, { hours, offlineCap, sell, metric });
+  results = rank(catalog, profile, { hours, offlineCap, sell, sellSpecial, metric });
   const now = profile.date && new Date(profile.date).toLocaleString(uiLocale(), { hour12: false });
   const source = now ? t('存档 {name}', { name: profile.name }) + ' · ' + now : t('手动设置');
   const countdown = offlineCap && offlineCap < hours ? ['离线最多结算 {time}'] : [];
@@ -125,9 +154,53 @@ function showWinner(winner, sell) {
     winner.limit ? t('约 {time}后用完{item}', { time: formattedHours(winner.activeHours), item: limitName(winner) })
       : t('在本次计时时长内材料充足')
   ].join(' · ');
+  const expanded = byId('winnerSources').querySelector('details')?.open;
+  const details = incomeSources(winner);
+  details.open = !!expanded;
+  byId('winnerSources').replaceChildren(details);
+}
+
+function incomeSources(result) {
+  const details = create('details', undefined, 'income-sources');
+  details.append(create('summary', t('收益来源')));
+  const labels = {
+    product: '动作产物', hit: '敲击掉落', cut: '砍倒掉落', break: '碎裂掉落',
+    common: '普通战利品', rare: '稀有战利品', completion: '完成奖励', fish: '鱼获', junk: '杂物', special: '钓鱼特殊物品'
+  };
+  const list = create('ul');
+  if (result.directSources?.length) {
+    for (const row of result.directSources) {
+      list.append(create('li', t('{source} · {value} GP', {
+        source: gameName(row.target) + ' · ' + t('直接获得金币'), value: decimals.format(row.value)
+      })));
+    }
+  } else if (result.direct) {
+    const label = result.action.kind === 'Fishing' ? '杂物兑换金币' : '直接获得金币';
+    list.append(create('li', t('{source} · {value} GP', { source: t(label), value: decimals.format(result.direct) })));
+  }
+  for (const row of result.drops) {
+    list.append(create('li', t('{source} · {item} × {quantity} · {value}', {
+      source: [gameName(row.target), t(labels[row.source])].filter(Boolean).join(' · '),
+      item: gameName(catalog.items[row.id]) ?? row.id,
+      quantity: decimals.format(row.quantity),
+      value: row.sold ? t('{price} GP／件，共 {total} GP', {
+        price: decimals.format(row.unitPrice), total: decimals.format(row.value)
+      }) : t('保留，不计出售收入')
+    })));
+  }
+  for (const row of result.inputs) {
+    const item = row.currency ? shopCurrencyName(row.id) : gameName(catalog.items[row.id]) ?? row.id;
+    list.append(create('li', t('消耗 · {item} × {quantity} · {value}', {
+      item, quantity: decimals.format(row.quantity),
+      value: row.currency && !row.unitPrice ? t('不折算为 GP') : '−' + decimals.format(row.value) + ' GP'
+    })));
+  }
+  details.append(list);
+  return details;
 }
 
 function renderResults() {
+  const expanded = new Set([...byId('rows').querySelectorAll('details[open]')].map(item => item.dataset.action));
   const skill = byId('filter').value;
   const text = byId('search').value.trim().toLowerCase();
   const matches = results.filter(({ action }) => (!skill || skill === action.skill) &&
@@ -143,7 +216,11 @@ function renderResults() {
     const row = create('tr');
     const plan = create('td', gameName(action));
     const line = [skillName(action.skill, catalog.skills), actionArea(action)].filter(Boolean).join(' · ');
-    plan.append(create('small', line));
+    plan.append(' ', create('small', line, 'action-context'));
+    const details = incomeSources(result);
+    details.dataset.action = action.id;
+    details.open = expanded.has(action.id);
+    plan.append(details);
     row.append(plan, create('td', fullNumber(net), 'number gold'),
       create('td', fullNumber(payout), 'number'), create('td', fullNumber(netPerHour), 'number'),
       create('td', limit ? t('{time} · {item}用完', { time: formattedHours(activeHours), item: limitName(result) }) : '—'));
@@ -151,49 +228,107 @@ function renderResults() {
   }));
 }
 
+function renderRuntimeStatus() {
+  if (!runtimeStatus) return;
+  const { state, version, latest, releases } = runtimeStatus;
+  const labels = {
+    checking: 'v{version} · 正在检查更新',
+    current: 'v{version} · 没有可用更新',
+    available: 'v{version} · 发现新版本 v{latest}',
+    unavailable: 'v{version} · 暂时无法检查更新'
+  };
+  byId('versionStatus').textContent = t(labels[state], { version, latest });
+  byId('releaseLink').hidden = state !== 'available';
+  if (state === 'available') byId('releaseLink').href = releases;
+}
+
+async function loadRuntimeStatus(attempt = 0) {
+  try {
+    runtimeStatus = await get('status');
+    if (runtimeStatus.state === 'checking') {
+      if (attempt < 10) setTimeout(() => loadRuntimeStatus(attempt + 1), 700);
+      else runtimeStatus.state = 'unavailable';
+    }
+    renderRuntimeStatus();
+  } catch {
+    reportBrowserError();
+  }
+}
+
 function limitName(row) {
   const id = row.limit;
   return gameName(catalog.items[id]) ?? shopCurrencyName(id);
 }
 
-async function loadProfile() {
-  const current = ++profileRequest;
+function renderSaveRefreshStatus() {
+  const status = byId('saveRefreshStatus');
+  status.hidden = byId('save').value === '';
+  status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' : '存档每 15 秒刷新');
+}
+
+async function loadProfile(automatic = false) {
   const selected = byId('save').value;
+  if (automatic && (!selected || !profile?.characterId || profileReading || savesRefreshing)) return;
+  const current = ++profileRequest;
+  profileReading = true;
   try {
     const data = selected === '' ? manualProfile() : await get('profile/' + selected);
-    if (current === profileRequest) configureProfile(data);
+    if (current !== profileRequest) return;
+    if (automatic && (data.characterId !== profile.characterId || Date.parse(data.date) <= Date.parse(profile.date))) {
+      autoSaveReadFailed = false;
+      return;
+    }
+    autoSaveReadFailed = false;
+    configureProfile(data, automatic);
   } catch (error) {
     if (current !== profileRequest) return;
+    if (automatic) {
+      autoSaveReadFailed = true;
+      return;
+    }
     byId('save').value = '';
     configureProfile(manualProfile());
     byId('status').textContent = error.message;
     byId('status').classList.add('error');
+  } finally {
+    if (current === profileRequest) {
+      profileReading = false;
+      renderSaveRefreshStatus();
+    }
   }
 }
 
 async function refreshSaves() {
-  const selectedName = byId('save').selectedOptions[0]?.text;
+  if (savesRefreshing) return;
+  savesRefreshing = true;
   const select = byId('save');
+  const selectedId = select.options.length ? (select.value === '' ? 'manual' : select.selectedOptions[0]?.dataset.characterId) :
+    preferences.character;
   try {
     const saves = await get('saves');
-    select.replaceChildren(...saves.map(({ index, name, unknown }) => {
+    select.replaceChildren(...saves.map(({ index, name, unknown, characterId }) => {
       const option = new Option(unknown ? t('存档 {count}（格式未知）', { count: index + 1 }) : name, index);
       if (unknown) option.dataset.unknown = 'true';
+      if (characterId) option.dataset.characterId = characterId;
       return option;
     }), new Option(t('手动设置'), ''));
-    const previous = Array.from(select.options).find(option => option.text === selectedName);
-    if (previous && previous.value !== '') select.value = previous.value;
+    const previous = selectedId && Array.from(select.options).find(option => option.dataset.characterId === selectedId);
+    if (selectedId === 'manual') select.value = '';
+    else if (previous) select.value = previous.value;
     await loadProfile();
   } catch (error) {
     select.replaceChildren(new Option(t('手动设置'), ''));
     configureProfile(manualProfile());
     byId('status').textContent = error.message;
     byId('status').classList.add('error');
+  } finally {
+    savesRefreshing = false;
+    renderSaveRefreshStatus();
   }
 }
 
-function findItem() {
-  const value = byId('item').value.trim();
+function findItem(text = byId('item').value) {
+  const value = text.trim();
   return Object.hasOwn(catalog.items, value) ? value :
     Object.keys(catalog.items).find(id => Object.values(catalog.items[id].names ?? { original: catalog.items[id].name })
       .some(name => name + ' · ' + id === value));
@@ -206,8 +341,7 @@ function editItem() {
     byId('editStatus').textContent = t('请选择有效物品并输入非负整数。');
     return;
   }
-  if (quantity.valueAsNumber) profile.stock[id] = quantity.valueAsNumber;
-  else delete profile.stock[id];
+  characterEdits().stock[id] = profile.stock[id] = quantity.valueAsNumber;
   byId('editStatus').textContent = t(profile.keep.includes(id)
     ? '{item}可用数量设为 {value}，仓库锁定设置仍生效。' : '{item}可用数量设为 {value}。', {
     item: gameName(catalog.items[id]), value: fullNumber(quantity.valueAsNumber)
@@ -215,6 +349,8 @@ function editItem() {
   calculate();
   updateShop(profile);
   updateExperience(profile);
+  updateCombat(profile);
+  queuePreferences();
 }
 
 function setAction(include) {
@@ -228,27 +364,39 @@ function setAction(include) {
   profile.confirmed = profile.confirmed.filter(id => id !== action.id);
   profile.excluded = profile.excluded.filter(id => id !== action.id);
   (include ? profile.confirmed : profile.excluded).push(action.id);
+  characterEdits().confirmed = profile.confirmed;
+  characterEdits().excluded = profile.excluded;
   byId('editStatus').textContent = t(include ? '{name}已确认解锁，仍按等级、库存和偷窃安全条件计算。' : '{name}已排除。', {
     name: gameName(action)
   });
   calculate();
   updateExperience(profile);
+  queuePreferences();
 }
 
 async function init() {
+  preferences = await get('preferences').catch(() => ({}));
+  if (!requestedLanguage && ['zh', 'en'].includes(preferences.language)) uiLanguage = preferences.language;
+  if (!location.hash && ['#combat', '#shop', '#experience', '#ranking-page'].includes(preferences.page)) {
+    history.replaceState(null, '', preferences.page);
+  }
+  initTheme();
   function showPage() {
-    const page = { '#shop': 'shop', '#experience': 'xp' }[location.hash] ?? 'rank';
-    for (const key of ['rank', 'xp', 'shop']) {
+    const page = { '#shop': 'shop', '#experience': 'xp', '#combat': 'combat' }[location.hash] ?? 'rank';
+    for (const key of ['rank', 'xp', 'shop', 'combat']) {
       byId(key + 'Page').hidden = key !== page;
       const link = byId(key + 'Link');
       if (key === page) {
         link.setAttribute('aria-current', 'page');
-        byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验效率', shop: '商店升级' }[page]);
+        byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益 Beta' }[page]);
       } else link.removeAttribute('aria-current');
     }
   }
   function localizeControls() {
     applyLanguage();
+    renderSaveRefreshStatus();
+    renderTheme();
+    renderRuntimeStatus();
     numbers = new Intl.NumberFormat(uiLocale(), { maximumFractionDigits: 0 });
     decimals = new Intl.NumberFormat(uiLocale(), { maximumFractionDigits: 2 });
     showPage();
@@ -256,6 +404,11 @@ async function init() {
     byId('source').textContent = t('Steam 构建 {build} · {count} 项动作', {
       build: t(catalog.build), count: fullNumber(catalog.actions.length)
     });
+    const dataNotes = [];
+    if (catalog.dataSource === 'selected-file') dataNotes.push(t('正在使用手动选择的游戏文件。'));
+    if (catalog.checksumMismatch) dataNotes.push(t('游戏数据校验值不同。收益按可读取的配方估算。'));
+    byId('dataNotice').textContent = dataNotes.join(' ');
+    byId('dataNotice').hidden = !dataNotes.length;
     for (const option of byId('save').options) {
       if (option.value === '') option.text = t('手动设置');
       else if (option.dataset.unknown) option.text = t('存档 {count}（格式未知）', { count: +option.value + 1 });
@@ -267,6 +420,7 @@ async function init() {
     byId('actions').replaceChildren(...catalog.actions.map(action => new Option('', gameName(action) + ' · ' + action.id)));
     localizeExperience();
     localizeShop();
+    localizeCombat();
     if (profile) renderProfile(true);
   }
   byId('language').addEventListener('change', event => {
@@ -275,12 +429,17 @@ async function init() {
     url.searchParams.set('lang', uiLanguage);
     history.replaceState(null, '', url);
     localizeControls();
+    queuePreferences();
   });
-  window.addEventListener('hashchange', showPage);
+  window.addEventListener('hashchange', () => { showPage(); queuePreferences(); });
+  for (const event of ['input', 'change', 'toggle']) document.addEventListener(event, queuePreferences, true);
+  window.addEventListener('pagehide', savePreferences);
   localizeControls();
+  loadRuntimeStatus();
   try {
     catalog = await get('catalog');
     initExperience(catalog);
+    initCombat(catalog);
     const shopLoad = get('shop').then(shop => {
       initShop(shop, catalog.items);
       if (profile) updateShop(profile);
@@ -289,17 +448,21 @@ async function init() {
     });
     const filter = byId('filter');
     for (const [id, name] of Object.entries(catalog.skills)) filter.append(new Option(name, id));
+    restorePreferences();
     localizeControls();
+    for (const input of document.querySelectorAll('[data-suggestions]')) initSuggestions(input);
     byId('options').addEventListener('submit', event => { event.preventDefault(); calculate(); });
     byId('options').addEventListener('change', calculate);
+    byId('options').addEventListener('input', calculate);
     for (const button of document.querySelectorAll('[data-hours]')) {
       button.addEventListener('click', () => { byId('hours').value = button.dataset.hours; calculate(); });
+      button.addEventListener('click', queuePreferences);
     }
     for (const id of ['filter', 'search']) {
       byId(id).addEventListener('input', () => { showCount = 15; renderResults(); });
     }
     byId('more').addEventListener('click', () => { showCount += 30; renderResults(); });
-    byId('save').addEventListener('change', loadProfile);
+    byId('save').addEventListener('change', () => loadProfile());
     byId('reload').addEventListener('click', refreshSaves);
     byId('item').addEventListener('input', () => {
       const id = findItem();
@@ -310,6 +473,8 @@ async function init() {
     byId('excludeAction').addEventListener('click', () => setAction(false));
     await refreshSaves();
     await shopLoad;
+    preferencesReady = true;
+    setInterval(() => loadProfile(true), 15000);
   } catch (error) {
     byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + error.message;
   }

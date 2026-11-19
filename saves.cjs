@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { brotliDecompressSync, constants } = require('node:zlib');
 const { localId } = require('./game-data.cjs');
+const { levelFor } = require('./xp-progress.js');
 
 class SaveCursor {
   constructor(buffer) {
@@ -58,17 +59,6 @@ function readHeader(bytes) {
   const slayerCoins = Number(reader.long());
   reader.byte();
   return { name, characterId, totalLevel, currencies: { GoldPieces: gp, SlayerCoins: slayerCoins }, reader };
-}
-
-function levelFor(xp) {
-  if (!Number.isFinite(xp) || xp < 0) throw new Error('存档技能经验无效');
-  let sum = 0;
-  const base = 2 ** (1 / 7);
-  for (let level = 1; level < 99; level++) {
-    sum += Math.floor(level + 300 * base ** level);
-    if (xp < Math.floor(sum / 4)) return level;
-  }
-  return 99;
 }
 
 function readBank(reader) {
@@ -157,7 +147,7 @@ function readAstrologyNodes(reader) {
   return unlocked;
 }
 
-function readWoodcuttingMastery(components, levels, description) {
+function readMastery(components, levels, description, unlockedPets, astrologyNodes, constellations) {
   const reader = components?.get('MasteryGuild');
   if (!description || !reader) return [];
   if (reader.byte()) reader.string();
@@ -171,15 +161,38 @@ function readWoodcuttingMastery(components, levels, description) {
     }
     saved.set(localId(key), { goal, triggered: !!task.byte() });
   }
-  const items = readShopStatistic(components.get('Statistics'), 1, 'WoodcuttingItemGained');
-  const pets = components.get('Pets')?.regions();
+  const statistics = components.get('Statistics');
+  const regions = new Map();
+  while (statistics && statistics.offset < statistics.buffer.length) {
+    for (const [id, region] of statistics.regions()) regions.set(id, region.buffer);
+  }
+  const minor = astrologyNodes.filter(id => constellations.some(row => row.minorNodes.includes(id)));
+  const major = astrologyNodes.filter(id => !minor.includes(id));
   function conditionMet(condition) {
     if (!condition) return true;
     const { Type, Data } = condition;
     if (Type === 'MelvorBase:Level') return (levels[localId(Data.Component.Entity)] ?? 0) >= Data.Level;
-    if (Type === 'MelvorBase:PetUnlocked') return !!pets?.get(Data.Pet)?.buffer[0];
-    if (Type === 'MelvorBase:ItemStatistic' && Data.Statistic === 'MelvorBase:WoodcuttingItemGained') {
-      return (items?.[localId(Data.Item)] ?? 0) >= Data.Value;
+    if (Type === 'MelvorBase:PetUnlocked') return unlockedPets.includes(localId(Data.Pet));
+    if (Type === 'MelvorBase:AstrologyMinorNodeUnlockCount') {
+      const row = constellations.find(row => row.recipe === localId(Data.Constellation));
+      return (row?.minorNodes.filter(id => minor.includes(id)).length ?? 0) >= Data.Count;
+    }
+    if (Type === 'MelvorBase:AstrologyMajorNodeUnlockCount') {
+      const row = constellations.find(row => row.recipe === localId(Data.Constellation));
+      return (row?.majorNodes.filter(id => major.includes(id)).length ?? 0) >= Data.Count;
+    }
+    if (Data.Statistic === 'MelvorBase:AstrologyTotalMinorNodesUnlocked') return minor.length >= Data.Value;
+    if (Data.Statistic === 'MelvorBase:AstrologyTotalMajorNodesUnlocked') return major.length >= Data.Value;
+    const buffer = regions.get(Data.Statistic);
+    if (buffer && Type === 'MelvorBase:ValueStatistic') return buffer.readDoubleLE() >= Data.Value;
+    const key = Data.Item ?? Data.Event ?? Data.Species ?? Data.Animal ?? Data.Course ?? Data.Master;
+    if (buffer && key) {
+      const stat = new SaveCursor(buffer);
+      const count = stat.count();
+      for (let i = 0; i < count; i++) {
+        const value = stat.double();
+        if (stat.string() === key) return value >= Data.Value;
+      }
     }
     return false;
   }
@@ -203,7 +216,95 @@ function readWoodcuttingMastery(components, levels, description) {
   return description.ranks.filter(rank => earned >= Math.ceil(total * rank.percent)).map(rank => rank.id);
 }
 
-function readProfile(file, skills, shopSkills = [], woodMastery) {
+function readCombatProfile(components, onWarning) {
+  if (!components) return null;
+  const combat = {};
+  for (const [component, key] of [['Equipment', 'equipment'], ['Toolbelt', 'toolbelt']]) {
+    try {
+      const slots = components.get(component)?.regions();
+      if (!slots) continue;
+      combat[key] = [...slots].flatMap(([slot, reader]) => {
+        const quantity = reader.int();
+        if (component === 'Equipment') reader.byte();
+        return reader.byte() ? [{ slot: localId(slot), id: localId(reader.string()), quantity }] : [];
+      });
+    } catch {
+      onWarning(component, 'Combat');
+    }
+  }
+  try {
+    const reader = components.get('MagicSpells');
+    if (reader) {
+      for (const key of ['spell', 'imbuement', 'spellBook', 'activeImbuement']) {
+        if (reader.byte()) combat[key] = localId(reader.string());
+      }
+    }
+  } catch {
+    onWarning('MagicSpells', 'Combat');
+  }
+  try {
+    const food = components.get('Food');
+    if (food?.byte()) combat.food = localId(food.string());
+  } catch {
+    onWarning('Food', 'Combat');
+  }
+  try {
+    const slots = components.get('Prayer')?.regions();
+    if (slots) combat.prayers = [...slots].flatMap(([slot, reader]) => {
+      const selected = reader.byte() ? localId(reader.string()) : null;
+      const activated = reader.byte();
+      const state = activated ? reader.int() : 0;
+      const active = activated ? localId(reader.string()) : null;
+      return selected || active ? [{ slot: localId(slot), selected, active, state }] : [];
+    });
+  } catch {
+    onWarning('Prayer', 'Combat');
+  }
+  try {
+    const player = components.get('Player');
+    if (player) {
+      combat.hitpoints = player.region().int();
+      player.region(); // Ward
+      player.region(); // Turn timer
+      const turn = player.int();
+      player.byte(); // Executing
+      if (turn === 1) {
+        player.string(); // Attack
+        player.take(13 + 4 * 4); // Hit timer and hit/attack counters
+      } else if (turn === 2) {
+        player.string(); // Stun effect
+        player.int();
+      } else if (turn !== 0) throw new Error('Unsupported combat turn');
+      player.take(12); // Last attack damage and current tick
+      const stancesHit = player.count(100);
+      for (let i = 0; i < stancesHit; i++) player.string();
+      player.byte(); // Armour broken
+      const count = player.count(100);
+      combat.stances = Object.fromEntries(Array.from({ length: count }, () => [localId(player.string()), localId(player.string())]));
+    }
+  } catch {
+    onWarning('Player', 'Combat');
+  }
+  const stats = components.get('Statistics');
+  if (stats) try {
+    const totals = new SaveCursor(stats.buffer).regions();
+    const get = id => totals.get('MelvorBase:Combat' + id)?.double();
+    const milliseconds = get('TimeSpentFighting') + get('TimeSpentSpawning');
+    const deaths = get('PlayerDeaths');
+    const kills = readShopStatistic(new SaveCursor(stats.buffer), 3, 'CombatEnemyKilled');
+    if (Number.isFinite(milliseconds) && Number.isFinite(deaths)) {
+      const supplies = readShopStatistic(new SaveCursor(stats.buffer), 1, 'CombatItemUsed');
+      const foodEaten = readShopStatistic(new SaveCursor(stats.buffer), 1, 'CombatFoodItemEaten');
+      combat.totals = { milliseconds, deaths, kills: kills ?? {}, supplies: supplies ?? {}, usageTracked: true,
+        foodEaten: foodEaten ?? {} };
+    }
+  } catch {
+    onWarning('Statistics', 'Combat');
+  }
+  return combat;
+}
+
+function readProfile(file, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}) {
   const { reader, ...header } = readHeader(fs.readFileSync(file));
   const entities = reader.regions();
   const componentMaps = new Map();
@@ -212,15 +313,24 @@ function readProfile(file, skills, shopSkills = [], woodMastery) {
     return componentMaps.get(id);
   };
   const levels = {};
+  const skillXp = {};
   const equipped = {};
+  const unlockedPets = [];
   const bankComponents = componentsFor('Bank');
   const bank = bankComponents?.get('Inventory');
   if (!bank) throw new Error('存档里找不到仓库');
   for (const skill of new Set([...Object.keys(skills), ...shopSkills])) {
     const components = componentsFor(skill);
     const xp = components?.get('Experience');
-    if (xp) levels[skill] = levelFor(xp.double());
+    if (xp) {
+      skillXp[skill] = xp.double();
+      levels[skill] = levelFor(skillXp[skill]);
+    }
     if (!Object.hasOwn(skills, skill)) continue;
+    const pets = components?.get('Pets')?.regions();
+    for (const [id, pet] of pets ?? []) {
+      if (pet.byte()) unlockedPets.push(localId(id));
+    }
     const slots = components?.get('Toolbelt')?.regions();
     equipped[skill] = [];
     for (const slot of slots?.values() ?? []) {
@@ -232,15 +342,37 @@ function readProfile(file, skills, shopSkills = [], woodMastery) {
   }
   if (!levels.Woodcutting) throw new Error('存档里找不到技能经验');
   const shopReader = componentsFor('Shop')?.get('Shop');
-  const combatStats = componentsFor('Combat')?.get('Statistics');
-  const slayerStats = componentsFor('Slayer')?.get('Statistics');
+  const combatComponents = componentsFor('Combat');
+  const combat = readCombatProfile(combatComponents, onWarning);
+  const dungeonCompletions = readShopStatistic(combatComponents?.get('Statistics'), 4, 'CombatDungeonCompleted');
+  const slayer = componentsFor('Slayer');
+  const slayerStats = slayer?.get('Statistics');
+  const slayerCompletions = readShopStatistic(slayerStats && new SaveCursor(slayerStats.buffer), 3, 'SlayerMasterTasksCompleted');
+  let slayerTasks;
+  try {
+    const tasks = slayer?.get('Tasks')?.regions();
+    if (tasks) slayerTasks = [...tasks].flatMap(([master, reader]) => {
+      if (!reader.byte()) return [];
+      const monster = localId(reader.string());
+      const length = reader.count();
+      const progress = reader.count();
+      return [{ master: localId(master), monster, remaining: Math.max(0, length - progress) }];
+    });
+  } catch {
+    onWarning('Tasks', 'Slayer');
+  }
   const astrologyNodes = readAstrologyNodes(componentsFor('Astrology')?.get('Action'));
-  const woodRanks = readWoodcuttingMastery(componentsFor('Woodcutting'), levels, woodMastery);
+  const ranks = {};
+  for (const [skill, description] of Object.entries(mastery)) {
+    try {
+      ranks[skill] = readMastery(componentsFor(skill), levels, description, unlockedPets, astrologyNodes, constellations);
+    } catch {
+      onWarning('mastery', skill);
+    }
+  }
   return {
-    ...header, levels, equipped, ...readBank(bank), ...readShopPurchases(shopReader),
-    dungeonCompletions: readShopStatistic(combatStats, 4, 'CombatDungeonCompleted'),
-    slayerCompletions: readShopStatistic(slayerStats, 3, 'SlayerMasterTasksCompleted'),
-    astrologyNodes, ranks: { Woodcutting: woodRanks },
+    ...header, levels, skillXp, equipped, ...readBank(bank), ...readShopPurchases(shopReader),
+    dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, unlockedPets, ranks, combat,
     currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
     date: fs.statSync(file).mtime.toISOString()
   };

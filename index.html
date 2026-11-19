@@ -18,16 +18,34 @@
         <option value="zh">简体中文</option>
       </select>
     </label>
+    <details class="theme-control" id="themeControl">
+      <summary aria-label="主题配色" title="主题配色"><span aria-hidden="true">◐</span><span>主题配色</span></summary>
+      <div class="theme-popover">
+        <div class="theme-heading"><strong>主题配色</strong><button id="themeReset" type="button">重置配色</button></div>
+        <div id="themePresets" class="theme-presets"></div>
+        <label>色相<input type="range" id="themeHue" min="0" max="359" value="173"></label>
+        <label>亮度<input type="range" id="themeLightness" min="55" max="83" value="68"></label>
+      </div>
+    </details>
   </div>
 </div>
 <div class="workspace">
   <aside class="side-panel">
     <nav class="page-nav" aria-label="工具">
       <a id="rankLink" href="#ranking-page" aria-current="page"><span class="nav-symbol" aria-hidden="true">↗</span>挂机收益</a>
-      <a id="xpLink" href="#experience"><span class="nav-symbol" aria-hidden="true">↑</span>经验效率</a>
+      <a id="combatLink" href="#combat"><span class="nav-symbol" aria-hidden="true">⚔</span>战斗收益 Beta</a>
+      <a id="xpLink" href="#experience"><span class="nav-symbol" aria-hidden="true">↑</span>经验收益</a>
       <a id="shopLink" href="#shop"><span class="nav-symbol" aria-hidden="true">▤</span>商店升级</a>
     </nav>
     <div class="save-controls"><label>角色存档<select id="save"></select></label><button id="reload" type="button">重新读取存档</button></div>
+    <p id="saveRefreshStatus" class="status muted" hidden>存档每 15 秒刷新</p>
+    <div class="runtime-controls">
+      <p id="dataNotice" class="muted" role="status" hidden></p>
+      <p id="settingsNotice" class="muted" role="status" hidden></p>
+      <p id="versionStatus" class="muted" role="status"></p>
+      <a id="releaseLink" target="_blank" rel="noopener noreferrer" hidden>查看新版本</a>
+      <a href="diagnostics/log" download>下载运行日志</a>
+    </div>
   </aside>
   <main>
   <div id="rankPage">
@@ -39,7 +57,7 @@
       <label>离线上限（小时）<input required id="cap" type="number" min="0" max="720" step="any" value="24"></label>
       <label>排行依据<select id="metric"><option value="net">净收益</option><option value="payout">到手金币</option></select></label>
       <label class="check"><input id="sell" type="checkbox" checked>回归后卖产物</label>
-      <button type="submit" class="primary">计算</button>
+      <label class="check"><input id="sellFishingSpecial" type="checkbox" checked>出售钓鱼特殊物品</label>
     </div>
     <p class="status muted" id="status" role="status"></p>
   </form>
@@ -48,6 +66,7 @@
     <p class="winner" id="winnerName"></p>
     <div class="metrics" id="metrics"></div>
     <p class="status muted" id="winnerDetail"></p>
+    <div id="winnerSources"></div>
   </section>
   <section class="panel">
     <div class="inputs"><label>按技能查看<select id="filter"><option value="">全部技能</option></select></label><label>搜索方案<input id="search" type="search" placeholder="动作名或地点"></label></div>
@@ -58,7 +77,7 @@
     </table></div>
     <button id="more" type="button" hidden>显示更多</button>
   </section>
-  <details class="panel">
+  <details id="levelSettings" class="panel">
     <summary>等级与加成</summary>
     <p class="muted">等级 0 表示技能不可用。可手填相对基础值的间隔变化和平均产量变化。偷窃只有成功率为 100% 或失败无伤害时才参与排名。</p>
     <div class="scroll"><table>
@@ -66,47 +85,127 @@
       <tbody id="levels"></tbody>
     </table></div>
   </details>
-  <details class="panel">
+  <details id="inventorySettings" class="panel">
     <summary>库存与解锁条件</summary>
     <p class="muted">可以调整参与计算的库存。产出会按游戏内卖价折算。净收益扣除材料卖价，已锁定的仓库物品保留。</p>
     <div class="inputs">
-      <label>物品（可搜索）<input id="item" list="items" placeholder="输入物品名称或 ID"></label>
+      <label>物品（可搜索）<input id="item" data-suggestions="items" placeholder="输入物品名称或 ID" autocomplete="off"></label>
       <datalist id="items"></datalist>
       <label>可用数量<input id="quantity" type="number" min="0" step="1" value="0"></label>
       <button id="setItem" type="button">设定库存</button>
-      <label>游戏里已确认可做的动作<input id="action" list="actions" placeholder="输入动作名或 ID"></label>
+      <label>游戏里已确认可做的动作<input id="action" data-suggestions="actions" placeholder="输入动作名或 ID" autocomplete="off"></label>
       <datalist id="actions"></datalist>
       <button id="confirmAction" type="button">确认解锁</button>
       <button id="excludeAction" type="button">排除动作</button>
     </div>
     <p id="editStatus" role="status"></p>
   </details>
-  <details class="panel">
+  <details id="calculationScope" class="panel">
     <summary>计算范围</summary>
-    <p class="muted">每次挂机只运行一项动作，以存档快照和基础机制计算期望值。离线上限 0 表示在线挂机。当前版本未完整模拟装备、专精、药水与天气、银行格数耗尽、自动停手、挂机升级或被动技能。战斗、宝箱、劫案、草药学、农业和狩猎未纳入。结果适合用来对比方案，实际结算会有波动。</p>
+    <p class="muted">每次比较一项挂机行动，根据存档快照和支持的修正值计算期望收益。离线上限 0 表示在线挂机。药水次数、限时事件、部分条件加成和挂机期间升级暂未纳入。金币排行覆盖 11 项技能，经验排行另含草药学和星象学。实际结算会有波动。</p>
   </details>
   </div>
-  <div id="xpPage" hidden>
-    <h1>经验效率</h1>
-    <section class="panel" aria-label="经验计算设置">
-      <div class="inputs">
-        <label>比较时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
-        <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
-        <label>技能<select id="xpSkill"></select></label>
-        <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
-      </div>
-      <p class="status muted">按角色等级、库存和可识别的加成计算。未自动识别的修正可以填入额外加成。</p>
+  <div id="combatPage" hidden>
+    <h1>战斗收益 Beta</h1>
+    <p id="combatUnavailable" class="panel muted" hidden>本机游戏数据没有可用于估算的普通怪物。</p>
+    <form id="combatOptions">
+      <section class="panel">
+        <div class="inputs">
+          <label>战斗目标<select id="combatTarget" required></select></label>
+          <label id="combatAreaField" hidden>战斗地点<select id="combatAreaChoice"></select></label>
+          <label>击杀速度来源<select id="combatRateMode"><option value="observed">从存档计算</option><option value="manual">手动输入</option></select></label>
+          <label id="combatManualRate" hidden>实际击杀数／小时<input id="combatKillRate" type="number" required min="0" max="100000" step="any" placeholder="填入实际击杀速度" disabled></label>
+          <label>挂机时长（小时）<input id="combatHours" type="number" required min=".01" max="720" step="any" value="1"></label>
+          <label>离线上限（小时）<input id="combatCap" type="number" required min="0" max="720" step="any" value="24"></label>
+          <label class="check"><input id="combatCollect" type="checkbox" checked>收取战利品</label>
+          <label class="check"><input id="combatSell" type="checkbox" checked>出售战利品</label>
+        </div>
+        <p class="status muted"><span id="combatArea"></span></p>
+        <p id="combatRateStatus" class="status muted" role="status"></p>
+        <p class="muted">Beta 使用普通怪物的基础金币和掉落。地牢、屠杀任务、死亡和战斗加成暂未纳入收益估算。</p>
+      </section>
+      <details id="combatLoadout" class="panel" hidden>
+        <summary>存档中的战斗配装</summary>
+        <ul id="combatLoadoutRows"></ul>
+      </details>
+      <details id="combatAttributes" class="panel" open hidden>
+        <summary>战斗属性</summary>
+        <p class="status muted">根据所选目标和存档配装估算。临时状态、部分条件效果和特殊攻击可能改变游戏内面板。</p>
+        <div class="combat-attributes" id="combatAttributeGroups"></div>
+      </details>
+      <section class="panel">
+        <h2>补给与成本</h2>
+        <p class="muted">从存档带入当前补给并估算消耗。可手动覆盖消耗量和库存，清空输入即可恢复自动值。</p>
+        <div class="scroll" id="combatSuppliesTable" hidden>
+          <table>
+            <thead><tr><th>物品</th><th>每小时消耗量</th><th>可用库存</th><th></th></tr></thead>
+            <tbody id="combatSupplies"></tbody>
+          </table>
+        </div>
+        <button id="combatAddSupply" type="button">添加补给</button>
+        <button id="combatRestoreSupplies" type="button">恢复配装补给</button>
+        <dialog id="combatSupplyPicker" class="supply-picker" aria-labelledby="combatPickerTitle">
+          <div class="theme-heading"><strong id="combatPickerTitle">选择战斗补给</strong><button id="combatPickerClose" type="button">关闭</button></div>
+          <input id="combatPickerSearch" type="search" placeholder="搜索补给名称或 ID" aria-label="搜索补给名称或 ID">
+          <p class="muted supply-picker-note">每次使用一种食物和一种弹药。同类选择会替换现有项。</p>
+          <div id="combatPickerResults" class="supply-picker-results"></div>
+        </dialog>
+      </section>
+    </form>
+    <section class="panel" id="combatResult" hidden>
+      <h2>预计战斗收益</h2>
+      <div class="metrics" id="combatMetrics"></div>
+      <p id="combatStatus" class="status muted" role="status"></p>
+      <details id="combatBreakdown" open class="income-sources">
+        <summary>收益来源</summary>
+        <p id="combatGold" class="muted"></p>
+        <div id="combatDropsTable" class="scroll">
+          <table>
+            <thead><tr><th>战利品</th><th class="number">预计收取</th><th class="number">单价（GP）</th><th>出售</th><th class="number">出售收入（GP）</th></tr></thead>
+            <tbody id="combatDrops"></tbody>
+          </table>
+        </div>
+        <ul id="combatCosts"></ul>
+      </details>
     </section>
+    <section id="combatXp" class="panel" hidden>
+      <div class="xp-section-heading">
+        <h2>战斗经验收益</h2>
+        <button id="combatResetGoals" type="button" title="将当前角色的所有战斗目标恢复为下一级">重置目标等级</button>
+      </div>
+      <p id="combatXpStatus" class="status muted"></p>
+      <div id="combatXpRows" class="combat-xp-grid"></div>
+    </section>
+  </div>
+  <div id="xpPage" hidden>
+    <h1>经验收益</h1>
     <section class="panel" aria-labelledby="xpBestHeading">
-      <h2 id="xpBestHeading">各技能首选</h2>
+      <div class="xp-section-heading">
+        <h2 id="xpBestHeading">各技能首选</h2>
+        <div class="inputs">
+          <label>挂机时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
+          <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+        </div>
+      </div>
       <p id="xpStatus" class="status muted" role="status"></p>
       <div id="xpBest" class="xp-grid"></div>
     </section>
     <section class="panel" aria-labelledby="xpDetailHeading">
       <h2 id="xpDetailHeading">行动排行</h2>
+      <div class="xp-goal">
+        <div class="inputs">
+          <label class="xp-action-choice">估算行动<select id="xpActionChoice"></select></label>
+          <label>目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
+          <label class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
+          <button id="xpNextLevel" type="button">下一级</button>
+          <button id="xpResetGoals" type="button" title="将当前角色的所有非战斗目标恢复为下一级">重置目标等级</button>
+          <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
+        </div>
+        <div id="xpGoalOverview"></div>
+      </div>
       <p id="xpEmpty" class="muted"></p>
       <div id="xpTable" class="scroll" hidden><table>
-        <thead><tr><th>行动</th><th class="number">预计 XP</th><th class="number">XP / 小时</th><th>数据和限制</th></tr></thead>
+        <thead><tr><th>行动</th><th class="number">预计 XP</th><th class="number">XP / 小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
         <tbody id="xpRows"></tbody>
       </table></div>
     </section>
@@ -152,8 +251,13 @@
 </div>
 <script src="language.js"></script>
 <script src="rank.js"></script>
+<script src="xp-progress.js"></script>
 <script src="experience.js"></script>
+<script src="combat-model.js"></script>
+<script src="combat.js"></script>
 <script src="shop.js"></script>
+<script src="preferences.js"></script>
+<script src="choices.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

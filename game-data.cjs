@@ -31,7 +31,7 @@ function findSteamGame() {
   throw new Error('未找到 Melvor Idle 2。请将含 Melvor2.exe 的游戏文件夹拖到 Start-GP-Calculator.cmd 上。');
 }
 
-function readPackage(executable) {
+function readPackage(executable, { onChecksumMismatch } = {}) {
   const handle = fs.openSync(executable, 'r');
   const size = fs.fstatSync(handle).size;
   function read(offset, length) {
@@ -87,8 +87,10 @@ function readPackage(executable) {
             directory.readUInt32LE(cursor + 32) !== 0) throw new Error('物品与配方数据区无效');
         const bytes = read(offset, length);
         const digest = crypto.createHash('md5').update(bytes).digest();
-        if (!digest.equals(directory.subarray(cursor + 16, cursor + 32))) throw new Error('物品与配方数据校验失败');
-        return JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+        const matched = digest.equals(directory.subarray(cursor + 16, cursor + 32));
+        if (!matched && !onChecksumMismatch) throw new Error('物品与配方数据校验失败');
+        if (!matched) onChecksumMismatch();
+        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
       }
       cursor += 36;
     }

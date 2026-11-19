@@ -111,7 +111,7 @@ function localizeShop() {
 
 function initShop(shop, items) {
   const categoryNames = new Map(shop.groups.map(group => [group.id, gameName(group)]));
-  const selected = new Set(categoryNames.keys());
+  const selected = new Set(preferences.shopSelected?.filter(id => categoryNames.has(id)) ?? categoryNames.keys());
   shopView = { shop, items, categoryNames, selected, character: null };
   const categoryControls = new Map();
   const selectAll = byId('shopSelectAll');
@@ -144,7 +144,7 @@ function initShop(shop, items) {
     if (checked) for (const id of categoryNames.keys()) selected.add(id);
     refreshSelection();
   });
-  byId('shopClear').addEventListener('click', () => { selected.clear(); refreshSelection(); });
+  byId('shopClear').addEventListener('click', () => { selected.clear(); refreshSelection(); queuePreferences(); });
   byId('shopSearch').addEventListener('input', renderShop);
   byId('shopShortages').addEventListener('change', renderShop);
   byId('shopScope').addEventListener('change', renderShop);

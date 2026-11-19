@@ -20,16 +20,16 @@ function originalPackage(game, build) {
 
 const hasChinese = text => /\p{Script=Han}/u.test(text ?? '');
 
-function addGameLabels(game, build, catalog, shop) {
+function addGameLabels(game, build, catalog, shop, useAlternate = true) {
   const chinese = hasChinese(catalog.items.NormalLog?.name);
   let alternate;
-  if (chinese) {
+  if (useAlternate && chinese) {
     try {
       alternate = originalPackage(game, build);
     } catch {
       // The installed package is enough to run without backup access.
     }
-  } else {
+  } else if (useAlternate) {
     const translated = path.join(game, 'Melvor2_简体中文', 'prototype', 'Data', 'Packages', 'MelvorBase.json');
     try {
       if (fs.existsSync(translated)) alternate = JSON.parse(fs.readFileSync(translated, 'utf8').replace(/^\uFEFF/, ''));
@@ -65,6 +65,24 @@ function addGameLabels(game, build, catalog, shop) {
     const other = otherActions.get(action.id);
     action.names = label(action.name, other?.name, action.recipe);
     if (action.area) action.areaNames = label(action.area, other?.area, action.location ?? action.category);
+  }
+  const otherEnemies = new Map((alternatives.catalog?.combatTargets ?? []).map(enemy => [enemy.id, enemy.name]));
+  const otherAreas = new Map((alternatives.catalog?.combatTargets ?? []).flatMap(enemy =>
+    enemy.areas.map(area => [area.id, area.name])
+  ));
+  for (const enemy of catalog.combatTargets) {
+    enemy.names = label(enemy.name, otherEnemies.get(enemy.id), enemy.id);
+    for (const area of enemy.areas) area.names = label(area.name, otherAreas.get(area.id), area.id);
+  }
+  for (const key of ['combatSlots', 'combatSpells']) {
+    for (const [id, record] of Object.entries(catalog[key])) {
+      record.names = label(record.name, alternatives.catalog?.[key]?.[id]?.name, id);
+    }
+  }
+  for (const key of ['weaponTypes', 'stances', 'styles', 'attributes', 'names', 'prayers']) {
+    for (const [id, record] of Object.entries(catalog.combatModel[key])) {
+      record.names = label(record.name, alternatives.catalog?.combatModel?.[key]?.[id]?.name, id);
+    }
   }
   const otherGroups = new Map((alternatives.shop?.groups ?? []).map(group => [group.id, group.name]));
   for (const group of shop.groups) group.names = label(group.name, otherGroups.get(group.id), group.id);

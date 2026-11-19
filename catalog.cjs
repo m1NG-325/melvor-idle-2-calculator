@@ -12,16 +12,68 @@ const XP_SKILLS = {
   Hitpoints: '生命值', Ranged: '远程', Magic: '魔法', Prayer: '祝祭', Slayer: '屠杀者'
 };
 
-function persistentModifiers(bonuses, components) {
-  return (bonuses?.Component ?? []).filter(row => !row.Condition && !row.Scaling && !row.FromContext &&
-    components.includes(row.LocalContext?.Component?.Component) &&
+function makeCombatTargets(data, items) {
+  const registered = new Set((data.EntityConfig['MelvorBase:Combat']?.Areas ?? []).map(entry => localId(entry.Id)));
+  const areasByEnemy = new Map();
+  for (const area of data.Objects.CombatArea ?? []) {
+    if (!registered.has(area.Id)) continue;
+    for (const enemy of area.Enemies ?? []) {
+      if (typeof enemy !== 'string') continue;
+      const id = localId(enemy);
+      if (!areasByEnemy.has(id)) areasByEnemy.set(id, []);
+      areasByEnemy.get(id).push({ id: area.Id, name: area.DisplayName, darkness: area.Darkness ?? 0, category: localId(area.Category) });
+    }
+  }
+  const average = entry => (entry.MinQuantity + entry.MaxQuantity) / 2;
+  return (data.Objects.Enemy ?? []).filter(enemy => areasByEnemy.has(enemy.Id)).map(enemy => {
+    const quantities = new Map();
+    function add(entry, probability) {
+      const id = localId(entry.Item);
+      const quantity = average(entry) * probability;
+      if (Object.hasOwn(items, id) && Number.isFinite(quantity) && quantity > 0) {
+        quantities.set(id, (quantities.get(id) ?? 0) + quantity);
+      }
+    }
+    for (const entry of enemy.Drops?.FixedItems ?? []) add(entry, 1);
+    for (const { Chance, Table } of enemy.Drops?.ItemTables ?? []) {
+      if (!Array.isArray(Table)) continue;
+      const weight = Table.reduce((sum, entry) => sum + entry.Weight, 0);
+      if (weight > 0) for (const entry of Table) add(entry, Chance * entry.Weight / weight);
+    }
+    const gold = (enemy.Drops?.FixedCurrencies ?? []).reduce((sum, entry) =>
+      entry.Currency === GOLD ? sum + average(entry) : sum, 0);
+    return { id: enemy.Id, name: enemy.DisplayName, areas: areasByEnemy.get(enemy.Id), gold,
+      levels: Object.fromEntries((enemy.Levels ?? []).map(({ Key, Value }) => [localId(Key), Value])),
+      stats: enemy.Stats, element: localId(enemy.Element), damageType: localId(enemy.DamageType),
+      stances: (enemy.Stances ?? []).map(({ Stance, Weight }) => [localId(Stance), Weight]),
+      drops: Array.from(quantities, ([id, perKill]) => ({ id, perKill })) };
+  });
+}
+
+function persistentModifiers(bonuses) {
+  const globalStats = {
+    GlobalFlatXpGained: 'FlatXPGained',
+    GlobalPercentXpGained: 'PercentXPGained',
+    GlobalFlatActionInterval: 'FlatInterval',
+    GlobalPercentActionInterval: 'PercentInterval'
+  };
+  const global = (bonuses?.Global ?? []).filter(row => globalStats[row.StatGroup] && !row.Condition && !row.Scaling)
+    .map(row => ({ stat: globalStats[row.StatGroup], value: row.Value }));
+  const local = (bonuses?.Component ?? []).filter(row => !row.Condition && !row.FromContext &&
+    (!row.Scaling || row.Scaling.Type === 'MelvorBase:Level') &&
+    ['Action', 'Experience'].includes(row.LocalContext?.Component?.Component) &&
     Object.keys(row.LocalContext).every(key =>
-      row.LocalContext[key] == null || ['Component', 'Recipe', 'Location', 'Category', 'Subcategory'].includes(key)
+      row.LocalContext[key] == null ||
+        ['Component', 'Recipe', 'Location', 'Category', 'Subcategory', 'Constellation', 'RecipeType', 'Item', 'Event', 'Currency'].includes(key)
     )).map(row => ({
     stat: row.Stat.Name, value: row.Value, skill: localId(row.LocalContext.Component.Entity),
     recipe: localId(row.LocalContext.Recipe), category: localId(row.LocalContext.Category),
-    subcategory: localId(row.LocalContext.Subcategory), location: localId(row.LocalContext.Location)
+    subcategory: localId(row.LocalContext.Subcategory), location: localId(row.LocalContext.Location),
+    constellation: localId(row.LocalContext.Constellation), recipeType: localId(row.LocalContext.RecipeType),
+    item: localId(row.LocalContext.Item ?? row.LocalContext.Currency), event: localId(row.LocalContext.Event),
+    scalesWithLevel: localId(row.Scaling?.Data?.Experience?.Entity)
   }));
+  return [...global, ...local];
 }
 
 function makeCatalog(data) {
@@ -29,12 +81,10 @@ function makeCatalog(data) {
   const items = Object.fromEntries(objects.Item.map(item => {
     const tool = item.Capabilities?.['MelvorBase:Toolbelt'];
     const permanent = tool && !tool.ConsumesOn && !tool.CanEquipQuantity;
-    const modifiers = permanent ? persistentModifiers(tool.Bonuses, ['Action']) : [];
-    const xpModifiers = permanent ? persistentModifiers(tool.Bonuses, ['Experience']) : [];
+    const modifiers = permanent ? persistentModifiers(tool.Bonuses) : [];
     return [item.Id, {
       name: item.DisplayName.Singular, price: item.SellsFor?.Currency === GOLD ? item.SellsFor.Quantity : 0,
-      ...(modifiers.length ? { modifiers } : {}),
-      ...(xpModifiers.length ? { xpModifiers } : {})
+      ...(modifiers.length ? { modifiers } : {})
     }];
   }));
   const categories = new Map(['RecipeCategory', 'WoodcuttingRecipeCategory', 'MiningRecipeCategory', 'FishingLocation', 'ThievingLocation']
@@ -73,7 +123,8 @@ function makeCatalog(data) {
       const product = ({ Item, Quantity, Chance }) => [localId(Item), Quantity, Chance ?? 1];
       const weighted = (table = []) => {
         const total = table.reduce((sum, row) => sum + row.Weight, 0);
-        return table.map(row => [localId(row.Item), (row.MinQuantity + row.MaxQuantity) / 2, row.Weight / total]);
+        return table.map(row => [localId(row.Item), (row.MinQuantity + row.MaxQuantity) / 2, row.Weight / total,
+          row.MinQuantity, row.MaxQuantity]);
       };
       action.costs = (recipe.Ingredients?.Items ?? []).map(row => [localId(row.Item), row.Quantity]);
       action.currencyCosts = (recipe.Ingredients?.Currencies ?? []).map(row => [localId(row.Currency), row.Quantity]);
@@ -106,6 +157,13 @@ function makeCatalog(data) {
         case 'Cooking':
           action.difficulty = recipe.Difficulty;
           break;
+        case 'Astrology':
+          action.constellation = recipe.Id;
+          action.knowledge = recipe.BaseKnowledge;
+          action.minorNodes = recipe.MinorNodes.map(localId);
+          action.majorNodes = recipe.MajorNodes.map(localId);
+          action.minorNodeModifiers = persistentModifiers(recipe.PerMinorNodeBonuses);
+          break;
         case 'Herblore':
           action.phases = ['Preparing', 'Heating', 'Stirring', 'Bottling'].map(phase => ({
             phase, seconds: recipe['Base' + phase + 'Interval'] / 1000
@@ -116,12 +174,17 @@ function makeCatalog(data) {
           if (recipe.Stages !== 1 || !['NPC', 'Stall'].includes(localId(recipe.RecipeType))) continue;
           action.perception = recipe.Perception;
           action.damage = recipe.Damage;
+          action.recipeType = localId(recipe.RecipeType);
           action.cash = recipe.CurrencyReward?.Currency === GOLD
-            ? (recipe.CurrencyReward.MinQuantity + recipe.CurrencyReward.MaxQuantity) / 2 * recipe.BaseCurrencyLootChance : 0;
-          action.rewards = [
-            ...weighted(recipe.CommonDropTable).map(([id, qty, chance]) => [id, qty, chance * recipe.BaseCommonLootChance]),
-            ...weighted(recipe.RareDropTable).map(([id, qty, chance]) => [id, qty, chance * recipe.BaseRareLootChance])
-          ];
+            ? (recipe.CurrencyReward.MinQuantity + recipe.CurrencyReward.MaxQuantity) / 2 : 0;
+          action.cashRange = recipe.CurrencyReward?.Currency === GOLD
+            ? [recipe.CurrencyReward.MinQuantity, recipe.CurrencyReward.MaxQuantity] : null;
+          action.cashChance = recipe.BaseCurrencyLootChance;
+          action.commonChance = recipe.BaseCommonLootChance;
+          action.rareChance = recipe.BaseRareLootChance;
+          action.common = weighted(recipe.CommonDropTable);
+          action.rare = weighted(recipe.RareDropTable);
+          action.completion = weighted(recipe.CompletionDropTable ?? []);
           break;
       }
       if (Number.isFinite(action.seconds) && action.seconds > 0) {
@@ -131,35 +194,109 @@ function makeCatalog(data) {
     }
   }
   const shopModifiers = Object.fromEntries(objects.ShopPurchase.flatMap(purchase => {
-    const modifiers = persistentModifiers(purchase.Provides?.Bonuses, ['Action', 'Experience']);
+    const modifiers = persistentModifiers(purchase.Provides?.Bonuses);
     return modifiers.length ? [[purchase.Id, modifiers]] : [];
   }));
   const astrologyModifiers = Object.fromEntries(objects.AstrologyNode.map(node => [
-    node.Id, persistentModifiers(node.Bonuses, ['Action', 'Experience'])
+    node.Id, persistentModifiers(node.Bonuses)
   ]));
-  const guild = data.EntityConfig['MelvorBase:Woodcutting'];
-  const registered = entries => new Set(entries.map(({ Id }) => localId(Id)));
-  const taskIds = registered(guild.MasteryGuildTasks);
-  const rankIds = registered(guild.MasteryGuildRanks);
-  const bonusIds = registered(guild.MasteryGuildBonuses);
+  const petModifiers = Object.fromEntries(objects.Pet.map(pet => [pet.Id, persistentModifiers(pet.Bonuses)]));
+  const equipmentSets = objects.EquipmentSetBonus.flatMap(set => {
+    const bonuses = set.Bonuses.map(bonus => ({
+      count: bonus.ItemCount, modifiers: persistentModifiers(bonus.Modifiers)
+    })).filter(bonus => bonus.modifiers.length);
+    return bonuses.length ? [{ items: set.Items.map(localId), bonuses }] : [];
+  });
+  const registered = (entries = []) => new Set(entries.map(({ Id }) => localId(Id)));
   const points = new Map(objects.MasteryGuildCategory.map(row => [row.Id, row.BasePoints]));
-  const woodMastery = {
-    tasks: objects.MasteryGuildTask.filter(task => taskIds.has(task.Id)).map(task => ({
-      id: task.Id, points: points.get(localId(task.Category)),
-      goal: task.Goal?.Data.Id, max: task.Goal?.Data.MaxProgress, linked: localId(task.LinkedTask),
-      condition: task.ConditionGoal, trigger: !!task.TriggerGoal
+  function masteryDescription(guild) {
+    const taskIds = registered(guild.MasteryGuildTasks);
+    const rankIds = registered(guild.MasteryGuildRanks);
+    const bonusIds = registered(guild.MasteryGuildBonuses);
+    return {
+      tasks: objects.MasteryGuildTask.filter(task => taskIds.has(task.Id)).map(task => ({
+        id: task.Id, points: points.get(localId(task.Category)) ?? 0,
+        goal: task.Goal?.Data.Id, max: task.Goal?.Data.MaxProgress, linked: localId(task.LinkedTask),
+        condition: task.ConditionGoal, trigger: !!task.TriggerGoal
+      })),
+      ranks: objects.MasteryGuildRank.filter(rank => rankIds.has(rank.Id))
+        .sort((a, b) => a.PointPercentRequired - b.PointPercentRequired)
+        .map(rank => ({ id: rank.Id, percent: rank.PointPercentRequired })),
+      bonuses: objects.MasteryGuildBonus.filter(bonus => bonusIds.has(bonus.Id) &&
+        bonus.Requirements.length === 1 && bonus.Requirements[0].Type === 'MelvorBase:MasteryGuildRank')
+        .map(bonus => ({
+          rank: localId(bonus.Requirements[0].Data.Rank),
+          modifiers: persistentModifiers(bonus.Rewards.Bonuses)
+        }))
+    };
+  }
+  const mastery = Object.fromEntries(Object.keys(XP_SKILLS).flatMap(skill => {
+    const guild = data.EntityConfig['MelvorBase:' + skill];
+    return guild?.MasteryGuildTasks ? [[skill, masteryDescription(guild)]] : [];
+  }));
+  const combatSlots = Object.fromEntries([...(objects.EquipmentSlot ?? []), ...(objects.ToolbeltSlot ?? []), ...(objects.PrayerSlot ?? [])]
+    .map(slot => [slot.Id, { name: slot.DisplayName }]));
+  const combatSpells = Object.fromEntries([...(objects.MagicSpell ?? []), ...(objects.Imbuement ?? [])].map(spell =>
+    [spell.Id, { name: spell.DisplayName, stats: spell.Stats, element: localId(spell.Element), runes: (spell.RuneCosts ?? []).map(({ Item, Quantity }) =>
+      ({ id: localId(Item), quantity: Quantity })) }]
+  ));
+  const runeIds = new Set(Object.values(combatSpells).flatMap(spell => spell.runes.map(row => row.id)));
+  const toolSlots = registered(data.EntityConfig['MelvorBase:Combat']?.ToolbeltSlots);
+  const toolTypes = new Set((objects.ToolbeltSlot ?? []).filter(slot => toolSlots.has(slot.Id)).map(slot => slot.FitsType));
+  const combatSupplies = Object.fromEntries(objects.Item.flatMap(item => {
+    const capabilities = item.Capabilities ?? {};
+    const tool = capabilities['MelvorBase:Toolbelt'];
+    const equipment = capabilities['MelvorBase:Equipment'];
+    const food = capabilities['MelvorBase:Food'];
+    const conditions = equipment?.ConsumesOn ?? (toolTypes.has(tool?.FitsInSlot) ? tool.ConsumesOn : null);
+    const rule = food ? { kind: 'food', healing: food.BaseHealing,
+      bonuses: food.Bonuses?.Component?.Component === 'Food' ? food.Bonuses.Modifiers?.Component ?? [] : [] } :
+      runeIds.has(item.Id) ? { kind: 'rune' } :
+      equipment?.Type === 'MelvorBase:Ammo' ? { kind: 'ammo', ammoType: equipment.AmmoType } :
+      conditions?.length ? { kind: 'charged', events: conditions } : null;
+    return rule ? [[item.Id, rule]] : [];
+  }));
+  const named = (types, select = () => ({})) => Object.fromEntries(types.flatMap(type =>
+    (objects[type] ?? []).map(row => [row.Id, { name: row.DisplayName, ...select(row) }])
+  ));
+  const combatModel = {
+    items: Object.fromEntries(objects.Item.flatMap(item => {
+      const capabilities = item.Capabilities ?? {};
+      const equipment = capabilities['MelvorBase:Equipment'];
+      const tool = capabilities['MelvorBase:Toolbelt'];
+      if (!equipment && !toolTypes.has(tool?.FitsInSlot)) return [];
+      return [[item.Id, { stats: equipment?.Stats, weapon: capabilities['MelvorBase:Weapon'],
+        ammoType: equipment?.AmmoType, bonuses: equipment?.Bonuses?.Component ?? tool?.Bonuses?.Component,
+        xpModifiers: persistentModifiers(equipment?.Bonuses ?? tool?.Bonuses) }]];
     })),
-    ranks: objects.MasteryGuildRank.filter(rank => rankIds.has(rank.Id))
-      .sort((a, b) => a.PointPercentRequired - b.PointPercentRequired)
-      .map(rank => ({ id: rank.Id, percent: rank.PointPercentRequired })),
-    bonuses: objects.MasteryGuildBonus.filter(bonus => bonusIds.has(bonus.Id) &&
-      bonus.Requirements.length === 1 && bonus.Requirements[0].Type === 'MelvorBase:MasteryGuildRank')
-      .map(bonus => ({
-        rank: localId(bonus.Requirements[0].Data.Rank),
-        modifiers: persistentModifiers(bonus.Rewards.Bonuses, ['Action', 'Experience'])
-      }))
+    weaponTypes: named(['WeaponType'], row => ({ stances: row.Stances.map(localId) })),
+    stances: named(['AttackStance'], row => ({ style: localId(row.CombatStyle), accuracy: localId(row.AccuracyStat),
+      evasion: localId(row.EvasionStat), bonuses: row.Bonuses?.Component, xpModifiers: persistentModifiers(row.Bonuses),
+      xpPerDamage: Object.fromEntries((row.ExperienceGain ?? []).map(gain => [localId(gain.Component.Entity), gain.ExperiencePerDamage])) })),
+    styles: named(['CombatStyle'], row => ({ ...row })),
+    attributes: named(['CombatStat'], row => ({ percent: row.IsPercent, category: localId(row.Category) })),
+    names: named(['Element', 'DamageType']),
+    prayers: named(['Prayer'], row => ({ bonuses: row.Bonuses?.Component, cost: row.Cost, event: row.ConsumesOn,
+      xpModifiers: persistentModifiers(row.Bonuses) })),
+    triangle: (objects.CombatTriangleBonus ?? []).map(row => ({ player: localId(row.PlayerStyle),
+      enemy: localId(row.EnemyStyle), bonuses: row.Bonuses?.Component ?? [] })),
+    foodUpgrades: Object.fromEntries(objects.ShopPurchase.flatMap(row => {
+      const global = (row.Provides?.Bonuses?.Global ?? []).filter(bonus => /^GlobalFlatAutoEat/.test(bonus.StatGroup));
+      return global.length ? [[row.Id, global]] : [];
+    })),
+    savedBonuses: Object.fromEntries([
+      ['ShopPurchase', row => row.Provides?.Bonuses?.Component], ['AstrologyNode', row => row.Bonuses?.Component],
+      ['Pet', row => row.Bonuses?.Component]
+    ].map(([type, bonuses]) => [type, Object.fromEntries((objects[type] ?? []).flatMap(row => {
+      const applicable = (bonuses(row) ?? []).filter(bonus => bonus.LocalContext?.Component?.Entity === 'MelvorBase:Combat');
+      return applicable.length ? [[row.Id, applicable]] : [];
+    }))])),
+    sets: objects.EquipmentSetBonus.map(set => ({ items: set.Items.map(localId), bonuses: set.Bonuses.map(bonus =>
+      ({ count: bonus.ItemCount, rows: bonus.Modifiers?.Component, xpModifiers: persistentModifiers(bonus.Modifiers) })) }))
   };
-  return { items, actions, skills: SKILLS, xpActions, xpSkills: XP_SKILLS, shopModifiers, astrologyModifiers, woodMastery };
+  return { items, actions, combatTargets: makeCombatTargets(data, items), combatSlots, combatSpells, combatSupplies, combatModel,
+    skills: SKILLS, xpActions, xpSkills: XP_SKILLS, shopModifiers, astrologyModifiers,
+    petModifiers, equipmentSets, mastery };
 }
 
 module.exports = { makeCatalog };
