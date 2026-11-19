@@ -21,11 +21,6 @@ A local calculator that reads your Steam game data and character save to compare
 - **XP Calculator** ranks available actions by expected XP and XP per hour. Supported bonuses are detected automatically, and you can enter extra XP bonuses manually.
 - **Shop Upgrades** filters upgrades by category, visibility, and purchase status. Expand a resource to see which upgrades use it and how much each one costs.
 
-### Compatibility
-
-Tested on Windows with Steam build `26724394`. Game updates can change the data and save formats. Combat and some other skills are not covered by the XP rankings.
-
-The calculator runs locally and reads game files and saves without modifying them. The ZIP contains the tool and documentation.
 
 ## 简体中文
 
@@ -45,9 +40,3 @@ The calculator runs locally and reads game files and saves without modifying the
 - **挂机收益**按指定时长比较到手金币和净收益，并显示材料预计何时用完。
 - **经验效率**按技能比较可用行动的预计总 XP 和 XP/小时。支持的加成会自动识别，其他经验加成可以手填。
 - **商店升级**按类别、显示范围和购买状态筛选。展开任意资源，可查看用在哪些升级上、每项需要多少。
-
-### 兼容性
-
-已验证 Windows 版 Steam 构建 `26724394`。游戏更新后，数据包和存档格式可能变化。战斗等部分技能暂未接入经验排行。
-
-工具在本机运行，只读游戏文件和存档。ZIP 内含工具和使用说明。
