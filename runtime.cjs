@@ -3,7 +3,7 @@ const path = require('node:path');
 const os = require('node:os');
 const https = require('node:https');
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const RELEASES_URL = 'https://github.com/m1NG-325/melvor-idle-2-calculator/releases';
 const LATEST_RELEASE = RELEASES_URL + '/latest';
 
@@ -41,10 +41,10 @@ function checkForUpdate() {
   });
 }
 
-function createLog() {
+function createLog(root = __dirname) {
   const limit = 128 * 1024;
   let file;
-  for (const directory of [__dirname, os.tmpdir()]) {
+  for (const directory of [root, os.tmpdir()]) {
     try {
       const candidate = path.join(directory, 'Melvor-Idle-2-Calculator.log');
       if (fs.existsSync(candidate) && fs.statSync(candidate).size >= limit) {

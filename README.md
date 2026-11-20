@@ -4,20 +4,22 @@
 
 ## 简体中文
 
-读取本机游戏数据和角色存档，比较挂机金币、战斗收益和练级速度，也能查商店升级还缺哪些材料。
+读取本机游戏数据和角色存档，比较挂机金币、战斗收益（Beta）和练级速度，也能查商店升级还缺哪些材料。
 
-1. 在 Windows 上安装 Node.js，下载并解压 ZIP，双击 `Start-GP-Calculator.cmd`。
+1. 在 Windows 上安装 Node.js，解压 ZIP，双击 `Start-GP-Calculator.cmd`。
 2. 找不到游戏时，把含有 `Melvor2.exe` 的文件夹拖到启动器上。
-3. 在网页左侧选角色。工具每 15 秒重读一次存档，右上角可以切换中英文。
+3. 在网页左侧选角色，右上角可切换 English、简体中文和繁體中文。
 
-战斗收益目前是 Beta，主要用于估算普通怪物的收益。遇到问题可以从侧栏下载运行日志，到 GitHub 提交反馈。
+以后有新版时，点侧栏的「下载并更新」即可。工具会校验更新包、保留设置并打开新版。
 
 ## English
 
-Compare idle GP, combat gains, and XP rates from your local game data and character save. You can also check which materials you still need for shop upgrades.
+Compare idle GP, combat gains (beta), and XP rates using your local game data and save. You can also check what you still need for shop upgrades.
 
 1. Install Node.js on Windows, extract the ZIP, and run `Start-GP-Calculator.cmd`.
 2. If the game isn't found, drag the folder containing `Melvor2.exe` onto the launcher.
-3. Pick your character in the sidebar. The save refreshes every 15 seconds, and you can switch languages in the top right.
+3. Pick a character in the sidebar and switch languages in the top right.
 
-Combat gains are in beta and focus on regular monsters. If something goes wrong, download the runtime log from the sidebar and attach it to a GitHub issue.
+When a new version appears, click **Download and Update** in the sidebar. The tool checks the ZIP, keeps your settings, and opens the updated page.
+
+Traditional Chinese conversion runs offline with [OpenCC JS](https://github.com/nk2028/opencc-js).

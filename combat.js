@@ -596,8 +596,8 @@ function renderCombat() {
     return field;
   }));
   status.textContent = [
-    t('预计战斗时长 {time}', { time: formattedHours(estimate.activeHours) }),
-    estimate.limit && t('约 {time}后用完{item}', { time: formattedHours(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
+    t('预计战斗时长 {time}', { time: formatDuration(estimate.activeHours) }),
+    estimate.limit && t('约 {time}后用完{item}', { time: formatDuration(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
     supplies.entries.some(row => row.available == null) && t('部分补给缺少库存信息'),
     supplies.unknown && t('净收益尚未扣除消耗量未知的补给')
   ].filter(Boolean).join(' · ');

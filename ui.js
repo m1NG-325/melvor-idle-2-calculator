@@ -4,8 +4,7 @@ const byId = id => document.getElementById(id);
 let numbers;
 let decimals;
 const fullNumber = value => numbers.format(value);
-const formattedHours = value => decimals.format(value) + (uiLanguage === 'en' ? ' hr' : ' 小时');
-const actionArea = action => action.areaNames?.[uiLanguage] ?? action.area;
+const actionArea = action => localizedName(action.areaNames, action.area);
 let catalog;
 let profile;
 let results = [];
@@ -15,6 +14,8 @@ let profileReading = false;
 let savesRefreshing = false;
 let autoSaveReadFailed = false;
 let runtimeStatus;
+let updateActionPending = false;
+let updateMessage;
 let reportedBrowserError = false;
 
 function reportBrowserError(event) {
@@ -126,7 +127,7 @@ function calculate(keepCount = false) {
   byId('status').textContent = [
     source, t('仓库 {count} 种物品', { count: fullNumber(Object.keys(profile.stock).length) }),
     t('{count} 项正收益方案', { count: fullNumber(results.length) }),
-    ...countdown.map(message => t(message, { time: formattedHours(offlineCap) }))
+    ...countdown.map(message => t(message, { time: formatDuration(offlineCap) }))
   ].join(' · ');
   byId('status').classList.remove('error');
   const winner = results[0];
@@ -151,7 +152,7 @@ function showWinner(winner, sell) {
     ...(sell ? [t('出售收入 {value}', { value: fullNumber(sales) })] : []),
     t('材料原值 {value}', { value: fullNumber(materialCost) }),
     t('{value} 次', { value: fullNumber(winner.cycles) }),
-    winner.limit ? t('约 {time}后用完{item}', { time: formattedHours(winner.activeHours), item: limitName(winner) })
+    winner.limit ? t('约 {time}后用完{item}', { time: formatDuration(winner.activeHours), item: limitName(winner) })
       : t('在本次计时时长内材料充足')
   ].join(' · ');
   const expanded = byId('winnerSources').querySelector('details')?.open;
@@ -165,7 +166,8 @@ function incomeSources(result) {
   details.append(create('summary', t('收益来源')));
   const labels = {
     product: '动作产物', hit: '敲击掉落', cut: '砍倒掉落', break: '碎裂掉落',
-    common: '普通战利品', rare: '稀有战利品', completion: '完成奖励', fish: '鱼获', junk: '杂物', special: '钓鱼特殊物品'
+    common: '普通战利品', rare: '稀有战利品', completion: '完成奖励', fish: '鱼获', junk: '杂物', special: '钓鱼特殊物品',
+    event: '事件掉落'
   };
   const list = create('ul');
   if (result.directSources?.length) {
@@ -204,7 +206,8 @@ function renderResults() {
   const skill = byId('filter').value;
   const text = byId('search').value.trim().toLowerCase();
   const matches = results.filter(({ action }) => (!skill || skill === action.skill) &&
-    (!text || [action.id, action.name, action.area, catalog.skills[action.skill], gameName(action), actionArea(action),
+    (!text || [action.id, action.name, action.area, catalog.skills[action.skill], skillName(action.skill, catalog.skills),
+      gameName(action), actionArea(action),
       ...Object.values(action.names ?? {}), ...Object.values(action.areaNames ?? {})]
       .some(value => value?.toLowerCase().includes(text))));
   byId('empty').hidden = !!matches.length;
@@ -223,14 +226,14 @@ function renderResults() {
     plan.append(details);
     row.append(plan, create('td', fullNumber(net), 'number gold'),
       create('td', fullNumber(payout), 'number'), create('td', fullNumber(netPerHour), 'number'),
-      create('td', limit ? t('{time} · {item}用完', { time: formattedHours(activeHours), item: limitName(result) }) : '—'));
+      create('td', limit ? t('{time} · {item}用完', { time: formatDuration(activeHours), item: limitName(result) }) : '—'));
     return row;
   }));
 }
 
 function renderRuntimeStatus() {
   if (!runtimeStatus) return;
-  const { state, version, latest, releases } = runtimeStatus;
+  const { state, version, latest, releases, canInstall, installation, updateNotice } = runtimeStatus;
   const labels = {
     checking: 'v{version} · 正在检查更新',
     current: 'v{version} · 没有可用更新',
@@ -240,6 +243,41 @@ function renderRuntimeStatus() {
   byId('versionStatus').textContent = t(labels[state], { version, latest });
   byId('releaseLink').hidden = state !== 'available';
   if (state === 'available') byId('releaseLink').href = releases;
+  const button = byId('installUpdate');
+  const phase = installation?.phase;
+  const busy = ['downloading', 'verifying', 'installing'].includes(phase);
+  button.hidden = state !== 'available' || !canInstall;
+  button.disabled = !preferencesReady || busy || updateActionPending;
+  button.textContent = t(phase === 'ready' ? '打开新版' : phase === 'failed' ? '重试更新' : '下载并更新');
+  const progress = byId('updateProgress');
+  progress.hidden = !busy;
+  const ratio = phase === 'downloading' && installation.total > 0
+    ? Math.min(1, installation.received / installation.total) : null;
+  if (ratio == null) progress.removeAttribute('value');
+  else progress.value = ratio;
+  const messages = {
+    downloading: ratio != null ? '正在下载更新… {percent}%' : '正在下载更新…',
+    verifying: '正在校验更新包…', installing: '正在安装更新…',
+    ready: '已安装，正在打开新版…', failed: '更新未完成，当前版本可继续使用。'
+  };
+  const message = updateMessage ?? messages[phase] ?? (updateNotice === 'installed' ? '已更新至 v{version}' :
+    updateNotice === 'restored' ? '新版启动失败，已打开可用的上一版。' : '');
+  const feedback = byId('updateFeedback');
+  feedback.hidden = !message;
+  feedback.textContent = message ? t(message, { version, percent: Math.round((ratio ?? 0) * 100) }) : '';
+}
+
+async function openUpdatedVersion() {
+  const next = new URL(runtimeStatus.installation.url);
+  if (next.protocol !== 'http:' || next.hostname !== '127.0.0.1' || !next.port ||
+      !/^\/[a-f0-9]{40}\/$/.test(next.pathname)) throw Error('invalid-update-destination');
+  if (!(await savePreferences())) {
+    updateMessage = '新版已就绪。请保存设置后重试打开。';
+    return;
+  }
+  next.hash = location.hash;
+  next.searchParams.set('lang', uiLanguage);
+  location.replace(next);
 }
 
 async function loadRuntimeStatus(attempt = 0) {
@@ -250,8 +288,45 @@ async function loadRuntimeStatus(attempt = 0) {
       else runtimeStatus.state = 'unavailable';
     }
     renderRuntimeStatus();
+    if (['downloading', 'verifying', 'installing'].includes(runtimeStatus.installation?.phase)) {
+      setTimeout(loadRuntimeStatus, 400);
+    } else if (runtimeStatus.installation?.phase === 'ready') {
+      await openUpdatedVersion();
+      renderRuntimeStatus();
+    }
   } catch {
-    reportBrowserError();
+    if (runtimeStatus?.installation && attempt < 5) setTimeout(() => loadRuntimeStatus(attempt + 1), 700);
+    else {
+      if (runtimeStatus?.installation) runtimeStatus.installation = { phase: 'failed' };
+      renderRuntimeStatus();
+      reportBrowserError();
+    }
+  }
+}
+
+async function startUpdate() {
+  if (updateActionPending || !runtimeStatus) return;
+  updateActionPending = true;
+  updateMessage = undefined;
+  renderRuntimeStatus();
+  try {
+    if (runtimeStatus.installation?.phase === 'ready') {
+      await openUpdatedVersion();
+      return;
+    }
+    if (!(await savePreferences())) {
+      updateMessage = '无法保存设置，更新尚未开始。';
+      return;
+    }
+    const response = await fetch('update/install', { method: 'POST', headers: { 'X-Calculator-Update': 'install' } });
+    if (!response.ok && response.status !== 409) throw Error('update-request-failed');
+    runtimeStatus.installation = { phase: 'downloading' };
+    await loadRuntimeStatus();
+  } catch {
+    runtimeStatus.installation = { phase: 'failed' };
+  } finally {
+    updateActionPending = false;
+    renderRuntimeStatus();
   }
 }
 
@@ -288,7 +363,7 @@ async function loadProfile(automatic = false) {
     }
     byId('save').value = '';
     configureProfile(manualProfile());
-    byId('status').textContent = error.message;
+    byId('status').textContent = t(error.message);
     byId('status').classList.add('error');
   } finally {
     if (current === profileRequest) {
@@ -319,7 +394,7 @@ async function refreshSaves() {
   } catch (error) {
     select.replaceChildren(new Option(t('手动设置'), ''));
     configureProfile(manualProfile());
-    byId('status').textContent = error.message;
+    byId('status').textContent = t(error.message);
     byId('status').classList.add('error');
   } finally {
     savesRefreshing = false;
@@ -329,9 +404,11 @@ async function refreshSaves() {
 
 function findItem(text = byId('item').value) {
   const value = text.trim();
-  return Object.hasOwn(catalog.items, value) ? value :
-    Object.keys(catalog.items).find(id => Object.values(catalog.items[id].names ?? { original: catalog.items[id].name })
-      .some(name => name + ' · ' + id === value));
+  if (Object.hasOwn(catalog.items, value)) return value;
+  const separator = value.lastIndexOf(' · ');
+  if (separator === -1) return;
+  const id = value.slice(separator + 3);
+  if (Object.hasOwn(catalog.items, id) && hasGameLabel(catalog.items[id], value.slice(0, separator))) return id;
 }
 
 function editItem() {
@@ -353,10 +430,16 @@ function editItem() {
   queuePreferences();
 }
 
+function findAction(text = byId('action').value) {
+  const value = text.trim();
+  const separator = value.lastIndexOf(' · ');
+  const id = separator === -1 ? value : value.slice(separator + 3);
+  const action = catalog.actions.find(entry => entry.id === id);
+  if (action && (separator === -1 || hasGameLabel(action, value.slice(0, separator)))) return action;
+}
+
 function setAction(include) {
-  const value = byId('action').value.trim();
-  const action = catalog.actions.find(entry => value === entry.id ||
-    Object.values(entry.names ?? { original: entry.name }).some(name => value === name + ' · ' + entry.id));
+  const action = findAction();
   if (!action) {
     byId('editStatus').textContent = t('请选择一个已有动作。');
     return;
@@ -376,7 +459,7 @@ function setAction(include) {
 
 async function init() {
   preferences = await get('preferences').catch(() => ({}));
-  if (!requestedLanguage && ['zh', 'en'].includes(preferences.language)) uiLanguage = preferences.language;
+  uiLanguage = requestedLanguage ?? supportedLanguage(preferences.language) ?? uiLanguage;
   if (!location.hash && ['#combat', '#shop', '#experience', '#ranking-page'].includes(preferences.page)) {
     history.replaceState(null, '', preferences.page);
   }
@@ -418,19 +501,26 @@ async function init() {
     }
     byId('items').replaceChildren(...Object.entries(catalog.items).map(([id, item]) => new Option('', gameName(item) + ' · ' + id)));
     byId('actions').replaceChildren(...catalog.actions.map(action => new Option('', gameName(action) + ' · ' + action.id)));
+    const item = byId('item');
+    const action = byId('action');
+    const itemId = item.value.includes(' · ') && findItem(item.value);
+    const selectedAction = action.value.includes(' · ') && findAction(action.value);
+    if (itemId) item.value = gameName(catalog.items[itemId]) + ' · ' + itemId;
+    if (selectedAction) action.value = gameName(selectedAction) + ' · ' + selectedAction.id;
     localizeExperience();
     localizeShop();
     localizeCombat();
     if (profile) renderProfile(true);
   }
   byId('language').addEventListener('change', event => {
-    uiLanguage = event.currentTarget.value;
+    uiLanguage = supportedLanguage(event.currentTarget.value) ?? 'en';
     const url = new URL(location.href);
     url.searchParams.set('lang', uiLanguage);
     history.replaceState(null, '', url);
     localizeControls();
     queuePreferences();
   });
+  byId('installUpdate').addEventListener('click', startUpdate);
   window.addEventListener('hashchange', () => { showPage(); queuePreferences(); });
   for (const event of ['input', 'change', 'toggle']) document.addEventListener(event, queuePreferences, true);
   window.addEventListener('pagehide', savePreferences);
@@ -444,7 +534,7 @@ async function init() {
       initShop(shop, catalog.items);
       if (profile) updateShop(profile);
     }).catch(error => {
-      byId('shopStatus').textContent = t('商店数据读取失败。请重新启动计算器。') + ' ' + error.message;
+      byId('shopStatus').textContent = t('商店数据读取失败。请重新启动计算器。') + ' ' + t(error.message);
     });
     const filter = byId('filter');
     for (const [id, name] of Object.entries(catalog.skills)) filter.append(new Option(name, id));
@@ -474,9 +564,10 @@ async function init() {
     await refreshSaves();
     await shopLoad;
     preferencesReady = true;
+    renderRuntimeStatus();
     setInterval(() => loadProfile(true), 15000);
   } catch (error) {
-    byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + error.message;
+    byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + t(error.message);
   }
 }
 

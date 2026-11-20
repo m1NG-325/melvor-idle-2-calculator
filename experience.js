@@ -168,7 +168,7 @@ function renderExperienceGoal(goal, row, enoughStock, unavailable) {
   progress.value = goal.progress;
   progress.setAttribute('aria-label', t('目标等级进度'));
   const note = [
-    row && goal.remaining > 0 && t('按「{action}」当前每小时经验估算', { action: gameName(row.action) }),
+    row && goal.remaining > 0 && t('按「{action}」的经验收益估算', { action: gameName(row.action) }),
     unavailable && t('所选行动暂不可用，当前按最高收益行动估算'),
     !enoughStock && goal.remaining > 0 && t('当前库存不足'),
     !goal.exact && t('按所设等级的起始经验计算')
@@ -219,8 +219,14 @@ function renderExperience() {
   const rows = groups[selected];
   const choice = selectExperienceAction(rows);
   const target = selectedExperienceGoal();
-  const goalFor = row => xpGoalProgress(character.levels[selected], character.skillXp?.[selected],
-    target.level, row?.sustainableXpPerHour, target.startingXp);
+  const goalFor = row => {
+    const plan = xpGoalProgress(character.levels[selected], character.skillXp?.[selected],
+      target.level, row?.sustainableXpPerHour, target.startingXp);
+    if (plan?.remaining > 0 && (row?.brewing || row?.cooking)) {
+      plan.hours = row.hoursForXp(plan.remaining);
+    }
+    return plan;
+  };
   const goal = goalFor(choice.row);
   renderExperienceGoal(goal, choice.row, !choice.row || choice.row.stockXp >= (goal?.remaining ?? 0), choice.unavailable);
   byId('xpTable').hidden = !rows.length;
@@ -237,6 +243,38 @@ function renderExperience() {
       t('识别加成 {value}%', { value: decimals.format(row.knownXpPercent) })];
     const percent = value => decimals.format(value * 100) + '%';
     if (row.manualXpPercent) note.push(t('额外 {value}%', { value: decimals.format(row.manualXpPercent) }));
+    if (row.cooking) {
+      const { proficiency, difficulty, success, preserveOnFail } = row.cooking;
+      note.push(t('烹饪精通 {value}', { value: decimals.format(proficiency) }),
+        t('产品难度 {value}', { value: decimals.format(difficulty) }),
+        t('成功几率 {value}', { value: percent(success) }),
+        t('每次尝试平均 {value} XP', { value: decimals.format(row.xpPerCycle) }),
+        t('烹饪失败时无经验和产物'));
+      if (preserveOnFail) note.push(t('失败时额外保留材料几率 {value}', { value: percent(preserveOnFail) }));
+      if (row.cooking.charges.length) {
+        for (const { item, quantity } of row.cooking.charges) {
+          note.push(t('{item} 可用 {count} 次', { item: gameName(catalog.items[item]) ?? item, count: fullNumber(quantity) }));
+        }
+        note.push(t('计入加成耗尽后，本次平均成功率 {value}', { value: percent(row.cooking.sessionSuccess) }));
+      }
+    }
+    if (row.thieving) {
+      note.push(t('成功几率 {value}', { value: percent(row.thieving.success) }),
+        t('每次尝试平均 {value} XP', { value: decimals.format(row.xpPerCycle) }));
+    }
+    if (row.fishing) {
+      note.push(t('杂物几率 {value}，仍可获得经验', { value: percent(row.fishing.junkChance) }));
+      if (row.fishing.priority) note.push(t('优先鱼获 {item}', {
+        item: gameName(catalog.items[row.fishing.priority]) ?? row.fishing.priority
+      }));
+    }
+    if (row.brewing) note.push(t('每轮准备 {setup} 秒，每瓶 {bottle} 秒，最多装瓶 {count} 次', {
+      setup: decimals.format(row.brewing.setup), bottle: decimals.format(row.brewing.bottling), count: row.brewing.batchSize
+    }));
+    if (row.craftingSteps?.steps > 1) note.push(t('制作步数 {steps}，跳步几率 {chance}', {
+      steps: row.craftingSteps.steps, chance: percent(row.craftingSteps.skip)
+    }));
+    if (row.consumption < 1) note.push(t('平均保留材料几率 {value}', { value: percent(1 - row.consumption) }));
     if (row.knowledge != null) {
       note.push(t('每次研究 {value} 知识', { value: decimals.format(row.knowledge) }),
         t('{value} 知识／小时', { value: decimals.format(row.knowledge * row.cycles / hours) }));
@@ -255,7 +293,7 @@ function renderExperience() {
     }
     if (!row.wood) note.push(t('平均每次 {value} 秒', { value: decimals.format(row.seconds) }),
       t('固定经验 {value}', { value: decimals.format(row.flatXp) }));
-    if (row.limit) note.push(t('{time}后缺{item}', { time: formattedHours(row.activeHours), item: limitName(row) }));
+    if (row.limit) note.push(t('{time}后缺{item}', { time: formatDuration(row.activeHours), item: limitName(row) }));
     if (row.risky) note.push(t('失败可受伤，未计生存时间'));
     const plan = goalFor(row);
     const eta = create('td', plan?.remaining === 0 ? t('已达到目标') : formatXpDuration(plan?.hours));
@@ -265,6 +303,13 @@ function renderExperience() {
     details.dataset.action = row.action.id;
     details.open = expanded.has(row.action.id);
     details.append(create('summary', t('计算明细')), create('p', note.join(' · '), 'muted'));
+    if (row.drops.length) {
+      const quantities = new Map();
+      for (const drop of row.drops) quantities.set(drop.id, (quantities.get(drop.id) ?? 0) + drop.quantity);
+      const products = [...quantities].map(([id, quantity]) =>
+        (gameName(catalog.items[id]) ?? id) + ' × ' + decimals.format(quantity));
+      details.append(create('p', t('本次预计产物 {items}', { items: products.join(' · ') }), 'muted'));
+    }
     const data = create('td');
     data.append(details);
     item.append(create('td', gameName(row.action)), create('td', fullNumber(row.xp), 'number'),

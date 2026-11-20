@@ -82,9 +82,16 @@ function makeCatalog(data) {
     const tool = item.Capabilities?.['MelvorBase:Toolbelt'];
     const permanent = tool && !tool.ConsumesOn && !tool.CanEquipQuantity;
     const modifiers = permanent ? persistentModifiers(tool.Bonuses) : [];
+    const cookingTriggers = tool?.ConsumesOn?.filter(({ Type, Data }) => localId(Type) === 'CookRecipe' &&
+      Data.Chance == null && (Data.Conditions == null || (Array.isArray(Data.Conditions) && !Data.Conditions.length)) &&
+      localId(Data.Component?.Entity) === 'Cooking')
+      .map(({ Data }) => ({ recipe: localId(Data.Recipe), category: localId(Data.Category), subcategory: localId(Data.Subcategory) }));
+    const cookingModifiers = cookingTriggers?.length ? persistentModifiers(tool.Bonuses)
+      .filter(modifier => modifier.skill === 'Cooking' && modifier.stat === 'FlatProficiency') : [];
     return [item.Id, {
       name: item.DisplayName.Singular, price: item.SellsFor?.Currency === GOLD ? item.SellsFor.Quantity : 0,
-      ...(modifiers.length ? { modifiers } : {})
+      ...(modifiers.length ? { modifiers } : {}),
+      ...(cookingModifiers.length ? { cookingCharges: { modifiers: cookingModifiers, triggers: cookingTriggers } } : {})
     }];
   }));
   const categories = new Map(['RecipeCategory', 'WoodcuttingRecipeCategory', 'MiningRecipeCategory', 'FishingLocation', 'ThievingLocation']
@@ -96,6 +103,14 @@ function makeCatalog(data) {
   };
   const actions = [];
   const xpActions = [];
+  const fireEvents = new Map((objects.FiremakingEvent ?? []).map(event => [event.Id, event]));
+  const astrologyItemEvents = new Map((objects.AstrologyItemEvent ?? []).map(event => [event.Id, event]));
+  const requirements = (list = []) => list.map(({ Type, Data }) => ({
+    type: localId(Type), skill: localId(Data.Component?.Entity), level: Data.Level, or: !!Data.IsOr,
+    item: localId(Data.Item), rank: localId(Data.Rank), node: localId(Data.MajorNode ?? Data.MinorNode),
+    purchase: localId(Data.ShopPurchase), amount: Data.Amount, statistic: localId(Data.Statistic),
+    statisticTarget: localId(Data.Course ?? Data.Event ?? Data.Item), statisticValue: Data.Value
+  }));
 
   for (const skill of [...Object.keys(SKILLS), 'Herblore', 'Astrology']) {
     const recipes = new Map(objects[types[skill] ?? 'ArtisanRecipe'].map(recipe => [recipe.Id, recipe]));
@@ -108,11 +123,7 @@ function makeCatalog(data) {
       const requirementGroups = [area, recipe].filter(Boolean).flatMap(record => [
         record.Requirements ?? [], record.DisplayRequirements ?? [], record.AccessRequirements ?? [],
         record.SecondaryRequirements ?? []
-      ]).filter(group => group.length).map(group => group.map(({ Type, Data }) => ({
-        type: localId(Type), skill: localId(Data.Component?.Entity), level: Data.Level, or: !!Data.IsOr,
-        item: localId(Data.Item), rank: localId(Data.Rank),
-        purchase: localId(Data.ShopPurchase), amount: Data.Amount
-      })));
+      ]).filter(group => group.length).map(requirements);
       const kind = types[skill] ? skill : 'Artisan';
       const action = {
         id: skill + ':' + recipe.Id, recipe: recipe.Id, name: recipe.DisplayName, area: area?.DisplayName, skill, kind,
@@ -129,7 +140,10 @@ function makeCatalog(data) {
       action.costs = (recipe.Ingredients?.Items ?? []).map(row => [localId(row.Item), row.Quantity]);
       action.currencyCosts = (recipe.Ingredients?.Currencies ?? []).map(row => [localId(row.Currency), row.Quantity]);
       action.rewards = (recipe.Products ?? []).map(product);
-      if (recipe.CurrencyReward?.Currency === GOLD) action.cash = recipe.CurrencyReward.Quantity ?? 0;
+      if (recipe.CurrencyReward?.Currency === GOLD) {
+        action.cash = recipe.CurrencyReward.Quantity ?? 0;
+        action.cashReward = true;
+      }
       switch (kind) {
         case 'Woodcutting':
           if (!recipe.Product || !(recipe.BaseMaxHealth > 0)) continue;
@@ -155,7 +169,15 @@ function makeCatalog(data) {
           action.special = recipe.SpecialProducts.map(product);
           break;
         case 'Cooking':
-          action.difficulty = recipe.Difficulty;
+          action.difficulty = recipe.Difficulty ?? 0;
+          break;
+        case 'Firemaking':
+          action.events = (config.Events ?? []).flatMap(({ Id }) => {
+            const event = fireEvents.get(localId(Id));
+            if (!event?.Reward || (event.Category && event.Category !== recipe.Category)) return [];
+            return [{ item: localId(event.Reward.Item), quantity: event.Reward.Quantity,
+              chance: event.Chance, requirements: requirements(event.Requirements ?? []) }];
+          });
           break;
         case 'Astrology':
           action.constellation = recipe.Id;
@@ -163,6 +185,13 @@ function makeCatalog(data) {
           action.minorNodes = recipe.MinorNodes.map(localId);
           action.majorNodes = recipe.MajorNodes.map(localId);
           action.minorNodeModifiers = persistentModifiers(recipe.PerMinorNodeBonuses);
+          action.events = [...new Set([...(config.GlobalEvents ?? []).map(({ Id }) => Id), ...(recipe.Events ?? [])].map(localId))]
+            .flatMap(id => {
+              const event = astrologyItemEvents.get(id);
+              if (!event) return [];
+              return [{ id, item: localId(event.Item), quantity: event.BaseQuantity, quantityPerLevel: event.LevelScalingQuantity,
+                chance: event.Chance, requirements: requirements(event.Requirements ?? []) }];
+            });
           break;
         case 'Herblore':
           action.phases = ['Preparing', 'Heating', 'Stirring', 'Bottling'].map(phase => ({

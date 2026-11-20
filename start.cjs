@@ -3,17 +3,17 @@ const path = require('node:path');
 const http = require('node:http');
 const { randomBytes } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { Script } = require('node:vm');
 const { findSteamGame, getBuild, readPackage } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
 const { addGameLabels } = require('./game-labels.cjs');
 const { findSaves, readHeader, readProfile } = require('./saves.cjs');
 const { VERSION, RELEASES_URL, checkForUpdate, createLog } = require('./runtime.cjs');
-const log = createLog();
-const preferencesFile = path.join(__dirname, 'calculator-settings.json');
+const { installUpdate, installedUpdates } = require('./updater.cjs');
 const preferencesLimit = 512 * 1024;
 
-function readPreferences() {
+function readPreferences(preferencesFile) {
   try {
     if (fs.statSync(preferencesFile).size > preferencesLimit) return {};
     const data = JSON.parse(fs.readFileSync(preferencesFile, 'utf8'));
@@ -23,7 +23,7 @@ function readPreferences() {
   }
 }
 
-async function writePreferences(request, response, json) {
+async function writePreferences(request, response, json, preferencesFile, log) {
   if (request.headers['content-type'] !== 'application/json') return json(response, {}, 415);
   try {
     const chunks = [];
@@ -49,9 +49,10 @@ async function writePreferences(request, response, json) {
   }
 }
 
-function main() {
+async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice } = {}) {
+  const log = createLog(root);
+  const preferencesFile = path.join(root, 'calculator-settings.json');
   log.record('startup', { node: process.versions.node, platform: process.platform });
-  const args = process.argv.slice(2);
   const source = path.resolve(args.find(arg => !arg.startsWith('--')) ?? findSteamGame());
   const standalone = fs.statSync(source).isFile();
   const game = standalone ? path.dirname(source) : source;
@@ -95,9 +96,20 @@ function main() {
     'choices.js': ['text/javascript', 'choices.js'],
     'shop.js': ['text/javascript', 'shop.js'],
     'ui.js': ['text/javascript', 'ui.js'],
-    'language.js': ['text/javascript', 'language.js']
+    'language.js': ['text/javascript', 'language.js'],
+    'vendor/opencc/cn2t.js': ['text/javascript', 'vendor/opencc/cn2t.js']
   };
+  if (updateNotice === 'installed' || root !== __dirname) {
+    for (const [type, filename] of Object.values(assets)) {
+      const file = path.join(__dirname, filename);
+      const source = fs.readFileSync(file, 'utf8');
+      if (!source.trim()) throw Error('empty-update-asset');
+      if (type === 'text/javascript') new Script(source, { filename });
+    }
+  }
+  const canInstall = process.platform === 'win32' && typeof fetch === 'function';
   let update = { state: 'checking' };
+  let installation;
   let loggedClientErrors = 0;
   const token = randomBytes(20).toString('hex');
   const prefix = '/' + token + '/';
@@ -105,6 +117,21 @@ function main() {
     response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     response.end(JSON.stringify(body));
   };
+  function beginUpdate() {
+    const report = progress => { installation = progress; };
+    installUpdate(root, update.latest, VERSION, async directory => {
+      const replacement = require(path.join(directory, 'start.cjs'));
+      return replacement.launch({ root, args: [source, '--no-open'], updateNotice: 'installed' });
+    }, report).then(next => {
+      log.record('update_installed', { latest: update.latest });
+      report({ phase: 'ready', url: next.url });
+      setTimeout(() => server.close(), 120000).unref();
+    }).catch(error => {
+      const detail = /^[a-z0-9_-]{1,50}$/i.test(error.code ?? error.message) ? error.code ?? error.message : 'installer-error';
+      log.record('update_failed', { phase: installation?.phase, code: detail });
+      report({ phase: 'failed' });
+    });
+  }
   let saves = [];
   const server = http.createServer((request, response) => {
     response.setHeader('Cache-Control', 'no-store');
@@ -118,7 +145,16 @@ function main() {
       return;
     }
     const route = pathname.slice(prefix.length);
-    if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json);
+    if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json, preferencesFile, log);
+    if (route === 'update/install' && request.method === 'POST') {
+      if (request.headers.origin !== 'http://' + host || request.headers['x-calculator-update'] !== 'install') {
+        return json(response, {}, 403);
+      }
+      if (!canInstall || update.state !== 'available' ||
+          (installation && installation.phase !== 'failed')) return json(response, {}, 409);
+      beginUpdate();
+      return json(response, installation ?? { phase: 'downloading' }, 202);
+    }
     const browserError = /^diagnostics\/client-error(?:\/(language|rank|ui|shop|experience|xp-progress|combat|combat-model|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
     if (browserError && request.method === 'POST') {
       if (loggedClientErrors++ < 20) log.record('browser_error', {
@@ -129,8 +165,9 @@ function main() {
     }
     if (request.method !== 'GET') return json(response, { error: '页面不存在' }, 404);
     try {
-      if (route === 'status') return json(response, { version: VERSION, releases: RELEASES_URL, ...update });
-      if (route === 'preferences') return json(response, readPreferences());
+      if (route === 'status') return json(response, { version: VERSION, releases: RELEASES_URL, ...update,
+        canInstall, installation, updateNotice });
+      if (route === 'preferences') return json(response, readPreferences(preferencesFile));
       if (route === 'diagnostics/log') {
         response.writeHead(200, {
           'Content-Type': 'text/plain; charset=utf-8',
@@ -176,39 +213,54 @@ function main() {
       json(response, { error: '读取失败。可切换到手动设置。' }, 422);
     }
   });
-  server.listen(0, '127.0.0.1', () => {
-    const url = 'http://127.0.0.1:' + server.address().port + prefix;
-    console.log('Melvor Idle 2 Calculator v' + VERSION);
-    console.log('Steam build: ' + catalog.build + ' | Actions: ' + catalog.actions.length);
-    if (checksumMismatch) {
-      console.log('已读取校验值不同的游戏数据，收益按读到的配方估算。');
-      console.log('Loaded game data with a different checksum. Estimates use the recipes that could be read.');
-    }
-    console.log(url);
-    if (log.file) console.log('运行日志 / Runtime log: ' + log.file);
-    console.log('请保留此窗口。按 Ctrl+C 退出。 / Keep this window open. Press Ctrl+C to exit.');
-    checkForUpdate().then(result => {
-      update = result;
-      log.record('update_checked', result);
-      if (result.state === 'available') console.log('发现新版本 / Update available: v' + result.latest + ' ' + RELEASES_URL);
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      const url = 'http://127.0.0.1:' + server.address().port + prefix;
+      console.log('Melvor Idle 2 Calculator v' + VERSION);
+      console.log('Steam build: ' + catalog.build + ' | Actions: ' + catalog.actions.length);
+      if (checksumMismatch) {
+        console.log('已读取校验值不同的游戏数据，收益按读到的配方估算。');
+        console.log('Loaded game data with a different checksum. Estimates use the recipes that could be read.');
+      }
+      console.log(url);
+      if (log.file) console.log('运行日志 / Runtime log: ' + log.file);
+      console.log('请保留此窗口。按 Ctrl+C 退出。 / Keep this window open. Press Ctrl+C to exit.');
+      checkForUpdate().then(result => {
+        update = result;
+        log.record('update_checked', result);
+        if (result.state === 'available') console.log('发现新版本 / Update available: v' + result.latest + ' ' + RELEASES_URL);
+      });
+      resolve({ url, close: () => new Promise(done => server.close(done)) });
     });
-    if (!args.includes('--no-open')) {
-      const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { windowsHide: true, stdio: 'ignore' });
-      child.on('error', () => console.log('Open the address above in a browser.'));
-    }
-  });
-  server.on('error', error => {
-    console.error(error.message);
-    log.record('server_failed');
-    process.exitCode = 1;
   });
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error.message);
-  log.record('startup_failed', { code: /^[A-Z_0-9]+$/.test(error.code ?? '') ? error.code : 'startup_error' });
+async function boot(args) {
+  const candidates = [...installedUpdates(__dirname, VERSION).map(({ directory }) => directory), __dirname];
+  let updateNotice;
+  let lastError;
+  for (const directory of candidates) {
+    try {
+      const start = directory === __dirname ? launch : require(path.join(directory, 'start.cjs')).launch;
+      const { url } = await start({ root: __dirname, args, updateNotice });
+      if (!args.includes('--no-open')) {
+        const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { windowsHide: true, stdio: 'ignore' });
+        child.on('error', () => console.log('Open the address above in a browser.'));
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      updateNotice = 'restored';
+    }
+  }
+  console.error(lastError.message);
+  const log = createLog();
+  log.record('startup_failed', { code: /^[A-Z_0-9]+$/.test(lastError.code ?? '') ? lastError.code : 'startup_error' });
   if (log.file) console.error('运行日志 / Runtime log: ' + log.file);
   process.exitCode = 1;
 }
+
+if (require.main === module) void boot(process.argv.slice(2));
+module.exports = { launch };

@@ -304,6 +304,19 @@ function readCombatProfile(components, onWarning) {
   return combat;
 }
 
+function readFishingPriorities(reader) {
+  const priorities = Object.create(null);
+  if (!reader) return priorities;
+  reader.take(14); // Started flag and action timer state.
+  if (reader.byte()) reader.string(); // Current location.
+  if (reader.byte()) reader.string(); // Current recipe.
+  reader.regions(); // Per-location state.
+  for (const [recipe, state] of reader.regions()) {
+    if (state.byte()) priorities[localId(recipe)] = localId(state.string());
+  }
+  return priorities;
+}
+
 function readProfile(file, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}) {
   const { reader, ...header } = readHeader(fs.readFileSync(file));
   const entities = reader.regions();
@@ -315,6 +328,7 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
   const levels = {};
   const skillXp = {};
   const equipped = {};
+  const cookingCharges = [];
   const unlockedPets = [];
   const bankComponents = componentsFor('Bank');
   const bank = bankComponents?.get('Inventory');
@@ -334,10 +348,11 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
     const slots = components?.get('Toolbelt')?.regions();
     equipped[skill] = [];
     for (const slot of slots?.values() ?? []) {
-      slot.int();
+      const quantity = slot.int();
       if (!slot.byte()) continue;
       const item = localId(slot.string());
       equipped[skill].push(item);
+      if (skill === 'Cooking' && quantity > 0) cookingCharges.push({ item, quantity });
     }
   }
   if (!levels.Woodcutting) throw new Error('存档里找不到技能经验');
@@ -362,6 +377,17 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
     onWarning('Tasks', 'Slayer');
   }
   const astrologyNodes = readAstrologyNodes(componentsFor('Astrology')?.get('Action'));
+  const recipeStatistics = {
+    BankItemFound: readShopStatistic(bankComponents.get('Statistics'), 1, 'BankItemFound'),
+    AgilityCourseCompleted: readShopStatistic(componentsFor('Agility')?.get('Statistics'), 3, 'AgilityCourseCompleted'),
+    AstrologyTimesEventObserved: readShopStatistic(componentsFor('Astrology')?.get('Statistics'), 4, 'AstrologyTimesEventObserved')
+  };
+  let fishingPriorities;
+  try {
+    fishingPriorities = readFishingPriorities(componentsFor('Fishing')?.get('Action'));
+  } catch {
+    onWarning('Action', 'Fishing');
+  }
   const ranks = {};
   for (const [skill, description] of Object.entries(mastery)) {
     try {
@@ -371,8 +397,8 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
     }
   }
   return {
-    ...header, levels, skillXp, equipped, ...readBank(bank), ...readShopPurchases(shopReader),
-    dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, unlockedPets, ranks, combat,
+    ...header, levels, skillXp, equipped, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
+    dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, fishingPriorities, recipeStatistics, unlockedPets, ranks, combat,
     currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
     date: fs.statSync(file).mtime.toISOString()
   };

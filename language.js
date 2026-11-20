@@ -1,4 +1,19 @@
 const english = {
+  '烹饪精通 {value}': 'Cooking proficiency {value}',
+  '产品难度 {value}': 'Recipe difficulty {value}',
+  '成功几率 {value}': 'Success chance {value}',
+  '每次尝试平均 {value} XP': 'Expected XP per attempt {value}',
+  '{item} 可用 {count} 次': '{item} has {count} uses left',
+  '计入加成耗尽后，本次平均成功率 {value}': 'Average session success chance {value}, including expiring bonuses',
+  '烹饪失败时无经验和产物': 'Failed cooks grant no XP or products',
+  '失败时额外保留材料几率 {value}': 'Extra preservation chance on failure {value}',
+  '杂物几率 {value}，仍可获得经验': 'Junk chance {value}, still awards XP',
+  '优先鱼获 {item}': 'Priority catch {item}',
+  '每轮准备 {setup} 秒，每瓶 {bottle} 秒，最多装瓶 {count} 次': '{setup}s setup per batch, {bottle}s per bottle, up to {count} bottles',
+  '制作步数 {steps}，跳步几率 {chance}': '{steps} crafting steps, {chance} step-skip chance',
+  '平均保留材料几率 {value}': 'Average ingredient preservation chance {value}',
+  '本次预计产物 {items}': 'Expected items for this session {items}',
+  '事件掉落': 'Event Drops',
   '存档每 15 秒刷新': 'Save reloads every 15 seconds',
   '存档暂无法读取，15 秒后重试': 'Save temporarily unavailable. Retrying in 15 seconds.',
   '目标等级': 'Target Level',
@@ -20,7 +35,7 @@ const english = {
   '已达到目标': 'Goal reached',
   '剩余 XP': 'XP Remaining',
   '预计剩余时间': 'Estimated Time Remaining',
-  '按「{action}」当前每小时经验估算': 'Based on the current XP rate for {action}',
+  '按「{action}」的经验收益估算': 'Estimated using XP gains from {action}',
   '当前库存不足': 'Current stock is insufficient',
   '计算明细': 'Calculation Details',
   '战斗经验收益': 'Combat XP Gains',
@@ -149,6 +164,20 @@ const english = {
   '正在使用手动选择的游戏文件。': 'Using the game file you selected.',
   '游戏数据校验值不同。收益按可读取的配方估算。': 'The game data checksum differs. Estimates use the recipes that could be read.',
   '查看新版本': 'View New Release',
+  '下载并更新': 'Download and Update',
+  '重试更新': 'Retry Update',
+  '更新进度': 'Update Progress',
+  '正在下载更新…': 'Downloading update…',
+  '正在下载更新… {percent}%': 'Downloading update… {percent}%',
+  '正在校验更新包…': 'Verifying update package…',
+  '正在安装更新…': 'Installing update…',
+  '已安装，正在打开新版…': 'Installed. Opening the new version…',
+  '已更新至 v{version}': 'Updated to v{version}',
+  '新版启动失败，已打开可用的上一版。': 'The new version failed to start. A previous version is running.',
+  '更新未完成，当前版本可继续使用。': 'Update incomplete. You can keep using the current version.',
+  '无法保存设置，更新尚未开始。': 'Settings could not be saved. The update has not started.',
+  '新版已就绪。请保存设置后重试打开。': 'The new version is ready. Save your settings and try opening it again.',
+  '打开新版': 'Open Updated Version',
   '下载运行日志': 'Download Runtime Log',
   'v{version} · 正在检查更新': 'v{version} · Checking for updates',
   'v{version} · 没有可用更新': 'v{version} · No update available',
@@ -285,25 +314,67 @@ const english = {
   '{count} 项': '{count} upgrades', '剩余 {count} 次': '{count} purchases left'
 };
 
-const requestedLanguage = new URLSearchParams(location.search).get('lang');
-let uiLanguage = requestedLanguage === 'zh' ? 'zh' : 'en';
+const uiLocales = { en: 'en-US', zh: 'zh-CN', 'zh-Hant': 'zh-Hant' };
+const supportedLanguage = language => Object.hasOwn(uiLocales, language) ? language : undefined;
+const requestedLanguage = supportedLanguage(new URLSearchParams(location.search).get('lang'));
+let uiLanguage = requestedLanguage ?? 'en';
 let staticLabels;
+let convertToTraditional;
+const traditionalStrings = new Map();
+
+function traditionalText(text) {
+  if (!/\p{Script=Han}/u.test(text ?? '')) return text;
+  if (!traditionalStrings.has(text)) {
+    convertToTraditional ??= OpenCC.Converter({ from: 'cn', to: 't' });
+    traditionalStrings.set(text, convertToTraditional(text));
+  }
+  return traditionalStrings.get(text);
+}
 
 function t(source, args = {}) {
-  const message = uiLanguage === 'en' ? english[source] ?? source : source;
+  const message = uiLanguage === 'en' ? english[source] ?? source :
+    uiLanguage === 'zh-Hant' ? traditionalText(source) : source;
   return message.replace(/\{(\w+)\}/g, (token, key) => args[key] ?? token);
 }
 
 function uiLocale() {
-  return uiLanguage === 'en' ? 'en-US' : 'zh-CN';
+  return uiLocales[uiLanguage];
+}
+
+function formatDuration(hours, includeDays = false) {
+  if (!Number.isFinite(hours) || hours < 0) return '—';
+  if (hours > 0 && hours < 1 / 60) return t('不到 1 分钟');
+  const exactMinutes = hours * 60;
+  // Avoid rounding an exact minute up because of floating-point error.
+  const minutes = Math.ceil(exactMinutes - exactMinutes * Number.EPSILON);
+  const days = includeDays ? Math.floor(minutes / 1440) : 0;
+  const parts = [
+    [days, '{value} 天'],
+    [Math.floor(minutes / 60) - days * 24, '{value} 小时'],
+    [minutes % 60, '{value} 分钟']
+  ];
+  return parts.filter(([amount]) => amount).slice(0, 2)
+    .map(([amount, unit]) => t(unit, { value: fullNumber(amount) })).join(' ') ||
+    t('{value} 分钟', { value: fullNumber(0) });
+}
+
+function localizedName(names, fallback) {
+  if (uiLanguage === 'zh-Hant') return names?.['zh-Hant'] ?? traditionalText(names?.zh ?? fallback ?? names?.en);
+  return names?.[uiLanguage] ?? fallback;
 }
 
 function gameName(record) {
-  return record?.names?.[uiLanguage] ?? record?.name;
+  return localizedName(record?.names, record?.name);
 }
 
 function skillName(id, names) {
-  return uiLanguage === 'en' ? id : names[id] ?? id;
+  if (uiLanguage === 'en') return id;
+  return localizedName(undefined, names[id] ?? id);
+}
+
+function hasGameLabel(record, text) {
+  const simplified = record?.names?.zh ?? record?.name;
+  return record?.name === text || Object.values(record?.names ?? {}).includes(text) || traditionalText(simplified) === text;
 }
 
 function applyLanguage() {
@@ -314,7 +385,7 @@ function applyLanguage() {
     while (nodes.nextNode()) {
       const node = nodes.currentNode;
       const label = node.textContent.trim();
-      if (Object.hasOwn(english, label)) {
+      if (!node.parentElement?.closest('#language') && (Object.hasOwn(english, label) || /\p{Script=Han}/u.test(label))) {
         const original = node.textContent;
         staticLabels.push(() => { node.textContent = original.replace(label, t(label)); });
       }
@@ -327,7 +398,7 @@ function applyLanguage() {
     }
     for (const button of document.querySelectorAll('[data-hours], [data-xp-hours]')) {
       const hours = button.dataset.hours ?? button.dataset.xpHours;
-      staticLabels.push(() => { button.textContent = uiLanguage === 'en' ? hours + ' hr' : hours + ' 小时'; });
+      staticLabels.push(() => { button.textContent = t('{value} 小时', { value: hours }); });
     }
   }
   for (const update of staticLabels) update();

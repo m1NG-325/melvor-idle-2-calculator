@@ -40,13 +40,7 @@ function xpGoalProgress(level, savedXp, target, rate, startingXp) {
 }
 
 function formatXpDuration(hours) {
-  if (hours == null || !Number.isFinite(hours)) return t('暂无升级时间');
-  if (hours < 1 / 60) return t('不到 1 分钟');
-  const minutes = Math.ceil(hours * 60);
-  const parts = [[Math.floor(minutes / 1440), '{value} 天'], [Math.floor(minutes / 60) % 24, '{value} 小时'],
-    [minutes % 60, '{value} 分钟']];
-  return parts.filter(([amount]) => amount).slice(0, 2).map(([amount, key]) => t(key, { value: fullNumber(amount) }))
-    .join(' ') || t('不到 1 分钟');
+  return Number.isFinite(hours) && hours >= 0 ? formatDuration(hours, true) : t('暂无升级时间');
 }
 function renderXpProgress(character, skill, goal, rate, limitedXp, limitLabel = '本次补给或材料不足以升级') {
   const view = create('div', undefined, 'xp-progress');

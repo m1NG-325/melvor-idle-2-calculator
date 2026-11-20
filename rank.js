@@ -67,28 +67,82 @@ function woodcuttingModifiers(action, stat, intervalBonus) {
   return { doubleDamage, instant, weak, output, health, interval, hits: hits[health] };
 }
 
-function unlocked(action, profile) {
-  const { levels } = profile;
-  if (!levels[action.skill] || profile.excluded?.includes(action.id)) return false;
-  const confirmed = profile.confirmed?.includes(action.id);
+function meetsRequirements(group, profile, confirmed = false) {
   const requirementMet = req => {
-    if (req.type === 'Level') return (levels[req.skill] ?? 0) >= req.level;
+    if (req.type === 'Level') return (profile.levels[req.skill] ?? 0) >= req.level;
     if (req.type === 'ToolbeltItemEquipped' && req.item && profile.equipped?.[req.skill]?.includes(req.item)) return true;
     if (req.type === 'MasteryGuildRank' && req.rank && profile.ranks?.[req.skill]?.includes(req.rank)) return true;
     if (req.type === 'ShopPurchase' && (profile.purchases?.[req.purchase] ?? 0) >= req.amount) return true;
+    if (req.type === 'AstrologyMajorNodeUnlocked' || req.type === 'AstrologyMinorNodeUnlocked') {
+      if (req.node && profile.astrologyNodes?.includes(req.node)) return true;
+    }
+    if (['AgilityCourseStatistic', 'AstrologyEventStatistic', 'ItemStatistic'].includes(req.type)) {
+      if ((profile.recipeStatistics?.[req.statistic]?.[req.statisticTarget] ?? 0) >= req.statisticValue) return true;
+    }
     return confirmed;
   };
-  return action.requirementGroups.every(group => {
-    let passed = requirementMet(group[0]);
-    for (const req of group.slice(1)) passed = req.or ? passed || requirementMet(req) : passed && requirementMet(req);
-    return passed;
-  });
+  let passed = !group.length || requirementMet(group[0]);
+  for (const req of group.slice(1)) passed = req.or ? passed || requirementMet(req) : passed && requirementMet(req);
+  return passed;
+}
+
+function unlocked(action, profile) {
+  if (!profile.levels[action.skill] || profile.excluded?.includes(action.id)) return false;
+  const confirmed = profile.confirmed?.includes(action.id);
+  return action.requirementGroups.every(group => meetsRequirements(group, profile, confirmed));
 }
 
 function thievingSuccess(action, level, stat, bonus) {
   const stealth = Math.max(0, Math.floor((level + stat('FlatStealth') + (bonus.stealth ?? 0)) * (1 + stat('PercentStealth'))));
   const perception = Math.max(0, Math.floor((action.perception + stat('FlatPerception')) * (1 + stat('PercentPerception'))));
   return probability((100 + stealth) / (100 + perception));
+}
+
+function cookingPlan(action, profile, catalog, stat, bonus) {
+  const difficulty = Math.max(0, action.difficulty + stat('FlatDifficulty'));
+  const preserveOnFail = probability(stat('PreservationChanceOnFail'));
+  const preserve = probability(stat('PreservationChance'));
+  const charges = (profile.cookingCharges ?? []).flatMap(({ item, quantity }) => {
+    const data = catalog.items[item]?.cookingCharges;
+    return quantity > 0 && data?.triggers.some(trigger =>
+      ['recipe', 'category', 'subcategory'].every(key => !trigger[key] || trigger[key] === action[key]))
+      ? [{ item, quantity, modifiers: data.modifiers }] : [];
+  });
+  let used = 0;
+  const phases = [...new Set(charges.map(row => row.quantity)), Infinity].sort((a, b) => a - b).map(end => {
+    const active = charges.filter(row => row.quantity > used).flatMap(row => row.modifiers);
+    const proficiencyStat = active.length ? actionModifiers(action, profile, catalog, active) : stat;
+    const proficiency = Math.max(0, profile.levels.Cooking + proficiencyStat('FlatProficiency') + (bonus.proficiency ?? 0));
+    const success = probability((69 + proficiency) / (69 + difficulty));
+    const phase = { proficiency, success, length: end - used, consumes: (1 - preserve) * (1 - (1 - success) * preserveOnFail) };
+    used = end;
+    return phase;
+  });
+  function total(attempts, key) {
+    let remaining = attempts;
+    let value = 0;
+    for (const phase of phases) {
+      const length = Math.min(remaining, phase.length);
+      value += length * phase[key];
+      remaining -= length;
+      if (remaining <= 0) break;
+    }
+    return value;
+  }
+  function attemptsFor(amount, key, whole = false) {
+    let attempts = 0;
+    for (const phase of phases) {
+      const length = phase[key] ? amount / phase[key] : Infinity;
+      const bound = whole ? Math.floor(length) : length;
+      if (bound < phase.length || !Number.isFinite(phase.length)) return attempts + bound;
+      attempts += phase.length;
+      amount -= phase.length * phase[key];
+      if (amount <= 0) return attempts;
+    }
+    return attempts;
+  }
+  return { difficulty, proficiency: phases[0].proficiency, success: phases[0].success, preserveOnFail,
+    charges, total, attemptsFor };
 }
 
 function evaluate(action, profile, catalog, settings) {
@@ -100,6 +154,7 @@ function evaluate(action, profile, catalog, settings) {
   const stat = actionModifiers(action, profile, catalog);
   const flatInterval = stat('FlatInterval') / 1000;
   const percentInterval = stat('PercentInterval');
+  const manualInterval = 1 + (bonus.interval ?? 0) / 100;
   const wood = action.kind === 'Woodcutting' ? woodcuttingModifiers(action, stat, bonus.interval ?? 0) : null;
   const woodHits = wood?.hits ?? 0;
   let seconds = Math.floor((action.seconds * 1000 + stat('FlatInterval')) * (1 + percentInterval)) / 1000;
@@ -110,19 +165,25 @@ function evaluate(action, profile, catalog, settings) {
       (1 + percentInterval + stat('PercentMaxInterval'))) / 1000;
     seconds = (minimum + Math.max(minimum, maximum)) / 2;
   }
+  let brewing;
+  let craftingSteps;
   if (action.kind === 'Herblore') {
-    seconds = action.phases.reduce((total, { phase, seconds }) => {
-      const duration = Math.floor(seconds * 1000 * (1 + stat('Percent' + phase + 'Interval')) +
-        stat('Flat' + phase + 'Interval')) / 1000;
-      return total + duration * (phase === 'Bottling' ? 10 : 1);
-    }, 0);
+    const [preparing, heating, stirring, bottling] = action.phases.map(({ phase, seconds }) =>
+      Math.floor(seconds * 1000 * (1 + percentInterval + stat('Percent' + phase + 'Interval')) +
+        stat('FlatInterval') + stat('Flat' + phase + 'Interval')) / 1000);
+    brewing = { setup: (preparing + heating + stirring) * manualInterval, bottling: bottling * manualInterval, batchSize: 10 };
+    if (brewing.setup < 0 || !(brewing.bottling > 0)) return;
+    seconds = (preparing + heating + stirring) / brewing.batchSize + bottling;
+  } else if (action.kind === 'Artisan' || action.kind === 'Cooking') {
+    seconds = Math.floor(action.seconds * 1000 * (1 + percentInterval) + stat('FlatInterval')) / 1000;
   }
   if (action.kind === 'Artisan') {
     const steps = Math.max(1, Math.trunc(action.steps + stat('FlatSteps')));
-    seconds = Math.floor((action.seconds * (1 + percentInterval) + flatInterval) * 1000) / 1000 *
-      expectedSteps(steps, probability(stat('SkipStepChance')));
+    const skip = probability(stat('SkipStepChance'));
+    craftingSteps = { steps, skip };
+    seconds *= expectedSteps(steps, skip);
   }
-  seconds = wood ? wood.interval * wood.hits : seconds * (1 + (bonus.interval ?? 0) / 100);
+  seconds = wood ? wood.interval * wood.hits : seconds * manualInterval;
   if (!Number.isFinite(seconds) || seconds <= 0) return;
   let cash = action.cash;
   let directSources;
@@ -136,10 +197,8 @@ function evaluate(action, profile, catalog, settings) {
   let success = 1;
   let thievingCompletion = 1;
   let risky = false;
-  if (action.kind === 'Cooking') {
-    const proficiency = Math.max(0, level + stat('FlatProficiency') + (bonus.proficiency ?? 0));
-    success = probability((69 + proficiency) / (69 + Math.max(0, action.difficulty + stat('FlatDifficulty'))));
-  }
+  const cooking = action.kind === 'Cooking' ? cookingPlan(action, profile, catalog, stat, bonus) : null;
+  let thieving;
   if (action.kind === 'Thieving') {
     success = thievingSuccess(action, level, stat, bonus);
     risky = success < 1 && action.damage > 0 && probability(stat('DamageAvoidanceChance')) < 1;
@@ -148,6 +207,7 @@ function evaluate(action, profile, catalog, settings) {
     seconds += (1 - success) * (1 - probability(stat('StunAvoidanceChance'))) * stun;
     thievingCompletion = success / expectedSteps(Math.max(1, action.steps + Math.trunc(stat('FlatStages'))),
       probability(stat('SkipStageChance')));
+    thieving = { success, completion: thievingCompletion, stun };
     cash = 0;
     directSources = [];
     function addLoot(table, odds, fortune, source, target, doubling) {
@@ -185,27 +245,48 @@ function evaluate(action, profile, catalog, settings) {
       }
     }
   }
-  for (const [index, [id, qty, chance]] of action.rewards.entries()) {
+  const singleProduct = Boolean(cooking || brewing);
+  const products = singleProduct ? [...action.rewards].sort((a, b) => a[2] - b[2]) : action.rewards;
+  let productChanceLeft = 1;
+  for (const [index, [id, qty, chance]] of products.entries()) {
     if (action.kind === 'Mining') {
       add(id, qty * probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id))), 'hit');
     } else if (action.kind === 'Woodcutting' && index > 0) {
       add(id, (qty + Math.trunc(stat('FlatOnCutItemQuantity', id))) *
         probability((chance + stat('FlatOnCutItemChance', id)) * (1 + stat('PercentOnCutItemChance', id))), 'cut');
+    } else if (action.kind === 'Firemaking') {
+      const quantity = qty + Math.trunc(stat('FlatProductQuantity', id));
+      const odds = probability(chance * (1 + stat('IncreasedProductChance', id)) + stat('FlatProductChance', id));
+      add(id, quantity * odds, 'product');
     } else {
       const quantity = Math.max(1, Math.trunc((qty + stat('FlatProductQuantity', id)) * (1 + stat('PercentProductQuantity', id))));
-      const odds = action.kind === 'Firemaking'
-        ? probability(chance * (1 + stat('IncreasedProductChance', id)) + stat('FlatProductChance', id)) : chance;
+      const odds = singleProduct ? Math.min(probability(chance), productChanceLeft) : chance;
+      if (singleProduct) productChanceLeft -= odds;
       add(id, quantity * odds * success, 'product');
     }
   }
-  if (action.kind === 'Firemaking') cash *= 1 + stat('PercentCurrencyReward', 'GoldPieces');
+  if (action.kind === 'Firemaking' && (action.cashReward || cash)) {
+    cash = Math.max(1, Math.trunc(cash * (1 + stat('PercentCurrencyReward', 'GoldPieces')) +
+      stat('FlatCurrencyReward', 'GoldPieces'))) * (1 + probability(stat('DoublingChance')));
+  }
+  for (const event of action.events ?? []) {
+    if (!meetsRequirements(event.requirements, profile)) continue;
+    if (action.kind === 'Firemaking') {
+      add(event.item, Math.max(1, Math.trunc(event.quantity * seconds)) * event.chance, 'event');
+    } else {
+      const chance = probability(event.chance * (1 + stat('PercentEventChance', undefined, event.id)) +
+        stat('FlatEventChance', undefined, event.id));
+      const quantity = event.quantity + level * event.quantityPerLevel / 2;
+      add(event.item, quantity * chance * (1 + probability(stat('ItemDoublingChance', undefined, event.id))), 'event');
+    }
+  }
   if (action.kind === 'Woodcutting') {
     for (const [id, qty, chance] of action.hitRewards) {
       add(id, (qty + Math.trunc(stat('FlatOnHitItemQuantity', id))) *
         probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id))) * woodHits, 'hit');
     }
   }
-  let xpChance = action.kind === 'Cooking' ? success : thievingCompletion;
+  let xpChance = thievingCompletion;
   let mining;
   if (action.kind === 'Mining') {
     const [id, qty, baseChance] = action.ore;
@@ -226,11 +307,17 @@ function evaluate(action, profile, catalog, settings) {
     add(action.stone, probability(stat('StoneItemChance')), 'hit');
     add(action.essence, probability(stat('EssenceItemChance')), 'hit');
   }
+  let fishing;
   if (action.kind === 'Fishing') {
     const baseFishChance = probability((action.fishChance + stat('FlatFishChance') + (bonus.fishChance ?? 0) / 100) *
       (1 + stat('IncreasedFishChance')));
-    const junkChance = (1 - baseFishChance) * (1 - probability(stat('JunkRerollChance')));
-    for (const [id, qty, chance] of action.fish) add(id, qty * chance * (1 - junkChance), 'fish');
+    const priority = action.fish.find(([id]) => id === profile.fishingPriorities?.[action.recipe]);
+    const priorityChance = priority ? baseFishChance * priority[2] : 0;
+    const junkChance = (1 - priorityChance) * (1 - baseFishChance) * (1 - probability(stat('JunkRerollChance')));
+    for (const [id, qty, chance] of action.fish) {
+      add(id, qty * (chance * (1 - priorityChance - junkChance) + (id === priority?.[0] ? priorityChance : 0)), 'fish');
+    }
+    fishing = { junkChance, priority: priority?.[0] };
     const conversion = stat('JunkToGP');
     if (conversion > 0 && action.junk) {
       const price = (catalog.items[action.junk]?.price ?? 0) * conversion;
@@ -253,15 +340,25 @@ function evaluate(action, profile, catalog, settings) {
   const ingredients = action.costs.map(([id, qty]) => [id, Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost', id))))]);
   const currencyIngredients = action.currencyCosts.map(([id, qty]) => [id, Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost'))))]);
   const preservation = probability(stat('PreservationChance'));
-  const consumption = (1 - preservation) * (action.kind === 'Cooking'
-    ? 1 - (1 - success) * probability(stat('PreservationChanceOnFail')) : 1);
-  const scheduled = Math.floor(settings.seconds / seconds);
+  let consumption = 1 - preservation;
+  let scheduled = Math.floor(settings.seconds / seconds);
+  let durationForCycles = cycles => cycles * seconds;
+  if (brewing) {
+    const { setup, bottling, batchSize } = brewing;
+    const batchTime = setup + bottling * batchSize;
+    const batches = Math.floor(settings.seconds / batchTime);
+    const partial = Math.floor((settings.seconds - batches * batchTime - setup) / bottling);
+    scheduled = batches * batchSize + Math.max(0, Math.min(batchSize, partial));
+    durationForCycles = cycles => Math.ceil(cycles / batchSize) * setup + cycles * bottling;
+  }
   let cycles = scheduled;
   let stockCycles = Infinity;
   let limit = '';
+  const possibleCycles = portions => !portions ? 0 : cooking ? cooking.attemptsFor(portions, 'consumes', true) :
+    consumption ? Math.floor(portions / consumption) : Infinity;
   for (const [id, qty] of ingredients) {
     const available = profile.keep?.includes(id) ? 0 : stock[id] ?? 0;
-    const possible = available < qty ? 0 : consumption ? Math.floor(available / (qty * consumption)) : Infinity;
+    const possible = possibleCycles(Math.floor(available / qty));
     stockCycles = Math.min(stockCycles, possible);
     if (possible < cycles) {
       cycles = possible;
@@ -270,7 +367,7 @@ function evaluate(action, profile, catalog, settings) {
   }
   for (const [id, qty] of currencyIngredients) {
     const available = currencies[id] ?? 0;
-    const possible = available < qty ? 0 : consumption ? Math.floor(available / (qty * consumption)) : Infinity;
+    const possible = possibleCycles(Math.floor(available / qty));
     stockCycles = Math.min(stockCycles, possible);
     if (possible < cycles) {
       cycles = possible;
@@ -278,8 +375,14 @@ function evaluate(action, profile, catalog, settings) {
     }
   }
   if (cycles <= 0 || !Number.isFinite(cycles)) return;
+  const effectiveCycles = cooking ? cooking.total(cycles, 'success') : cycles;
+  if (cooking) {
+    consumption = cooking.total(cycles, 'consumes') / cycles;
+    cooking.sessionSuccess = effectiveCycles / cycles;
+  }
   const drops = [...rewards.values()].map(({ id, source, target, quantity, doubling }) => {
-    const amount = quantity * cycles * (target ? (1 + doubling) * (1 + (bonus.output ?? 0) / 100) : outputMultiplier);
+    const amount = quantity * effectiveCycles * (source === 'event' ? 1 :
+      target ? (1 + doubling) * (1 + (bonus.output ?? 0) / 100) : outputMultiplier);
     const unitPrice = catalog.items[id]?.price ?? 0;
     const sold = settings.sell && (source !== 'special' || settings.sellSpecial !== false) && !profile.keep?.includes(id);
     return { id, source, target, quantity: amount, unitPrice, value: sold ? unitPrice * amount : 0, sold };
@@ -287,6 +390,11 @@ function evaluate(action, profile, catalog, settings) {
   const inputs = [...ingredients.map(([id, qty]) => ({ id, qty, unitPrice: catalog.items[id]?.price ?? 0 })),
     ...currencyIngredients.map(([id, qty]) => ({ id, qty, unitPrice: id === 'GoldPieces' ? 1 : 0, currency: true }))]
     .map(input => ({ ...input, quantity: input.qty * cycles * consumption, value: input.qty * cycles * consumption * input.unitPrice }));
+  for (const { item: id, quantity: charges } of cooking?.charges ?? []) {
+    const quantity = Math.min(charges, cycles);
+    const unitPrice = catalog.items[id]?.price ?? 0;
+    inputs.push({ id, quantity, unitPrice, value: quantity * unitPrice });
+  }
   const sales = drops.reduce((total, row) => total + row.value, 0);
   const materialCost = inputs.reduce((total, row) => total + (row.currency ? 0 : row.value), 0);
   const goldCost = inputs.reduce((total, row) => total + (row.currency ? row.value : 0), 0);
@@ -295,18 +403,27 @@ function evaluate(action, profile, catalog, settings) {
   const net = payout - materialCost;
   const knownXpPercent = stat('PercentXPGained') * 100;
   const manualXpPercent = profile.xpBonuses?.[action.skill] ?? 0;
-  const xpPerCycle = Math.max(0, ((action.baseXp ?? 0) + stat('FlatXPGained')) *
+  const xpPerReward = Math.max(0, ((action.baseXp ?? 0) + stat('FlatXPGained')) *
     (1 + (knownXpPercent + manualXpPercent) / 100) * xpChance);
+  const xpPerCycle = xpPerReward * effectiveCycles / cycles;
+  const hoursForXp = xp => {
+    if (xpPerReward <= 0) return null;
+    const attempts = xp / xpPerReward;
+    if (cooking) return durationForCycles(cooking.attemptsFor(attempts, 'success')) / 3600;
+    return durationForCycles(brewing ? Math.ceil(attempts) : attempts) / 3600;
+  };
   const knowledge = action.knowledge == null ? null : Math.max(0,
     (action.knowledge + stat('FlatKnowledge')) * (1 + stat('PercentKnowledge')));
   return {
-    action, cycles, net, payout, limit, activeHours: cycles * seconds / 3600,
+    action, cycles, net, payout, limit, activeHours: durationForCycles(cycles) / 3600,
     direct, directSources: directSources?.map(row => ({ ...row, value: row.value * cycles })),
     sales, materialCost, goldCost, drops, inputs, seconds, knowledge, percentInterval, flatInterval,
     netPerHour: net / settings.hours, payoutPerHour: payout / settings.hours,
-    xp: xpPerCycle * cycles, xpPerHour: xpPerCycle * cycles / settings.hours, stockXp: xpPerCycle ? stockCycles * xpPerCycle : 0,
+    xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
+    stockXp: xpPerReward ? (cooking && Number.isFinite(stockCycles) ? cooking.total(stockCycles, 'success') : stockCycles) * xpPerReward : 0,
     sustainableXpPerHour: xpPerCycle * 3600 / seconds, knownXpPercent, manualXpPercent, risky,
-    wood, mining, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
+    wood, mining, cooking, thieving, fishing, brewing, craftingSteps, preservation, consumption,
+    hoursForXp, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
   };
 }
 

@@ -41,7 +41,8 @@ function shopVisibility(upgrade, character, purchased) {
   return { state: 'unknown' };
 }
 
-function calculateShoppingList(shop, items, selected, character, scope = 'all', purchaseFilter = 'pending', language = 'zh') {
+function calculateShoppingList(shop, items, selected, character, scope = 'all', purchaseFilter = 'pending', language = 'zh',
+  formatName = (names, fallback) => names?.[language] ?? fallback) {
   const resources = new Map();
   let upgradeCount = 0;
   let hiddenCount = 0;
@@ -67,11 +68,11 @@ function calculateShoppingList(shop, items, selected, character, scope = 'all', 
       let resource = resources.get(key);
       if (!resource) {
         const isCurrency = cost.type === 'currency';
+        const names = isCurrency ? shop.currencyLabels?.[cost.id] : items[cost.id]?.names;
+        const fallback = isCurrency ? shop.currencies[cost.id] : items[cost.id]?.name;
         resource = {
           ...cost, total: 0, spent: 0, uses: [],
-          names: isCurrency ? shop.currencyLabels?.[cost.id] : items[cost.id]?.names,
-          name: (isCurrency ? shop.currencyLabels?.[cost.id]?.[language] ?? shop.currencies[cost.id]
-            : items[cost.id]?.names?.[language] ?? items[cost.id]?.name) ?? cost.id,
+          names, name: formatName(names, fallback) ?? cost.id,
           available: character.date
             ? (isCurrency ? character.currencies[cost.id] : character.stock[cost.id]) ?? 0
             : null
@@ -96,7 +97,7 @@ let shopView;
 
 function shopCurrencyName(id) {
   const shop = shopView?.shop;
-  return shop?.currencyLabels?.[id]?.[uiLanguage] ?? shop?.currencies?.[id] ??
+  return localizedName(shop?.currencyLabels?.[id], shop?.currencies?.[id]) ??
     (id === 'GoldPieces' ? t('金币') : id);
 }
 
@@ -167,14 +168,15 @@ function renderShop() {
   const purchaseFilter = purchases.disabled ? 'pending' : purchases.value;
   const showPurchased = purchaseFilter !== 'pending';
   const showPending = purchaseFilter !== 'purchased';
-  const list = calculateShoppingList(shop, items, selected, character, scope, purchaseFilter, uiLanguage);
+  const list = calculateShoppingList(shop, items, selected, character, scope, purchaseFilter, uiLocale(), localizedName);
   const search = byId('shopSearch').value.trim().toLocaleLowerCase();
   const shortages = byId('shopShortages');
   shortages.disabled = !character.date || !showPending;
   const showShortages = shortages.checked && !shortages.disabled;
   const matches = list.resources.filter(resource => (!showShortages || resource.shortage > 0) && (
     !search || [resource.name, resource.id, ...Object.values(resource.names ?? {})].some(name => name.toLocaleLowerCase().includes(search)) ||
-    resource.uses.some(({ upgrade }) => [upgrade.name, upgrade.id, upgrade.section, categoryNames.get(upgrade.group),
+    resource.uses.some(({ upgrade }) => [gameName(upgrade), upgrade.name, upgrade.id, upgrade.section,
+      localizedName(upgrade.sectionNames, upgrade.section), categoryNames.get(upgrade.group),
       ...Object.values(upgrade.names ?? {}), ...Object.values(upgrade.sectionNames ?? {})]
       .some(text => text?.toLocaleLowerCase().includes(search)))
   ));
@@ -275,7 +277,7 @@ function renderShopResource(resource, expanded, showPurchased, showPending) {
     }
     if (requirements.length) name.append(create('small', requirements.join(' · ')));
     const category = categoryNames.get(upgrade.group);
-    const section = upgrade.sectionNames?.[uiLanguage] ?? upgrade.section;
+    const section = localizedName(upgrade.sectionNames, upgrade.section);
     const location = category === section ? category : category + ' › ' + section;
     row.append(name, create('td', location));
     if (showPurchased) row.append(create('td', purchased ? fullNumber(spent) : '—', 'number'));

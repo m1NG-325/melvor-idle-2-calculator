@@ -8,6 +8,7 @@ let preferences = {};
 let preferencesReady = false;
 let preferencesTimer;
 let lastSettings = '';
+let settingsRequest = Promise.resolve(true);
 const profileEdits = new Map();
 const defaultTheme = { hue: 173, lightness: 68 };
 const themePresets = [343, 12, 35, 53, 94, 146, 173, 195, 220, 252, 277, 313];
@@ -98,7 +99,7 @@ function restorePreferences() {
 
 function savePreferences() {
   clearTimeout(preferencesTimer);
-  if (!preferencesReady) return;
+  if (!preferencesReady) return Promise.resolve(false);
   const settings = JSON.stringify({
     version: 1, language: uiLanguage, page: location.hash, theme,
     character: byId('save').value ? byId('save').selectedOptions[0]?.dataset.characterId : 'manual',
@@ -118,19 +119,22 @@ function savePreferences() {
     combatSupplies: combatView.supplies.map(({ item, use, stock, automatic }) =>
       ({ item: item.value, use: use.value, stock: stock.value, automatic }))
   });
-  if (settings === lastSettings) return;
+  if (settings === lastSettings) return settingsRequest;
   lastSettings = settings;
-  fetch('preferences', {
+  settingsRequest = settingsRequest.then(() => fetch('preferences', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: settings, keepalive: new Blob([settings]).size < 60 * 1024
-  }).then(response => {
+  })).then(response => {
     if (!response.ok) throw Error('settings_write_failed');
     byId('settingsNotice').hidden = true;
+    return true;
   }).catch(() => {
     if (lastSettings === settings) lastSettings = '';
     byId('settingsNotice').textContent = t('无法保存工具设置。请检查工具目录的写入权限。');
     byId('settingsNotice').hidden = false;
+    return false;
   });
+  return settingsRequest;
 }
 
 function queuePreferences() {
