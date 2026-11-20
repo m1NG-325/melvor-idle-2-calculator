@@ -56,12 +56,31 @@ h2 { font-size: 17px; margin-bottom: 12px; }
   display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 7px 10px;
   border: 1px solid transparent; border-radius: 10px; color: var(--muted); text-decoration: none;
 }
-.nav-symbol { width: 20px; text-align: center; font-size: 18px; line-height: 1; }
+.nav-icon {
+  width: 20px; height: 20px; flex: 0 0 20px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
 .page-nav a:hover { background: var(--surface); }
 .page-nav a[aria-current=page] { color: #d3fff7; border-color: #37666a; background: var(--aqua-tint); font-weight: 700; }
 .save-controls { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
 .save-controls select { width: 100%; }
 .update-progress { width: 100%; height: .55rem; accent-color: var(--aqua); }
+.quest-select { max-width: 28rem; }
+.quest-step > summary { font-weight: 650; }
+.quest-objectives, .quest-task { display: grid; gap: .45rem; }
+.quest-objectives { margin-top: .85rem; }
+.quest-task + .quest-task { border-top: 1px solid var(--line); padding-top: .65rem; }
+.quest-objective { background: var(--surface); border: 1px solid var(--line); border-radius: .7rem; padding: .65rem .8rem; }
+.quest-objective h3 { margin: 0 0 .25rem; font-size: 1rem; }
+.quest-source-paths { margin: .25rem 0 .2rem; padding-inline-start: 1.25rem; }
+.quest-source-paths li + li { margin-top: .3rem; }
+.quest-source-paths small { display: block; }
+.quest-yield { color: var(--aqua); margin-inline-start: .45rem; white-space: nowrap; }
+.quest-objective-progress { margin: .2rem 0 .4rem; color: var(--aqua); font-size: .9rem; }
+.shop-source-comparison { margin-bottom: .7rem; }
+.shop-source-comparison > summary { color: var(--aqua); }
+.quest-recipe-inputs { margin: .2rem 0; padding-inline-start: 1.2rem; color: var(--muted); font-size: .9em; }
+.quest-more summary { color: var(--aqua); }
 main { min-width: 0; }
 
 .panel { margin-top: 14px; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
@@ -135,6 +154,15 @@ select:not(:disabled) { cursor: pointer; }
     overflow-wrap: anywhere;
   }
   select option:is(:hover, :focus-visible, :checked) { background: var(--aqua-tint); }
+  #questChoice option { display: flex; align-items: center; }
+  #questChoice option[data-completed]::after {
+    content: "√";
+    flex: 0 0 auto;
+    margin-inline-start: auto;
+    padding-inline-start: .4rem;
+    color: var(--aqua);
+    font-weight: 700;
+  }
 }
 .quick { display: flex; gap: 5px; }
 .check { display: flex; align-items: center; min-height: 38px; }
@@ -143,12 +171,15 @@ select:not(:disabled) { cursor: pointer; }
 .metrics { display: flex; flex-wrap: wrap; gap: 16px 30px; }
 .metrics strong { display: block; color: var(--aqua); font-size: 23px; }
 .scroll { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 6px; }
-th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; text-align: center; }
+:is(th, td):first-child { text-align: left; }
+:is(th, td):last-child:not(:first-child) { text-align: right; }
+td input[type=checkbox] { margin-inline: 0; }
 th { color: var(--muted); font-weight: 600; }
 td small { display: block; margin-top: 3px; }
 td .action-context { display: inline; margin: 0 0 0 .35rem; }
-.number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.number { font-variant-numeric: tabular-nums; white-space: nowrap; }
 details > summary { font-weight: 650; }
 details > .inputs, details > .scroll, details > p { margin-top: 12px; }
 .empty { padding: 18px 0; }
@@ -177,6 +208,10 @@ details > .inputs, details > .scroll, details > p { margin-top: 12px; }
   display: grid; grid-template-columns: var(--shop-columns); align-items: baseline;
   column-gap: 12px; padding: 9px 11px;
 }
+:is(.shop-header, .shop-row-content) > span { text-align: center; }
+:is(.shop-header, .shop-row-content) > span:first-child { text-align: left; }
+:is(.shop-header, .shop-row-content) > span:last-child,
+.purchased-only :is(.shop-header, .shop-row-content) > span:nth-last-child(2) { text-align: right; }
 .shop-header { background: var(--surface); border-radius: 9px; font-size: 12px; font-weight: 650; padding-left: 29px; }
 summary.shop-row { display: list-item; padding: 0 0 0 9px; border-radius: 9px; }
 summary.shop-row::marker { color: var(--aqua); }
@@ -252,6 +287,7 @@ td .xp-progress { min-width: 10rem; }
 .income-sources summary { cursor: pointer; }
 .income-sources ul { margin: .4rem 0; padding-inline-start: 1.25rem; }
 .income-sources li { margin-block: .2rem; }
+.kept-drop-list:not(:empty) { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 #combatSuppliesTable { margin-block: .6rem; }
 #combatSupplies input { width: 100%; min-width: 7rem; }
 #combatSupplies input[list] { min-width: 13rem; }

@@ -1,4 +1,5 @@
 const { GOLD, localId } = require('./game-data.cjs');
+const { makeQuestGuide } = require('./quest-catalog.cjs');
 
 const SKILLS = {
   Woodcutting: '伐木', Mining: '采矿', Fishing: '钓鱼', Thieving: '偷窃',
@@ -109,7 +110,8 @@ function makeCatalog(data) {
     type: localId(Type), skill: localId(Data.Component?.Entity), level: Data.Level, or: !!Data.IsOr,
     item: localId(Data.Item), rank: localId(Data.Rank), node: localId(Data.MajorNode ?? Data.MinorNode),
     purchase: localId(Data.ShopPurchase), amount: Data.Amount, statistic: localId(Data.Statistic),
-    statisticTarget: localId(Data.Course ?? Data.Event ?? Data.Item), statisticValue: Data.Value
+    statisticTarget: localId(Data.Course ?? Data.Event ?? Data.Item), statisticValue: Data.Value,
+    quest: localId(Data.Quest), questStep: Data.Step, questTask: Data.Task, goalIdIncomplete: Data.GoalIdIncomplete
   }));
 
   for (const skill of [...Object.keys(SKILLS), 'Herblore', 'Astrology']) {
@@ -325,7 +327,7 @@ function makeCatalog(data) {
   };
   return { items, actions, combatTargets: makeCombatTargets(data, items), combatSlots, combatSpells, combatSupplies, combatModel,
     skills: SKILLS, xpActions, xpSkills: XP_SKILLS, shopModifiers, astrologyModifiers,
-    petModifiers, equipmentSets, mastery };
+    petModifiers, equipmentSets, mastery, questGuide: makeQuestGuide(data) };
 }
 
 module.exports = { makeCatalog };

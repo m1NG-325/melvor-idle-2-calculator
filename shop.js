@@ -251,6 +251,20 @@ function renderShopResource(resource, expanded, showPurchased, showPending) {
   summary.append(columns);
 
   const uses = create('div', undefined, 'shop-uses');
+  if (resource.type === 'item' && showPending && resource.shortage > 0) {
+    const sources = create('details', undefined, 'shop-source-comparison');
+    sources.dataset.resource = 'sources:' + detail.dataset.resource;
+    sources.open = expanded.has(sources.dataset.resource);
+    sources.append(create('summary', t('比较获取途径')));
+    const showSources = () => {
+      if (sources.open && sources.childElementCount === 1) {
+        sources.append(questSourceList(questSourcesFor(resource.id), resource.id, resource.shortage));
+      }
+    };
+    sources.addEventListener('toggle', showSources);
+    showSources();
+    uses.append(sources);
+  }
   const table = create('table');
   const header = create('thead');
   const headings = create('tr');

@@ -219,6 +219,17 @@ function readMastery(components, levels, description, unlockedPets, astrologyNod
 function readCombatProfile(components, onWarning) {
   if (!components) return null;
   const combat = {};
+  try {
+    const reader = components.get('Areas');
+    if (reader) {
+      reader.int();
+      reader.int();
+      const [area, enemy, dungeon] = Array.from({ length: 3 }, () => reader.byte() ? localId(reader.string()) : null);
+      combat.encounter = { area, enemy, dungeon };
+    }
+  } catch {
+    onWarning('Areas', 'Combat');
+  }
   for (const [component, key] of [['Equipment', 'equipment'], ['Toolbelt', 'toolbelt']]) {
     try {
       const slots = components.get(component)?.regions();
@@ -317,6 +328,28 @@ function readFishingPriorities(reader) {
   return priorities;
 }
 
+function readQuestProgress(reader) {
+  if (!reader) return;
+  const readGoal = reader => ({ progress: reader.double(), complete: Boolean(reader.byte()) });
+  const readTask = reader => {
+    const goals = Object.fromEntries([...reader.regions()].map(([id, goal]) => [id, readGoal(goal)]));
+    const flags = reader.buffer.length - reader.offset - 4;
+    if (flags !== 2 && flags !== 3) throw new Error('无法识别任务进度格式');
+    reader.take(flags);
+    return { status: reader.int(), goals };
+  };
+  const readStep = reader => {
+    const tasks = Object.fromEntries([...reader.regions()].map(([id, task]) => [id, readTask(task)]));
+    reader.byte();
+    return { status: reader.int(), tasks };
+  };
+  return Object.fromEntries([...reader.regions()].map(([id, quest]) => {
+    const status = quest.int();
+    const steps = Object.fromEntries([...quest.regions()].map(([id, step]) => [id, readStep(step)]));
+    return [localId(id), { status, steps }];
+  }));
+}
+
 function readProfile(file, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}) {
   const { reader, ...header } = readHeader(fs.readFileSync(file));
   const entities = reader.regions();
@@ -388,6 +421,12 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
   } catch {
     onWarning('Action', 'Fishing');
   }
+  let questProgress;
+  try {
+    questProgress = readQuestProgress(componentsFor('Quests')?.get('Quests'));
+  } catch {
+    onWarning('Quests', 'Quests');
+  }
   const ranks = {};
   for (const [skill, description] of Object.entries(mastery)) {
     try {
@@ -399,6 +438,7 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
   return {
     ...header, levels, skillXp, equipped, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
     dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, fishingPriorities, recipeStatistics, unlockedPets, ranks, combat,
+    questProgress,
     currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
     date: fs.statSync(file).mtime.toISOString()
   };

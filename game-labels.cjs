@@ -103,6 +103,12 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true) {
   shop.currencyLabels = Object.fromEntries(Object.entries(shop.currencies).map(([id, name]) => [
     id, label(name, alternatives.shop?.currencies[id], id)
   ]));
+  const otherGuide = alternatives.catalog?.questGuide;
+  const otherQuests = new Map((otherGuide?.quests ?? []).map(quest => [quest.id, quest.name]));
+  for (const quest of catalog.questGuide.quests) quest.names = label(quest.name, otherQuests.get(quest.id), quest.id);
+  for (const [ref, record] of Object.entries(catalog.questGuide.names)) {
+    record.names = label(record.name, otherGuide?.names[ref]?.name, ref.slice(ref.indexOf(':') + 1));
+  }
 }
 
 function humanize(id) {

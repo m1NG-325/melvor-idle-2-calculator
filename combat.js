@@ -46,10 +46,14 @@ function measuredCombatRate(before, after) {
   if (!first || !next || first.deaths !== next.deaths) return null;
   const setup = combatSetup(before);
   if (!setup || setup !== combatSetup(after)) return null;
+  const encounter = before.combat.encounter;
+  const nextEncounter = after.combat.encounter;
+  if (!encounter?.area || !encounter.enemy || encounter.dungeon || nextEncounter?.dungeon ||
+      encounter.area !== nextEncounter?.area || encounter.enemy !== nextEncounter?.enemy) return null;
   const milliseconds = next.milliseconds - first.milliseconds;
   if (milliseconds <= 0) return null;
   const changes = combatKillChanges(first, next);
-  if (changes.length !== 1 || changes[0].kills < 1) return null;
+  if (changes.length !== 1 || changes[0].kills < 1 || changes[0].id !== encounter.enemy) return null;
   const usage = first.usageTracked && next.usageTracked ? Object.fromEntries(
     Object.keys(next.supplies ?? {}).map(id => {
       const change = next.supplies[id] - (first.supplies?.[id] ?? 0);
@@ -61,7 +65,8 @@ function measuredCombatRate(before, after) {
     ? (next.foodEaten[food] ?? 0) - (first.foodEaten[food] ?? 0) : null;
   const foodUsage = portions != null && portions >= 0 && milliseconds >= 120000 && changes[0].kills >= 5
     ? { id: food, perHour: portions * 3600000 / milliseconds } : null;
-  return { ...changes[0], milliseconds, perHour: changes[0].kills * 3600000 / milliseconds, usage, foodUsage };
+  return { ...changes[0], area: encounter.area, setup, milliseconds,
+    perHour: changes[0].kills * 3600000 / milliseconds, usage, foodUsage };
 }
 
 function combatKillChanges(first, next) {
@@ -71,19 +76,24 @@ function combatKillChanges(first, next) {
 }
 
 function updateCombatSample(entry, snapshot) {
-  if (!entry) return { snapshot, checkedAt: snapshot.date, rate: null };
+  if (!entry) return { snapshot, checkedAt: snapshot.date, rates: [] };
   if (Date.parse(snapshot.date) <= Date.parse(entry.checkedAt ?? entry.snapshot.date)) return entry;
   const first = entry.snapshot.combat.totals;
   const next = snapshot.combat.totals;
+  const before = entry.snapshot.combat.encounter;
+  const after = snapshot.combat.encounter;
+  const rates = entry.rates ?? [];
   const changes = combatKillChanges(first, next);
   const reset = next.deaths !== first.deaths || next.milliseconds < first.milliseconds ||
-    combatSetup(snapshot) !== combatSetup(entry.snapshot) || changes.length > 1 || changes.some(row => row.kills < 0);
-  if (reset) return { snapshot, checkedAt: snapshot.date, rate: null };
+    !after?.area || !after.enemy || after.dungeon || before?.dungeon ||
+    before?.area !== after.area || before?.enemy !== after.enemy ||
+    combatSetup(snapshot) !== combatSetup(entry.snapshot) ||
+    changes.some(row => row.kills < 0 || row.id !== after.enemy);
+  if (reset) return { snapshot, checkedAt: snapshot.date, rates };
   const result = measuredCombatRate(entry.snapshot, snapshot);
-  const enough = rate => rate?.milliseconds >= 120000 && rate.kills >= 5;
-  if (enough(result)) return { snapshot, checkedAt: snapshot.date, rate: result };
-  const keepPrior = enough(entry.rate) && (!result || entry.rate.id === result.id);
-  return { ...entry, checkedAt: snapshot.date, rate: keepPrior ? entry.rate : result ?? entry.rate };
+  if (!(result?.milliseconds >= 120000 && result.kills >= 5)) return { ...entry, checkedAt: snapshot.date, rates };
+  const others = rates.filter(rate => rate.id !== result.id || rate.area !== result.area || rate.setup !== result.setup);
+  return { snapshot, checkedAt: snapshot.date, rates: [result, ...others].slice(0, 12) };
 }
 
 function estimateCombatExperience(character, attributes, target, estimate, model, modifierFor) {
@@ -551,9 +561,11 @@ function renderCombat() {
   const manualRate = byId('combatKillRate');
   byId('combatManualRate').hidden = !manual;
   manualRate.disabled = !manual;
-  const sample = combatView.samples.get(character?.characterId)?.rate;
+  const setup = combatSetup(character);
+  const sample = setup && area && combatView.samples.get(character?.characterId)?.rates?.find(rate =>
+    rate.id === target?.id && rate.area === area.id && rate.setup === setup);
   const canFight = attributes?.ammoReady !== false && attributes?.usable !== false;
-  const observed = canFight && sample?.id === target?.id ? sample : null;
+  const observed = !manual && canFight ? sample : null;
   byId('combatRateStatus').textContent = manual ? t('手填击杀速度时，请计入怪物重生等待。') :
     observed ? t('存档实测 {rate} 击杀／小时 · {kills} 次击杀 · {time}', {
       rate: decimals.format(observed.perHour), kills: fullNumber(observed.kills),

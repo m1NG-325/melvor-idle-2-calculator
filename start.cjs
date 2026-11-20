@@ -95,6 +95,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     'preferences.js': ['text/javascript', 'preferences.js'],
     'choices.js': ['text/javascript', 'choices.js'],
     'shop.js': ['text/javascript', 'shop.js'],
+    'quests.js': ['text/javascript', 'quests.js'],
     'ui.js': ['text/javascript', 'ui.js'],
     'language.js': ['text/javascript', 'language.js'],
     'vendor/opencc/cn2t.js': ['text/javascript', 'vendor/opencc/cn2t.js']
@@ -155,7 +156,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       beginUpdate();
       return json(response, installation ?? { phase: 'downloading' }, 202);
     }
-    const browserError = /^diagnostics\/client-error(?:\/(language|rank|ui|shop|experience|xp-progress|combat|combat-model|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
+    const browserError = /^diagnostics\/client-error(?:\/(language|rank|ui|shop|quests|experience|xp-progress|combat|combat-model|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
     if (browserError && request.method === 'POST') {
       if (loggedClientErrors++ < 20) log.record('browser_error', {
         script: browserError[1], line: browserError[2] && Number(browserError[2])

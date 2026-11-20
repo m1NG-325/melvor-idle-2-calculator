@@ -73,6 +73,15 @@ function meetsRequirements(group, profile, confirmed = false) {
     if (req.type === 'ToolbeltItemEquipped' && req.item && profile.equipped?.[req.skill]?.includes(req.item)) return true;
     if (req.type === 'MasteryGuildRank' && req.rank && profile.ranks?.[req.skill]?.includes(req.rank)) return true;
     if (req.type === 'ShopPurchase' && (profile.purchases?.[req.purchase] ?? 0) >= req.amount) return true;
+    if (profile.questProgress && (req.type === 'QuestStepActive' || req.type === 'QuestTaskGoalActive')) {
+      const quest = profile.questProgress[req.quest];
+      const step = quest?.steps?.[req.questStep];
+      if (quest?.status !== 1 || step?.status !== 1) return false;
+      if (req.questTask == null) return true;
+      const task = step.tasks[req.questTask];
+      return task?.status === 1 &&
+        (req.goalIdIncomplete == null || task.goals[req.goalIdIncomplete]?.complete === false);
+    }
     if (req.type === 'AstrologyMajorNodeUnlocked' || req.type === 'AstrologyMinorNodeUnlocked') {
       if (req.node && profile.astrologyNodes?.includes(req.node)) return true;
     }
@@ -202,7 +211,7 @@ function evaluate(action, profile, catalog, settings) {
   if (action.kind === 'Thieving') {
     success = thievingSuccess(action, level, stat, bonus);
     risky = success < 1 && action.damage > 0 && probability(stat('DamageAvoidanceChance')) < 1;
-    if (risky && !settings.experience) return;
+    if (risky && !settings.experience && !settings.itemProjection) return;
     const stun = Math.max(0, Math.floor((2000 + stat('FlatStunInterval')) * (1 + stat('PercentStunInterval')))) / 1000;
     seconds += (1 - success) * (1 - probability(stat('StunAvoidanceChance'))) * stun;
     thievingCompletion = success / expectedSteps(Math.max(1, action.steps + Math.trunc(stat('FlatStages'))),
@@ -374,17 +383,24 @@ function evaluate(action, profile, catalog, settings) {
       limit = id;
     }
   }
-  if (cycles <= 0 || !Number.isFinite(cycles)) return;
+  if (cycles <= 0 || !Number.isFinite(cycles)) {
+    if (settings.itemProjection && limit) return { limit, drops: [] };
+    return;
+  }
   const effectiveCycles = cooking ? cooking.total(cycles, 'success') : cycles;
   if (cooking) {
     consumption = cooking.total(cycles, 'consumes') / cycles;
     cooking.sessionSuccess = effectiveCycles / cycles;
   }
+  const itemRates = settings.itemProjection ? new Map() : null;
   const drops = [...rewards.values()].map(({ id, source, target, quantity, doubling }) => {
-    const amount = quantity * effectiveCycles * (source === 'event' ? 1 :
+    const perCycle = quantity * (source === 'event' ? 1 :
       target ? (1 + doubling) * (1 + (bonus.output ?? 0) / 100) : outputMultiplier);
+    const amount = perCycle * effectiveCycles;
+    if (itemRates && !target) itemRates.set(id, (itemRates.get(id) ?? 0) + perCycle);
     const unitPrice = catalog.items[id]?.price ?? 0;
-    const sold = settings.sell && (source !== 'special' || settings.sellSpecial !== false) && !profile.keep?.includes(id);
+    const sold = settings.sell && (source !== 'special' || settings.sellSpecial !== false) &&
+      !profile.keep?.includes(id) && !settings.keptDrops?.has(id);
     return { id, source, target, quantity: amount, unitPrice, value: sold ? unitPrice * amount : 0, sold };
   }).sort((a, b) => b.value - a.value);
   const inputs = [...ingredients.map(([id, qty]) => ({ id, qty, unitPrice: catalog.items[id]?.price ?? 0 })),
@@ -414,11 +430,20 @@ function evaluate(action, profile, catalog, settings) {
   };
   const knowledge = action.knowledge == null ? null : Math.max(0,
     (action.knowledge + stat('FlatKnowledge')) * (1 + stat('PercentKnowledge')));
+  const activeHours = durationForCycles(cycles) / 3600;
+  const timeForItems = itemRates && ((id, amount) => {
+    const rate = itemRates.get(id);
+    if (!(rate > 0)) return null;
+    const needed = amount / rate;
+    const attempts = Math.ceil(cooking ? cooking.attemptsFor(needed, 'success') : needed);
+    return attempts <= stockCycles && Number.isFinite(attempts) ? durationForCycles(attempts) / 3600 : null;
+  });
   return {
-    action, cycles, net, payout, limit, activeHours: durationForCycles(cycles) / 3600,
+    action, cycles, net, payout, limit, activeHours, timeForItems,
     direct, directSources: directSources?.map(row => ({ ...row, value: row.value * cycles })),
     sales, materialCost, goldCost, drops, inputs, seconds, knowledge, percentInterval, flatInterval,
     netPerHour: net / settings.hours, payoutPerHour: payout / settings.hours,
+    activeNetPerHour: net / activeHours,
     xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
     stockXp: xpPerReward ? (cooking && Number.isFinite(stockCycles) ? cooking.total(stockCycles, 'success') : stockCycles) * xpPerReward : 0,
     sustainableXpPerHour: xpPerCycle * 3600 / seconds, knownXpPercent, manualXpPercent, risky,
@@ -427,16 +452,21 @@ function evaluate(action, profile, catalog, settings) {
   };
 }
 
+function projectHourlyProduction(action, profile, catalog) {
+  if (!unlocked(action, profile)) return { locked: true };
+  return evaluate(action, profile, catalog, { seconds: 3600, hours: 1, itemProjection: true });
+}
+
 function rank(catalog, profile, options) {
-  const { hours, offlineCap, sell, sellSpecial, metric } = options;
+  const { hours, offlineCap, sell, sellSpecial, metric, keptDrops } = options;
   const seconds = Math.min(hours, offlineCap || Infinity) * 3600;
   const results = [];
   const experience = metric === 'xp';
   for (const action of experience ? catalog.xpActions : catalog.actions) {
-    const result = evaluate(action, profile, catalog, { seconds, sell, sellSpecial, hours, experience });
+    const result = evaluate(action, profile, catalog, { seconds, sell, sellSpecial, hours, experience, keptDrops });
     if (result && result[metric] > 0) results.push(result);
   }
   return results.sort((a, b) => b[metric] - a[metric] || b.net - a.net || a.action.id.localeCompare(b.action.id));
 }
 
-if (typeof module !== 'undefined') module.exports = { rank, actionModifiers };
+if (typeof module !== 'undefined') module.exports = { rank, actionModifiers, projectHourlyProduction };

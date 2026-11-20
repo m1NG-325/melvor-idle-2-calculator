@@ -1,9 +1,9 @@
 const preferenceFields = [
-  'hours', 'cap', 'metric', 'sell', 'sellFishingSpecial', 'filter', 'search', 'item', 'quantity', 'action',
-  'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages',
+  'hours', 'metric', 'sell', 'sellFishingSpecial', 'filter', 'search', 'item', 'quantity', 'action',
+  'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
   'combatTarget', 'combatAreaChoice', 'combatRateMode', 'combatKillRate', 'combatHours', 'combatCap', 'combatCollect', 'combatSell'
 ];
-const preferenceDetails = ['levelSettings', 'inventorySettings', 'calculationScope', 'combatLoadout', 'combatAttributes', 'combatBreakdown'];
+const preferenceDetails = ['levelSettings', 'inventorySettings', 'calculationScope', 'keptDropSettings', 'combatLoadout', 'combatAttributes', 'combatBreakdown'];
 let preferences = {};
 let preferencesReady = false;
 let preferencesTimer;
@@ -85,6 +85,7 @@ function restorePreferences() {
   xpView.bonusesByCharacter = new Map(Object.entries(preferences.xpBonuses ?? {}));
   xpView.goalsByCharacter = new Map(Object.entries(preferences.xpGoals ?? {}));
   xpView.actionsByCharacter = new Map(Object.entries(preferences.xpActions ?? {}));
+  keptDrops = new Set(Array.isArray(preferences.keptDrops) ? preferences.keptDrops.filter(id => typeof id === 'string') : []);
   combatView.kept = new Set(preferences.combatKept ?? []);
   combatView.suppressed = new Set(preferences.combatSuppressed ?? []);
   combatView.samples = new Map(Object.entries(preferences.combatSamples ?? {}));
@@ -113,6 +114,7 @@ function savePreferences() {
     xpGoals: Object.fromEntries(xpView.goalsByCharacter),
     xpActions: Object.fromEntries(xpView.actionsByCharacter),
     shopSelected: shopView ? [...shopView.selected] : preferences.shopSelected,
+    keptDrops: [...keptDrops],
     combatKept: [...combatView.kept],
     combatSuppressed: [...combatView.suppressed],
     combatSamples: Object.fromEntries(combatView.samples),

@@ -1,6 +1,7 @@
 'use strict';
 
 const byId = id => document.getElementById(id);
+const gpOfflineHours = 24;
 let numbers;
 let decimals;
 const fullNumber = value => numbers.format(value);
@@ -8,6 +9,7 @@ const actionArea = action => localizedName(action.areaNames, action.area);
 let catalog;
 let profile;
 let results = [];
+let keptDrops = new Set();
 let showCount = 15;
 let profileRequest = 0;
 let profileReading = false;
@@ -22,7 +24,7 @@ function reportBrowserError(event) {
   if (reportedBrowserError) return;
   reportedBrowserError = true;
   const script = event?.filename?.split('/').pop();
-  const source = ['language.js', 'rank.js', 'ui.js', 'shop.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'preferences.js', 'choices.js'].includes(script)
+  const source = ['language.js', 'rank.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'preferences.js', 'choices.js'].includes(script)
     ? '/' + script + '/' + (event.lineno || 0) : '';
   fetch('diagnostics/client-error' + source, { method: 'POST', keepalive: true }).catch(() => {});
 }
@@ -64,6 +66,7 @@ function renderProfile(keepCount = false, automatic = false) {
   updateShop(profile);
   updateExperience(profile, automatic);
   updateCombat(profile);
+  if (!byId('questsPage').hidden) renderQuest();
 }
 
 function renderSkillSettings() {
@@ -115,33 +118,64 @@ function numberCell(label, skill, key, value, min, max, placeholder) {
 function calculate(keepCount = false) {
   if (!profile || !byId('options').checkValidity()) return;
   const hours = byId('hours').valueAsNumber;
-  const offlineCap = byId('cap').valueAsNumber;
   const sell = byId('sell').checked;
   byId('sellFishingSpecial').disabled = !sell;
   const sellSpecial = byId('sellFishingSpecial').checked;
   const metric = byId('metric').value;
-  results = rank(catalog, profile, { hours, offlineCap, sell, sellSpecial, metric });
+  results = rank(catalog, profile, { hours, offlineCap: gpOfflineHours, sell, sellSpecial, metric, keptDrops });
   const now = profile.date && new Date(profile.date).toLocaleString(uiLocale(), { hour12: false });
   const source = now ? t('存档 {name}', { name: profile.name }) + ' · ' + now : t('手动设置');
-  const countdown = offlineCap && offlineCap < hours ? ['离线最多结算 {time}'] : [];
   byId('status').textContent = [
     source, t('仓库 {count} 种物品', { count: fullNumber(Object.keys(profile.stock).length) }),
     t('{count} 项正收益方案', { count: fullNumber(results.length) }),
-    ...countdown.map(message => t(message, { time: formatDuration(offlineCap) }))
+    ...(hours > gpOfflineHours ? [t('离线最多结算 {time}', { time: formatDuration(gpOfflineHours) })] : [])
   ].join(' · ');
   byId('status').classList.remove('error');
-  const winner = results[0];
-  byId('winner').hidden = !winner;
-  if (winner) showWinner(winner, sell);
   if (keepCount !== true) showCount = 15;
   renderResults();
 }
 
+function renderKeptDrops() {
+  byId('keptDropCount').textContent = t('（{count} 种）', { count: fullNumber(keptDrops.size) });
+  byId('keptDropList').replaceChildren(...[...keptDrops].map(id => {
+    const name = gameName(catalog.items[id]) ?? id;
+    const button = create('button', name + ' ×');
+    button.type = 'button';
+    button.setAttribute('aria-label', t('恢复出售 {item}', { item: name }));
+    button.title = t('恢复出售 {item}', { item: name });
+    button.addEventListener('click', () => {
+      keptDrops.delete(id);
+      renderKeptDrops();
+      byId('keptDropItem').focus();
+      calculate(true);
+      queuePreferences();
+    });
+    return button;
+  }));
+}
+
+function keepDrop() {
+  const input = byId('keptDropItem');
+  const id = findItem(input.value);
+  if (!id) {
+    input.setCustomValidity(t('请选择有效物品。'));
+    input.reportValidity();
+    return;
+  }
+  keptDrops.add(id);
+  input.value = '';
+  renderKeptDrops();
+  calculate(true);
+  queuePreferences();
+  input.focus();
+}
+
 function showWinner(winner, sell) {
-  const { action, net, payout, netPerHour, payoutPerHour, materialCost, direct, sales } = winner;
+  const { action, net, payout, netPerHour, payoutPerHour, activeNetPerHour, materialCost, direct, sales } = winner;
   byId('winnerName').textContent = [skillName(action.skill, catalog.skills), gameName(action), actionArea(action)].filter(Boolean).join(' · ');
   byId('metrics').replaceChildren(...[
-    ['预计净收益', net], ['预计到手 GP', payout], ['净 GP/小时', netPerHour], ['到手 GP/小时', payoutPerHour]
+    ['预计净收益', net], ['预计到手 GP', payout], ['整段平均净 GP／小时', netPerHour],
+    ['行动中净 GP／小时', activeNetPerHour], ['整段平均到手 GP／小时', payoutPerHour]
   ].map(([label, value]) => {
     const field = create('div', t(label));
     field.append(create('strong', fullNumber(value)));
@@ -153,11 +187,12 @@ function showWinner(winner, sell) {
     t('材料原值 {value}', { value: fullNumber(materialCost) }),
     t('{value} 次', { value: fullNumber(winner.cycles) }),
     winner.limit ? t('约 {time}后用完{item}', { time: formatDuration(winner.activeHours), item: limitName(winner) })
-      : t('在本次计时时长内材料充足')
+      : t('预计行动 {time}', { time: formatDuration(winner.activeHours) })
   ].join(' · ');
-  const expanded = byId('winnerSources').querySelector('details')?.open;
+  const previous = byId('winnerSources').querySelector('details');
   const details = incomeSources(winner);
-  details.open = !!expanded;
+  details.dataset.action = action.id;
+  details.open = previous?.dataset.action === action.id && previous.open;
   byId('winnerSources').replaceChildren(details);
 }
 
@@ -210,12 +245,14 @@ function renderResults() {
       gameName(action), actionArea(action),
       ...Object.values(action.names ?? {}), ...Object.values(action.areaNames ?? {})]
       .some(value => value?.toLowerCase().includes(text))));
+  byId('winner').hidden = !matches.length;
+  if (matches.length) showWinner(matches[0], byId('sell').checked);
   byId('empty').hidden = !!matches.length;
   byId('empty').textContent = t(results.length ? '当前筛选没有匹配项。' : '没有正收益方案。检查技能等级、库存或出售选项。');
   byId('ranking').hidden = !matches.length;
   byId('more').hidden = matches.length <= showCount;
   byId('rows').replaceChildren(...matches.slice(0, showCount).map(result => {
-    const { action, net, payout, netPerHour, limit, activeHours } = result;
+    const { action, net, payout, netPerHour, activeNetPerHour, limit, activeHours } = result;
     const row = create('tr');
     const plan = create('td', gameName(action));
     const line = [skillName(action.skill, catalog.skills), actionArea(action)].filter(Boolean).join(' · ');
@@ -226,7 +263,9 @@ function renderResults() {
     plan.append(details);
     row.append(plan, create('td', fullNumber(net), 'number gold'),
       create('td', fullNumber(payout), 'number'), create('td', fullNumber(netPerHour), 'number'),
-      create('td', limit ? t('{time} · {item}用完', { time: formatDuration(activeHours), item: limitName(result) }) : '—'));
+      create('td', fullNumber(activeNetPerHour), 'number'),
+      create('td', limit ? t('{time} · {item}用完', { time: formatDuration(activeHours), item: limitName(result) }) :
+        formatDuration(activeHours)));
     return row;
   }));
 }
@@ -460,18 +499,19 @@ function setAction(include) {
 async function init() {
   preferences = await get('preferences').catch(() => ({}));
   uiLanguage = requestedLanguage ?? supportedLanguage(preferences.language) ?? uiLanguage;
-  if (!location.hash && ['#combat', '#shop', '#experience', '#ranking-page'].includes(preferences.page)) {
+  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page'].includes(preferences.page)) {
     history.replaceState(null, '', preferences.page);
   }
   initTheme();
   function showPage() {
-    const page = { '#shop': 'shop', '#experience': 'xp', '#combat': 'combat' }[location.hash] ?? 'rank';
-    for (const key of ['rank', 'xp', 'shop', 'combat']) {
+    const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat' }[location.hash] ?? 'rank';
+    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests']) {
       byId(key + 'Page').hidden = key !== page;
       const link = byId(key + 'Link');
       if (key === page) {
         link.setAttribute('aria-current', 'page');
-        byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益 Beta' }[page]);
+        byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益',
+          quests: '任务材料' }[page]);
       } else link.removeAttribute('aria-current');
     }
   }
@@ -501,6 +541,7 @@ async function init() {
     }
     byId('items').replaceChildren(...Object.entries(catalog.items).map(([id, item]) => new Option('', gameName(item) + ' · ' + id)));
     byId('actions').replaceChildren(...catalog.actions.map(action => new Option('', gameName(action) + ' · ' + action.id)));
+    renderKeptDrops();
     const item = byId('item');
     const action = byId('action');
     const itemId = item.value.includes(' · ') && findItem(item.value);
@@ -510,6 +551,7 @@ async function init() {
     localizeExperience();
     localizeShop();
     localizeCombat();
+    localizeQuests();
     if (profile) renderProfile(true);
   }
   byId('language').addEventListener('change', event => {
@@ -521,7 +563,11 @@ async function init() {
     queuePreferences();
   });
   byId('installUpdate').addEventListener('click', startUpdate);
-  window.addEventListener('hashchange', () => { showPage(); queuePreferences(); });
+  window.addEventListener('hashchange', () => {
+    showPage();
+    if (!byId('questsPage').hidden) renderQuest();
+    queuePreferences();
+  });
   for (const event of ['input', 'change', 'toggle']) document.addEventListener(event, queuePreferences, true);
   window.addEventListener('pagehide', savePreferences);
   localizeControls();
@@ -530,6 +576,7 @@ async function init() {
     catalog = await get('catalog');
     initExperience(catalog);
     initCombat(catalog);
+    initQuests(catalog.questGuide);
     const shopLoad = get('shop').then(shop => {
       initShop(shop, catalog.items);
       if (profile) updateShop(profile);
@@ -541,6 +588,12 @@ async function init() {
     restorePreferences();
     localizeControls();
     for (const input of document.querySelectorAll('[data-suggestions]')) initSuggestions(input);
+    const keptDropItem = byId('keptDropItem');
+    keptDropItem.addEventListener('input', () => keptDropItem.setCustomValidity(''));
+    keptDropItem.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.defaultPrevented) keepDrop();
+    });
+    byId('keepDrop').addEventListener('click', keepDrop);
     byId('options').addEventListener('submit', event => { event.preventDefault(); calculate(); });
     byId('options').addEventListener('change', calculate);
     byId('options').addEventListener('input', calculate);
