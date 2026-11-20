@@ -360,29 +360,28 @@ function evaluate(action, profile, catalog, settings) {
     scheduled = batches * batchSize + Math.max(0, Math.min(batchSize, partial));
     durationForCycles = cycles => Math.ceil(cycles / batchSize) * setup + cycles * bottling;
   }
-  let cycles = scheduled;
   let stockCycles = Infinity;
-  let limit = '';
+  let stockLimit = '';
   const possibleCycles = portions => !portions ? 0 : cooking ? cooking.attemptsFor(portions, 'consumes', true) :
     consumption ? Math.floor(portions / consumption) : Infinity;
   for (const [id, qty] of ingredients) {
     const available = profile.keep?.includes(id) ? 0 : stock[id] ?? 0;
     const possible = possibleCycles(Math.floor(available / qty));
-    stockCycles = Math.min(stockCycles, possible);
-    if (possible < cycles) {
-      cycles = possible;
-      limit = id;
+    if (possible < stockCycles) {
+      stockCycles = possible;
+      stockLimit = id;
     }
   }
   for (const [id, qty] of currencyIngredients) {
     const available = currencies[id] ?? 0;
     const possible = possibleCycles(Math.floor(available / qty));
-    stockCycles = Math.min(stockCycles, possible);
-    if (possible < cycles) {
-      cycles = possible;
-      limit = id;
+    if (possible < stockCycles) {
+      stockCycles = possible;
+      stockLimit = id;
     }
   }
+  const cycles = Math.min(scheduled, stockCycles);
+  const limit = stockCycles < scheduled ? stockLimit : '';
   if (cycles <= 0 || !Number.isFinite(cycles)) {
     if (settings.itemProjection && limit) return { limit, drops: [] };
     return;
@@ -422,11 +421,17 @@ function evaluate(action, profile, catalog, settings) {
   const xpPerReward = Math.max(0, ((action.baseXp ?? 0) + stat('FlatXPGained')) *
     (1 + (knownXpPercent + manualXpPercent) / 100) * xpChance);
   const xpPerCycle = xpPerReward * effectiveCycles / cycles;
-  const hoursForXp = xp => {
-    if (xpPerReward <= 0) return null;
-    const attempts = xp / xpPerReward;
-    if (cooking) return durationForCycles(cooking.attemptsFor(attempts, 'success')) / 3600;
-    return durationForCycles(brewing ? Math.ceil(attempts) : attempts) / 3600;
+  const xpForCycles = count => (cooking ? cooking.total(count, 'success') : count) * xpPerReward;
+  const planXp = target => {
+    if (!(target > 0) || !(xpPerReward > 0)) return null;
+    const rewards = target / xpPerReward;
+    const needed = cooking ? cooking.attemptsFor(rewards, 'success') : rewards;
+    const attempts = Math.ceil(needed - needed * Number.EPSILON);
+    const available = Math.min(attempts, stockCycles);
+    if (!Number.isFinite(available)) return null;
+    const hours = durationForCycles(available) / 3600;
+    const xp = xpForCycles(available);
+    return { hours, xp, rate: hours > 0 ? xp / hours : 0, reaches: attempts <= stockCycles };
   };
   const knowledge = action.knowledge == null ? null : Math.max(0,
     (action.knowledge + stat('FlatKnowledge')) * (1 + stat('PercentKnowledge')));
@@ -445,10 +450,9 @@ function evaluate(action, profile, catalog, settings) {
     netPerHour: net / settings.hours, payoutPerHour: payout / settings.hours,
     activeNetPerHour: net / activeHours,
     xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
-    stockXp: xpPerReward ? (cooking && Number.isFinite(stockCycles) ? cooking.total(stockCycles, 'success') : stockCycles) * xpPerReward : 0,
-    sustainableXpPerHour: xpPerCycle * 3600 / seconds, knownXpPercent, manualXpPercent, risky,
+    activeXpPerHour: xpPerReward * effectiveCycles / activeHours, stockLimit, knownXpPercent, manualXpPercent, risky,
     wood, mining, cooking, thieving, fishing, brewing, craftingSteps, preservation, consumption,
-    hoursForXp, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
+    planXp, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
   };
 }
 

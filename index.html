@@ -219,8 +219,11 @@
       <div class="xp-section-heading">
         <h2 id="xpBestHeading">各技能首选</h2>
         <div class="inputs">
-          <label>挂机时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
-          <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+          <label>比较方式<select id="xpMode"><option value="idle">长时挂机</option><option value="goal">短时升级</option></select></label>
+          <div class="inputs" id="xpIdleControls">
+            <label>挂机时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
+            <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+          </div>
         </div>
       </div>
       <p id="xpStatus" class="status muted" role="status"></p>
@@ -241,7 +244,7 @@
       </div>
       <p id="xpEmpty" class="muted"></p>
       <div id="xpTable" class="scroll" hidden><table>
-        <thead><tr><th>行动</th><th class="number">预计 XP</th><th class="number">XP / 小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
+        <thead><tr><th>行动</th><th id="xpTotalHeading" class="number">预计 XP</th><th id="xpAverageHeading" class="number">整段平均 XP／小时</th><th class="number">行动中 XP／小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
         <tbody id="xpRows"></tbody>
       </table></div>
     </section>

@@ -40,23 +40,32 @@ function xpGoalProgress(level, savedXp, target, rate, startingXp) {
 }
 
 function formatXpDuration(hours) {
-  return Number.isFinite(hours) && hours >= 0 ? formatDuration(hours, true) : t('暂无升级时间');
+  if (!Number.isFinite(hours) || hours < 0) return t('暂无升级时间');
+  const exactSeconds = hours * 3600;
+  const seconds = Math.ceil(exactSeconds - exactSeconds * Number.EPSILON);
+  if (seconds >= 3600) return formatDuration(hours, true);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  const parts = [];
+  if (minutes) parts.push(t('{value} 分钟', { value: fullNumber(minutes) }));
+  if (remainder || !minutes) parts.push(t('{value} 秒', { value: fullNumber(remainder) }));
+  return parts.join(' ');
 }
-function renderXpProgress(character, skill, goal, rate, limitedXp, limitLabel = '本次补给或材料不足以升级') {
+function renderXpProgress(character, skill, goal, timeForGoal, limitLabel) {
   const view = create('div', undefined, 'xp-progress');
-  const state = xpGoalProgress(character?.levels?.[skill], character?.skillXp?.[skill], goal.level, rate, goal.startingXp);
+  const state = xpGoalProgress(character?.levels?.[skill], character?.skillXp?.[skill], goal.level, null, goal.startingXp);
   if (!state) {
     view.textContent = t('暂无等级进度');
     return view;
   }
   const level = t('等级 {level}', { level: state.level });
+  const hours = state.remaining > 0 ? timeForGoal(state.remaining) : 0;
   const timing = state.remaining === 0 ? t('已达到目标') :
-    state.hours == null ? t('暂无升级时间') :
-      t('约 {time}后达到 {level} 级', { time: formatXpDuration(state.hours), level: state.target });
+    hours == null ? t(limitLabel ?? '暂无升级时间') :
+      t('约 {time}后达到 {level} 级', { time: formatXpDuration(hours), level: state.target });
   view.append(create('span', level + ' · ' + timing));
   if (state.remaining > 0) {
     view.append(create('span', t('距目标 {xp} XP', { xp: decimals.format(state.remaining) }), 'muted'));
-    if (state.hours != null && limitedXp != null && limitedXp < state.remaining) view.append(create('span', t(limitLabel), 'muted'));
     if (!state.exact) view.title = t('按所设等级的起始经验计算');
   }
   const progress = create('progress');

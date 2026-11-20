@@ -28,7 +28,8 @@ function estimateCombat(target, items, options) {
   });
   const payout = direct + drops.reduce((sum, row) => sum + row.value, 0);
   const net = payout - costs.reduce((sum, row) => sum + row.value, 0);
-  return { plannedHours, activeHours, limit, kills, direct, drops, costs, payout, net, netPerHour: net / options.hours };
+  return { plannedHours, activeHours, limit, kills, killsPerHour: options.killsPerHour,
+    direct, drops, costs, payout, net, netPerHour: net / options.hours };
 }
 
 let combatView;
@@ -118,6 +119,18 @@ function estimateCombatExperience(character, attributes, target, estimate, model
   return totals;
 }
 
+function combatKillsForGoal(remaining, kills, xpAt) {
+  if (!(kills > 0) || xpAt(kills) < remaining) return null;
+  let low = 1;
+  let high = kills;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (xpAt(middle) >= remaining) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
 function renderCombatExperience(character, attributes, target, estimate) {
   const { model } = combatView;
   const gear = [...(character?.combat?.equipment ?? []), ...(character?.combat?.toolbelt ?? [])].map(row => row.id);
@@ -132,7 +145,8 @@ function renderCombatExperience(character, attributes, target, estimate) {
   }
   const modifierFor = skill => actionModifiers({ skill }, character ?? {}, catalog, extras);
   const totals = estimate ? estimateCombatExperience(character, attributes, target, estimate, model, modifierFor) : {};
-  const tasks = (character?.slayerTasks ?? []).filter(task => task.monster === target.id);
+  const tasks = (character?.slayerTasks ?? []).filter(task => task.monster === target.id && task.remaining > 0);
+  const firstKill = estimate ? estimateCombatExperience(character, attributes, target, { kills: 1 }, model, modifierFor) : {};
   const hours = byId('combatHours').valueAsNumber;
   byId('combatXpStatus').textContent = t(!attributes ? '读取角色存档后可按战斗配装估算经验。' :
     estimate ? '按当前姿态、启用的祝祭及剩余屠杀任务计算。' : '有可用的击杀速度后会显示经验和预计时间。');
@@ -143,7 +157,7 @@ function renderCombatExperience(character, attributes, target, estimate) {
       card = create('article', undefined, 'combat-xp-card');
       card.dataset.skill = skill;
       const metrics = create('dl', undefined, 'combat-xp-metrics');
-      for (const metric of ['预计 XP', 'XP / 小时']) {
+      for (const metric of ['预计 XP', '整段平均 XP／小时', '行动中 XP／小时']) {
         const field = create('div');
         field.append(create('dt', t(metric)), create('dd'));
         metrics.append(field);
@@ -161,14 +175,18 @@ function renderCombatExperience(character, attributes, target, estimate) {
     }
     const xp = totals[skill] ?? (estimate && attributes ? 0 : null);
     const rate = xp == null ? null : xp / hours;
+    const activeRate = xp == null || !estimate?.activeHours ? null : xp / estimate.activeHours;
     const taskLimited = skill === 'Slayer' && xp > 0 && tasks.every(task => task.remaining <= estimate?.kills);
     const [label, metrics, field, progress, note] = card.children;
-    const [[totalLabel, totalCell], [rateLabel, rateCell]] = Array.from(metrics.children, node => node.children);
+    const [[totalLabel, totalCell], [rateLabel, rateCell], [activeLabel, activeCell]] =
+      Array.from(metrics.children, node => node.children);
     label.textContent = skillName(skill, catalog.xpSkills);
     totalLabel.textContent = t('预计 XP');
-    rateLabel.textContent = t('XP / 小时');
+    rateLabel.textContent = t('整段平均 XP／小时');
+    activeLabel.textContent = t('行动中 XP／小时');
     totalCell.textContent = xp == null ? '—' : fullNumber(xp);
     rateCell.textContent = rate == null ? '—' : fullNumber(rate);
+    activeCell.textContent = activeRate == null ? '—' : fullNumber(activeRate);
     let explanation = '';
     if (skill === 'Slayer' && tasks.length) {
       explanation = t('当前任务剩余 {count} 次', { count: fullNumber(tasks.reduce((sum, task) => sum + task.remaining, 0)) });
@@ -185,8 +203,18 @@ function renderCombatExperience(character, attributes, target, estimate) {
       const goal = selectedExperienceGoal(character, skill);
       if (slider.valueAsNumber !== goal.level) slider.value = goal.level;
       caption.textContent = t('目标等级 {level}', { level: goal.level });
-      progress.replaceChildren(renderXpProgress(character, skill, goal, rate,
-        estimate?.limit || taskLimited ? xp : null, taskLimited ? '当前任务结束前无法升级' : undefined));
+      const perKill = firstKill[skill] ?? 0;
+      const xpAt = skill === 'Slayer'
+        ? kills => tasks.reduce((sum, task) => sum + Math.min(kills, task.remaining), 0) * (perKill / tasks.length)
+        : kills => kills * perKill;
+      const timeForGoal = remaining => {
+        if (!(perKill > 0) || !estimate) return null;
+        const kills = combatKillsForGoal(remaining, estimate.kills, xpAt);
+        return kills == null ? null : kills / estimate.killsPerHour;
+      };
+      const blocked = !(perKill > 0) ? null : taskLimited ? '当前任务结束前无法升级' :
+        estimate?.limit ? '本次补给或材料不足以升级' : '本次挂机内无法达到目标';
+      progress.replaceChildren(renderXpProgress(character, skill, goal, timeForGoal, blocked));
     }
     slider.oninput = () => {
       setExperienceGoal(character, skill, slider.valueAsNumber);

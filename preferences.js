@@ -1,6 +1,6 @@
 const preferenceFields = [
   'hours', 'metric', 'sell', 'sellFishingSpecial', 'filter', 'search', 'item', 'quantity', 'action',
-  'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
+  'xpMode', 'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
   'combatTarget', 'combatAreaChoice', 'combatRateMode', 'combatKillRate', 'combatHours', 'combatCap', 'combatCollect', 'combatSell'
 ];
 const preferenceDetails = ['levelSettings', 'inventorySettings', 'calculationScope', 'keptDropSettings', 'combatLoadout', 'combatAttributes', 'combatBreakdown'];

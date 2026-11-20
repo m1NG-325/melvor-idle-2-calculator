@@ -249,7 +249,7 @@ summary.shop-row::marker { color: var(--aqua); }
 .combat-xp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .55rem; margin-top: .75rem; }
 .combat-xp-card { min-width: 0; padding: .65rem .75rem; background: var(--surface); border: 1px solid var(--line); border-radius: .55rem; }
 .combat-xp-card h3 { margin: 0; font-size: 1rem; }
-.combat-xp-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; margin: .4rem 0 .55rem; }
+.combat-xp-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin: .4rem 0 .55rem; }
 .combat-xp-metrics dt { color: var(--muted); font-size: .8rem; }
 .combat-xp-metrics dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
 .combat-xp-metrics > div:last-child dd { color: var(--aqua); }
