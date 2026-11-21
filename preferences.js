@@ -1,6 +1,9 @@
 const preferenceFields = [
   'hours', 'metric', 'sell', 'sellFishingSpecial', 'filter', 'search', 'item', 'quantity', 'action',
   'xpMode', 'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
+  'productionTarget', 'productionHours', 'productionStock', 'productionSellByproducts', 'productionComparisonItems',
+  'statisticsSearch',
+  'combatTrainingSkill', 'combatTrainingHours',
   'combatTarget', 'combatAreaChoice', 'combatRateMode', 'combatKillRate', 'combatHours', 'combatCap', 'combatCollect', 'combatSell'
 ];
 const preferenceDetails = ['levelSettings', 'inventorySettings', 'calculationScope', 'keptDropSettings', 'combatLoadout', 'combatAttributes', 'combatBreakdown'];
@@ -76,6 +79,10 @@ function restorePreferences() {
       input.value = saved;
     }
   }
+  for (const input of document.querySelectorAll('[data-idle-duration]')) {
+    if (!input.checkValidity()) input.value = Math.min(Number(input.max), Math.max(Number(input.min),
+      Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : Number(input.defaultValue)));
+  }
   for (const id of preferenceDetails) {
     if (byId(id) && typeof preferences.details?.[id] === 'boolean') byId(id).open = preferences.details[id];
   }
@@ -104,7 +111,8 @@ function savePreferences() {
   const settings = JSON.stringify({
     version: 1, language: uiLanguage, page: location.hash, theme,
     character: byId('save').value ? byId('save').selectedOptions[0]?.dataset.characterId : 'manual',
-    fields: { xpSkill: xpView.skill, ...Object.fromEntries(preferenceFields.filter(id => byId(id)).map(id => {
+    fields: { xpSkill: xpView.skill, xpSection: experienceSection, statisticsScope: statisticsScope(),
+      ...Object.fromEntries(preferenceFields.filter(id => byId(id)).map(id => {
       const input = byId(id);
       return [id, input.type === 'checkbox' ? input.checked : input.value];
     })) },

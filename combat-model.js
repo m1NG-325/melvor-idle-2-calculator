@@ -1,7 +1,7 @@
 const baseCombatId = id => id?.replace(/^MelvorBase:/, '');
 const combatProbability = value => Math.max(0, Math.min(1, value));
 
-function combatAttributes(model, character, target, area, spells, foodRules = {}) {
+function combatAttributes(model, character, target, area, spells, foodRules = {}, { quick = false } = {}) {
   const saved = character?.combat;
   if (!saved?.equipment) return null;
   const weapon = model.items[saved.equipment.find(row => row.slot === 'Weapon')?.id ?? 'DefaultWeapon']?.weapon;
@@ -19,9 +19,18 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   const gear = [...equipment, ...(saved.toolbelt ?? []).map(row => row.id)].map(id => model.items[id]).filter(Boolean);
   const mods = new Map();
   const foodBonuses = [];
+  const supplyBonuses = [];
   function add(rows, count = 1) {
     for (const row of rows ?? []) {
       const c = row.LocalContext;
+      if (c?.Component?.Entity === 'MelvorBase:Combat' && !row.FromContext &&
+          (!row.Scaling || row.Scaling.Type === 'MelvorBase:Level') &&
+          (!row.Condition || (row.Condition.Type === 'MelvorBase:CharacterUsingStance' &&
+            baseCombatId(row.Condition.Data?.Stance) === stanceId)) &&
+          ['AmmoPreservationChance', 'RunePreservationChance', 'FlatRuneCost'].includes(row.Stat.Name)) {
+        const scale = row.Scaling ? character.levels[baseCombatId(row.Scaling.Data?.Experience?.Entity)] ?? 0 : 1;
+        supplyBonuses.push({ name: row.Stat.Name, context: c, value: row.Value * count * scale });
+      }
       if (c?.Component?.Entity === 'MelvorBase:Combat' && c.Component.Component === 'Food') {
         foodBonuses.push({ row, count });
       }
@@ -51,6 +60,9 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   for (const [id, count] of Object.entries(character.purchases ?? {})) add(model.savedBonuses.ShopPurchase[id], count);
   for (const id of character.astrologyNodes ?? []) add(model.savedBonuses.AstrologyNode[id]);
   for (const id of character.unlockedPets ?? []) add(model.savedBonuses.Pet[id]);
+  for (const [skill, ranks] of Object.entries(character.ranks ?? {})) {
+    for (const id of ranks) add(model.savedBonuses.MasteryGuildBonus?.[id]);
+  }
   const enemyStyle = model.stances[target?.stances[0]?.[0]]?.style;
   for (const row of model.triangle) if (row.player === stance.style && row.enemy === enemyStyle) add(row.bonuses);
   const mod = (stat, key = '') => (mods.get(stat + ':') ?? 0) + (key ? mods.get(stat + ':' + key) ?? 0 : 0);
@@ -105,18 +117,42 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   const resistance = Math.min(.7, enemyProtection / (power + enemyProtection || 1));
   const enemyHealth = (target?.levels?.Hitpoints ?? 0) * 10;
   const enemyHp = enemyHealth + Math.max(0, enemyStats('MaximumWard'));
-  const ammo = saved.equipment.find(row => row.slot === 'Ammo');
-  const ammoReady = !weapon.RequiredAmmoType || (ammo?.quantity > 0 && model.items[ammo.id]?.ammoType === weapon.RequiredAmmoType);
-  const usable = !style.UsesSpells || (spell?.runes.every(row => (character.stock[row.id] ?? 0) >= row.quantity) ?? false);
+  const ammoReady = !weapon.RequiredAmmoType || saved.equipment.some(row =>
+    row.quantity > 0 && model.items[row.id]?.ammoType === weapon.RequiredAmmoType);
+  const ammoPreservation = combatProbability(supplyBonuses.reduce((sum, row) =>
+    row.name === 'AmmoPreservationChance' && (!row.context.AmmoType || row.context.AmmoType === weapon.RequiredAmmoType)
+      ? sum + row.value : sum, 0));
+  const spellSupplies = {};
+  for (const id of new Set([saved.spell, saved.imbuement, saved.activeImbuement].filter(Boolean))) {
+    const entry = spells[id];
+    if (!entry) continue;
+    const matching = supplyBonuses.filter(({ context }) =>
+      (!context.Spell || baseCombatId(context.Spell) === id) &&
+      (!context.Element || baseCombatId(context.Element) === entry.element));
+    const preserve = combatProbability(matching.reduce((sum, row) =>
+      row.name === 'RunePreservationChance' && !row.context.Rune ? sum + row.value : sum, 0));
+    const runes = entry.runes.map(rune => {
+      const flat = matching.reduce((sum, row) => row.name === 'FlatRuneCost' &&
+        (!row.context.Rune || baseCombatId(row.context.Rune) === rune.id) ? sum + row.value : sum, 0);
+      return { ...rune, quantity: Math.max(1, rune.quantity + Math.trunc(flat)) };
+    });
+    spellSupplies[id] = { preserve, runes };
+  }
+  const affordable = entry => entry?.runes.every(row => (character.stock[row.id] ?? 0) >= row.quantity) ?? false;
+  const usable = !style.UsesSpells || affordable(spellSupplies[saved.spell]);
+  const imbuementReady = affordable(spellSupplies[saved.imbuement]);
   const damage = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageDealt')) * (1 - resistance) - enemyStats('Armour')));
   const respawn = Math.max(0, 3000 * (1 + mod('PercentSpawnInterval')) + mod('FlatSpawnInterval'));
+  const averageDamage = quick && maxHit != null
+    ? damage((minHit + maxHit) / 2) * (1 - crit) + damage(Math.trunc((minHit + maxHit) / 2 * critMultiplier)) * crit : 0;
   const hits = target && maxHit != null && enemyHp > 0 && ammoReady && usable && hitChance > 0
-    ? expectedCombatHits(enemyHp, minHit, maxHit, damage, crit, critMultiplier) : 0;
+    ? quick ? Math.max(1, enemyHp / averageDamage) : expectedCombatHits(enemyHp, minHit, maxHit, damage, crit, critMultiplier) : 0;
   const attacksPerKill = hits > 0 ? hits / hitChance : null;
   const prayerCost = (saved.prayers ?? []).filter(prayer => prayer.state === 1)
     .reduce((sum, prayer) => sum + (model.prayers[prayer.active]?.cost?.Quantity ?? 0), 0);
   const prayerXpPerKill = hits && prayerCost > 0
-    ? expectedCombatHits(enemyHealth, minHit, maxHit, damage, crit, critMultiplier,
+    ? quick ? Math.max(1, enemyHealth / averageDamage) * Math.sqrt(3 + .2 * Math.min(averageDamage, enemyHealth) * prayerCost) :
+      expectedCombatHits(enemyHealth, minHit, maxHit, damage, crit, critMultiplier,
       healthDamage => Math.sqrt(3 + .2 * healthDamage * prayerCost)) : 0;
   const enemyStanceId = target?.stances[0]?.[0];
   const enemyStance = model.stances[enemyStanceId];
@@ -140,19 +176,20 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
     const chance = combatProbability(enemyAccuracy >= defence ? 1 - defence / (2 * enemyAccuracy) : enemyAccuracy / (2 * defence));
     const resist = Math.min(.7, protection / (enemyPower + protection || 1));
     const hitAfterDefence = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageTaken')) * (1 - resist) - stat(style.ArmourStat)));
-    const rolls = Math.min(enemyMaxHit, 4096);
+    const rolls = Math.min(enemyMaxHit, quick ? 8 : 4096);
     let total = 0;
     for (let i = 1; i <= rolls; i++) total += hitAfterDefence(Math.ceil(i * enemyMaxHit / rolls));
-    const turns = expectedEnemyTurns({ health: enemyHp, minHit, maxHit, hitChance, interval, enemyInterval, damage, crit, critMultiplier,
+    const turns = quick ? Math.max(0, attacksPerKill * interval / enemyInterval - .5) :
+      expectedEnemyTurns({ health: enemyHp, minHit, maxHit, hitChance, interval, enemyInterval, damage, crit, critMultiplier,
       attacksPerKill });
-    enemy = { turnsPerKill: turns, chance, damagePerTurn: total / rolls * chance,
+    enemy = { turnsPerKill: turns, chance, maxHit: hitAfterDefence(enemyMaxHit), damagePerTurn: total / rolls * chance,
       wardFraction: combatProbability(Math.max(0, enemyStats('MaximumWard')) / enemyHp) };
   }
   return { levels, stats, evasion, stanceId, style: stance.style, element, damageType, protectionType, light, darkness, interval,
     combatLevel: Math.floor(ratio(style.CombatLevelRatios, levels)), maxHp, minHit, maxHit, accuracy, hitChance, power,
     currentHp: saved.hitpoints, protection, crit, critMultiplier, reflect: mod('PercentAttackReflect'), ammoReady, usable,
-    attacksPerKill, hitsPerKill: hits, prayerXpPerKill, enemy, foodBonuses, lifesteal: Math.max(0, stat(style.LifestealStat)), enemyHp,
-    ammoType: weapon.RequiredAmmoType, usesSpells: style.UsesSpells,
+    attacksPerKill, hitsPerKill: hits, prayerXpPerKill, enemy, foodBonuses, lifesteal: Math.max(0, stat(style.LifestealStat)), enemyHp, respawn,
+    ammoType: weapon.RequiredAmmoType, ammoPreservation, usesSpells: style.UsesSpells, spellSupplies, imbuementReady,
     perHour: attacksPerKill > 0 ? 3600000 / (respawn + interval * attacksPerKill) : null };
 }
 
@@ -216,11 +253,21 @@ function combatFoodProjection(rule, id, context) {
     return (1 + Math.floor((loss - beforeFirstMeal) / (batch * healing))) * unitsPerMeal;
   }
   function hoursAtStock(stock) {
-    if (!(damagePerHour > 0) || !(unitsPerMeal > 0)) return Infinity;
-    const meals = Math.max(0, Math.ceil(stock / unitsPerMeal) - 1);
-    return (beforeFirstMeal + meals * batch * healing) / damagePerHour;
+    if (!(damagePerHour > 0)) return Infinity;
+    if (!(stock > 0)) return beforeFirstMeal / damagePerHour;
+    if (!(unitsPerMeal > 0)) return Infinity;
+    const availableHealing = Math.max(0, stock) * healing / (1 - preserve);
+    return (beforeFirstMeal + availableHealing) / damagePerHour;
   }
-  return { preserve, neededAt, hoursAtStock };
+  function hitpointsAt(hours, stock) {
+    const loss = hours * damagePerHour;
+    if (loss <= 0 || loss < beforeFirstMeal || stock === 0) return Math.max(1, initialHp - loss);
+    const meals = 1 + Math.floor((loss - beforeFirstMeal) / (batch * healing));
+    const restored = preserve === 1 ? meals * batch * healing :
+      Math.min(meals * batch, (stock ?? Infinity) / (1 - preserve)) * healing;
+    return Math.max(1, Math.min(attributes.maxHp, initialHp - loss + restored));
+  }
+  return { preserve, threshold, neededAt, hoursAtStock, hitpointsAt };
 }
 
 function expectedCombatHits(health, minHit, maxHit, damage, crit, multiplier, reward = () => 1) {
@@ -249,8 +296,8 @@ function expectedCombatHits(health, minHit, maxHit, damage, crit, multiplier, re
   return expected[health];
 }
 
-function combatSupplyRate(rule, id, context) {
-  const { attributes, character, killsPerHour, spells, model, target, area } = context;
+function combatSupplyEstimate(rule, id, context) {
+  const { attributes, character, killsPerHour, model, target, area } = context;
   if (!character?.combat || !attributes || !Number.isFinite(killsPerHour)) return null;
   const { combat } = character;
   const playerTurns = attributes.attacksPerKill == null ? null :
@@ -265,7 +312,8 @@ function combatSupplyRate(rule, id, context) {
       if (condition.Data?.IsOr) return null;
       const params = condition.Data;
       switch (baseCombatId(condition.Type)) {
-        case 'FightingSlayerTask': return 0;
+        case 'FightingSlayerTask':
+          break;
         case 'PrayerActive':
           if (!combat.prayers?.some(row => row.state === 1 && (!params.Prayer || row.active === baseCombatId(params.Prayer)))) return 0;
           break;
@@ -305,17 +353,29 @@ function combatSupplyRate(rule, id, context) {
   if (rule.kind === 'food') {
     return combatFoodProjection(rule, id, context)?.neededAt(1) ?? null;
   }
-  if (rule.kind === 'ammo') return rule.ammoType === attributes.ammoType ? playerTurns : 0;
+  if (rule.kind === 'ammo') {
+    if (rule.ammoType !== attributes.ammoType) return 0;
+    return playerTurns == null ? null : playerTurns * (1 - attributes.ammoPreservation);
+  }
   if (rule.kind === 'rune') {
-    const quantity = attributes.usesSpells ? [combat.spell, combat.imbuement ?? combat.activeImbuement].reduce((sum, spell) =>
-      sum + (spells[spell]?.runes ?? []).filter(row => row.id === id).reduce((total, row) => total + row.quantity, 0), 0) : 0;
-    return quantity && playerTurns == null ? null : quantity * (playerTurns ?? 0);
+    const expectedRunes = key => {
+      const spell = attributes.spellSupplies[key];
+      return spell ? spell.runes.filter(row => row.id === id)
+        .reduce((sum, row) => sum + row.quantity * (1 - spell.preserve), 0) : 0;
+    };
+    const required = attributes.usesSpells ? expectedRunes(combat.spell) : 0;
+    const optional = attributes.imbuementReady ? expectedRunes(combat.imbuement) : 0;
+    if (!required && !optional) return 0;
+    if (playerTurns == null) return null;
+    if (!required) return { neededAt: hours => hours * optional * playerTurns, hoursAtStock: () => Infinity };
+    return (required + optional) * playerTurns;
   }
   if (rule.kind === 'prayer') {
     const active = (combat.prayers ?? []).filter(row => row.state === 1).map(row => model.prayers[row.active])
       .filter(prayer => baseCombatId(prayer?.cost?.Currency) === id);
     let quantity = 0;
     for (const prayer of active) {
+      if (requiresSlayerTask(prayer.event)) return null;
       const rate = eventRate(prayer.event);
       if (rate == null) return null;
       quantity += rate * prayer.cost.Quantity;
@@ -323,10 +383,34 @@ function combatSupplyRate(rule, id, context) {
     return quantity;
   }
   if (rule.kind === 'charged') {
-    const rates = rule.events.map(eventRate);
-    return rates.some(rate => rate == null) ? null : rates.reduce((sum, rate) => sum + rate, 0);
+    let regular = 0;
+    let onTask = 0;
+    for (const event of rule.events) {
+      const rate = eventRate(event);
+      if (rate == null) return null;
+      if (requiresSlayerTask(event)) onTask += rate;
+      else regular += rate;
+    }
+    if (!onTask) return regular;
+    if (!character.slayerTasks || !target) return null;
+    const remaining = character.slayerTasks.reduce((maximum, task) =>
+      task.monster === target.id ? Math.max(maximum, task.remaining) : maximum, 0);
+    const taskHours = killsPerHour > 0 ? remaining / killsPerHour : 0;
+    if (!taskHours) return regular;
+    return {
+      neededAt: hours => regular * hours + onTask * Math.min(hours, taskHours),
+      hoursAtStock(stock) {
+        const beforeCompletion = (regular + onTask) * taskHours;
+        if (stock < beforeCompletion) return stock / (regular + onTask);
+        return regular > 0 ? taskHours + (stock - beforeCompletion) / regular : Infinity;
+      }
+    };
   }
   return null;
 }
 
-if (typeof module !== 'undefined') module.exports = { combatAttributes, expectedCombatHits, combatSupplyRate, combatFoodProjection, expectedEnemyTurns };
+function requiresSlayerTask(event) {
+  return event?.Data?.Conditions?.some(condition => baseCombatId(condition.Type) === 'FightingSlayerTask');
+}
+
+if (typeof module !== 'undefined') module.exports = { combatAttributes, expectedCombatHits, combatSupplyEstimate, combatFoodProjection, expectedEnemyTurns };

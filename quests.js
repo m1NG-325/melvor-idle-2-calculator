@@ -75,62 +75,145 @@ function questSourcesFor(item, skill) {
     .sort((a, b) => Number(a.questOnly) - Number(b.questOnly));
 }
 
+function questSourceLabel(where) {
+  const prefix = {
+    open: '打开 {name}', reward: '任务奖励 · {name}', purchase: '购买 · {name}',
+    drop: '掉落 · {name}', clear: '通关奖励 · {name}', modifierDrop: '需额外掉落加成 · {name}'
+  }[where.kind];
+  const path = questSourcePath(where);
+  return prefix ? t(prefix, { name: path }) : path;
+}
+
+function questSourceStage(quest, step) {
+  const name = gameName(questGuide.quests.find(row => row.id === quest)) ?? quest;
+  return name && Number.isInteger(step) ? t('{name} · 第 {step} 步', { name, step: step + 1 }) : name;
+}
+
+function questSourceNotes(where, restrictions) {
+  const stages = where.stages.map(({ quest, step }) => questSourceStage(quest, step)).filter(Boolean);
+  const level = { skill: questSkill(where.skill), level: fullNumber(where.level) };
+  const stage = where.questOnly && t('任务阶段限定') + (stages.length ? ' · ' + stages.join(' / ') : '');
+  return [
+    where.level && !restrictions.includes(t('需{skill} {level} 级', level)) && t('{skill} {level} 级', level),
+    stage && !restrictions.includes(stage) && stage
+  ].filter(Boolean);
+}
+
+function questSourceRequirementMet(req) {
+  switch (req.type) {
+    case 'Level':
+      return meetsShopCondition(req, profile);
+    case 'ShopPurchase':
+      return meetsShopCondition({ ...req, id: req.purchase }, profile);
+    case 'DungeonStatistic':
+    case 'SlayerMasterStatistic':
+      return meetsShopCondition({ ...req, id: req.statisticTarget, amount: req.statisticValue }, profile);
+    case 'QuestComplete':
+      return profile.questProgress ? profile.questProgress[req.quest]?.status === 3 : null;
+    case 'QuestStepActive':
+    case 'QuestTaskGoalActive':
+      return profile.questProgress ? meetsRequirements([req], profile) : null;
+    case 'ToolbeltItemEquipped':
+      return profile.equipped?.[req.skill]?.includes(req.item) ?? null;
+    case 'MasteryGuildRank':
+      return profile.ranks?.[req.skill]?.includes(req.rank) ?? null;
+    case 'AstrologyMajorNodeUnlocked':
+    case 'AstrologyMinorNodeUnlocked':
+      return profile.astrologyNodes?.includes(req.node) ?? null;
+    case 'AgilityCourseStatistic':
+    case 'AstrologyEventStatistic':
+    case 'ItemStatistic':
+      return profile.recipeStatistics?.[req.statistic] ? meetsRequirements([req], profile) : null;
+    default:
+      return null;
+  }
+}
+
+function questSourceRequirementText(req) {
+  if (req.type === 'QuestComplete') return t('完成任务「{name}」', { name: questSourceStage(req.quest) });
+  if (req.type === 'QuestStepActive' || req.type === 'QuestTaskGoalActive') {
+    const stage = questSourceStage(req.quest, req.questStep);
+    return stage ? t('任务阶段限定') + ' · ' + stage : t('任务阶段限定');
+  }
+  if (req.type === 'ToolbeltItemEquipped' && req.item) return t('需要装备 {item}', { item: questItem(req.item) });
+  return productionRestrictionText({ type: 'requirement', clause: [req] }, catalog);
+}
+
+function questSourceRestrictions(where) {
+  if (!profile?.characterId) return [];
+  const action = questActions.get(where.actionId);
+  const confirmed = action && profile.confirmed?.includes(action.id);
+  const restrictions = requirementClauses(where.requirementGroups ?? [])
+    .filter(clause => clause.every(req => questSourceRequirementMet(req) === false &&
+      (!confirmed || ['Level', 'QuestComplete', 'QuestStepActive', 'QuestTaskGoalActive'].includes(req.type))))
+    .map(clause => [...new Set(clause.map(questSourceRequirementText))].join(' / '));
+  if (action && profile.excluded?.includes(action.id)) restrictions.push(t('此行动已排除'));
+  return [...new Set(restrictions)];
+}
+
+function appendQuestRestrictions(entry, restrictions) {
+  if (restrictions.length) entry.append(create('small',
+    t('限制：{conditions}', { conditions: restrictions.join(' · ') }), 'quest-source-restriction'));
+}
+
+function appendQuestContainerOrigins(entry, where) {
+  if (!where.container) return;
+  for (const origin of questSourcesFor(where.container).filter(source => source.kind !== 'open')) {
+    entry.append(create('small', t('容器来源 {items}', { items: questSourcePath(origin) })));
+    appendQuestRestrictions(entry, questSourceRestrictions(origin));
+  }
+}
+
 function questProduction(item, where, remaining, projections) {
   const action = questActions.get(where.actionId);
-  if (profile?.characterId && where.level > (profile.levels[where.skill] ?? 0)) return { note: t('等级未达标') };
   if (!action) return { note: t('此来源暂无效率估算') };
   if (!profile?.characterId) return { note: t('读取存档后可估算产量') };
   if (!projections.has(action.id)) {
     projections.set(action.id, projectHourlyProduction(action, profile, catalog));
   }
   const result = projections.get(action.id);
-  if (result?.locked) return { note: t('当前未满足行动条件') };
+  if (result?.locked) return { restriction: t('当前未满足行动条件') };
   if (!result) return { note: t('此来源暂无效率估算') };
   const rate = result.drops.filter(row => row.id === item && !row.target)
     .reduce((sum, row) => sum + row.quantity, 0);
-  const limit = result.limit && (action.currencyCosts.some(([id]) => id === result.limit)
+  const limit = result.limit && (action.currencyCosts?.some(([id]) => id === result.limit)
     ? shopCurrencyName(result.limit) : questItem(result.limit));
   const notes = [
-    limit && (result.activeHours ? t('约 {time}后用完{item}', { time: formatDuration(result.activeHours), item: limit }) :
-      t('所需材料或货币不足 · {item}', { item: limit })),
+    limit && result.activeHours && t('约 {time}后用完{item}', { time: formatDuration(result.activeHours), item: limit }),
     result.risky && t('有受伤风险'),
     !rate && !limit && t('当前未估出产量')
   ].filter(Boolean);
   const time = remaining > 0 ? result.timeForItems?.(item, remaining) : null;
-  if (remaining > 0 && rate > 0 && time == null) notes.push(t('按现有材料无法凑齐'));
-  return { rate, time, note: notes.join(' · ') };
+  const restriction = limit && !result.activeHours ? t('所需材料或货币不足 · {item}', { item: limit }) :
+    remaining > 0 && rate > 0 && time == null ? t('按现有材料无法凑齐') : null;
+  return { rate, time, note: notes.join(' · '), restriction };
 }
 
-function questSourceList(locations, item, remaining, projections = new Map()) {
+function questSourceList(locations, item, remaining, projections = new Map(), material = false) {
   const container = create('div', undefined, 'quest-source-list');
   if (!locations.length) {
     container.append(create('p', t('本机游戏数据中未找到产出位置。'), 'muted'));
     return container;
   }
-  const list = create('ul', undefined, 'quest-source-paths');
+  const list = create('ul', undefined, material ? 'quest-material-sources' : 'quest-source-paths');
   const extra = create('ul', undefined, 'quest-source-paths');
-  const rows = locations.map(where => ({ where, production: item ? questProduction(item, where, remaining, projections) : {} }))
+  const direct = where => Number(where.kind === 'action' && where.target?.endsWith(':' + item));
+  const rows = locations.map(where => {
+    const restrictions = questSourceRestrictions(where);
+    const production = item && !material && !restrictions.length ? questProduction(item, where, remaining, projections) : {};
+    if (production.restriction) restrictions.push(production.restriction);
+    return { where, production, restrictions };
+  })
     .sort((a, b) => {
       const timeA = a.production.time ?? Infinity;
       const timeB = b.production.time ?? Infinity;
-      return (timeA === timeB ? 0 : timeA - timeB) || (b.production.rate ?? 0) - (a.production.rate ?? 0);
+      return (timeA === timeB ? 0 : timeA - timeB) || (b.production.rate ?? 0) - (a.production.rate ?? 0) ||
+        (material ? direct(b.where) - direct(a.where) : 0);
     });
-  for (const [index, { where, production }] of rows.entries()) {
-    const path = questSourcePath(where);
-    const prefix = {
-      open: '打开 {name}', reward: '任务奖励 · {name}', purchase: '购买 · {name}',
-      drop: '掉落 · {name}', clear: '通关奖励 · {name}', modifierDrop: '需额外掉落加成 · {name}'
-    }[where.kind];
-    const entry = create('li', prefix ? t(prefix, { name: path }) : path);
-    const stages = where.stages.map(({ quest, step }) => {
-      const name = gameName(questGuide.quests.find(row => row.id === quest));
-      return name && Number.isInteger(step) ? t('{name} · 第 {step} 步', { name, step: step + 1 }) : name;
-    }).filter(Boolean);
-    const notes = [
-      where.level && t('{skill} {level} 级', { skill: questSkill(where.skill), level: fullNumber(where.level) }),
-      where.questOnly && t('任务阶段限定') + (stages.length ? ' · ' + stages.join(' / ') : ''),
-      production.note
-    ].filter(Boolean);
+  for (const [index, { where, production, restrictions }] of rows.entries()) {
+    const entry = create('li', questSourceLabel(where));
+    const notes = questSourceNotes(where, restrictions);
+    if (production.note) notes.push(production.note);
     if (production.rate > 0) {
       const quantity = production.rate < 0.01 ? '<' + decimals.format(0.01) : decimals.format(production.rate);
       entry.append(' ', create('strong', t('约 {quantity} 件／小时', { quantity }), 'quest-yield'));
@@ -139,21 +222,18 @@ function questSourceList(locations, item, remaining, projections = new Map()) {
       notes.push(t('约 {time} 可凑齐', { time: formatDuration(production.time, true) }));
     }
     if (notes.length) entry.append(create('small', notes.join(' · ')));
-    if (where.ingredients.length) {
+    appendQuestRestrictions(entry, restrictions);
+    if (!material && where.ingredients.length) {
       const materialList = create('ul', undefined, 'quest-recipe-inputs');
       for (const { item, quantity } of where.ingredients) {
         const input = create('li', t('每次所需 {item} × {quantity}', { item: questItem(item), quantity: fullNumber(quantity) }));
-        const origin = item && questSourcesFor(item).find(source => source.kind === 'action');
-        if (origin) input.append(create('small', questSourcePath(origin)));
+        input.append(questSourceList(questSourcesFor(item), item, 0, projections, true));
         materialList.append(input);
       }
       entry.append(materialList);
     }
-    if (where.container) {
-      const origins = questSourcesFor(where.container).filter(source => source.kind !== 'open').map(questSourcePath);
-      if (origins.length) entry.append(create('small', t('容器来源 {items}', { items: origins.join(' · ') })));
-    }
-    (item && index >= 4 ? extra : list).append(entry);
+    appendQuestContainerOrigins(entry, where);
+    (item && index >= (material ? 2 : 4) ? extra : list).append(entry);
   }
   container.append(list);
   if (extra.childElementCount) {

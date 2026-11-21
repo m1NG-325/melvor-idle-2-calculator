@@ -63,7 +63,7 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true) {
   }
   for (const action of new Set([...catalog.actions, ...catalog.xpActions])) {
     const other = otherActions.get(action.id);
-    action.names = label(action.name, other?.name, action.recipe);
+    action.names ??= label(action.name, other?.name, action.recipe);
     if (action.area) action.areaNames = label(action.area, other?.area, action.location ?? action.category);
   }
   const otherEnemies = new Map((alternatives.catalog?.combatTargets ?? []).map(enemy => [enemy.id, enemy.name]));
@@ -74,7 +74,7 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true) {
     enemy.names = label(enemy.name, otherEnemies.get(enemy.id), enemy.id);
     for (const area of enemy.areas) area.names = label(area.name, otherAreas.get(area.id), area.id);
   }
-  for (const key of ['combatSlots', 'combatSpells']) {
+  for (const key of ['combatSlots', 'combatSpells', 'statisticSubjects']) {
     for (const [id, record] of Object.entries(catalog[key])) {
       record.names = label(record.name, alternatives.catalog?.[key]?.[id]?.name, id);
     }
@@ -86,6 +86,11 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true) {
   }
   const otherGroups = new Map((alternatives.shop?.groups ?? []).map(group => [group.id, group.name]));
   for (const group of shop.groups) group.names = label(group.name, otherGroups.get(group.id), group.id);
+  const skillShop = catalog.skillShop;
+  skillShop.group.names = label(skillShop.group.name, otherGroups.get(skillShop.group.id), skillShop.group.id);
+  for (const [id, section] of Object.entries(skillShop.sections)) {
+    section.names = label(section.name, alternatives.catalog?.skillShop?.sections?.[id]?.name, id);
+  }
   const otherUpgrades = new Map([
     ...(alternatives.shop?.upgrades ?? []), ...(alternatives.shop?.referenceUpgrades ?? [])
   ].map(upgrade => [upgrade.id, upgrade]));

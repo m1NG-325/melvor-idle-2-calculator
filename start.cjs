@@ -8,9 +8,10 @@ const { findSteamGame, getBuild, readPackage } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
 const { addGameLabels } = require('./game-labels.cjs');
-const { findSaves, readHeader, readProfile } = require('./saves.cjs');
+const { findSaves, readHeader, readProfile, readCharacterStatistics } = require('./saves.cjs');
 const { VERSION, RELEASES_URL, checkForUpdate, createLog } = require('./runtime.cjs');
 const { installUpdate, installedUpdates } = require('./updater.cjs');
+const { createAccessPoll } = require('./access-poll.cjs');
 const preferencesLimit = 512 * 1024;
 
 function readPreferences(preferencesFile) {
@@ -52,6 +53,7 @@ async function writePreferences(request, response, json, preferencesFile, log) {
 async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice } = {}) {
   const log = createLog(root);
   const preferencesFile = path.join(root, 'calculator-settings.json');
+  const accessPoll = createAccessPoll(root);
   log.record('startup', { node: process.versions.node, platform: process.platform });
   const source = path.resolve(args.find(arg => !arg.startsWith('--')) ?? findSteamGame());
   const standalone = fs.statSync(source).isFile();
@@ -88,11 +90,16 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     '': ['text/html', 'index.html'],
     'app.css': ['text/css', 'app.css'],
     'rank.js': ['text/javascript', 'rank.js'],
+    'production.js': ['text/javascript', 'production.js'],
+    'statistics.js': ['text/javascript', 'statistics.js'],
     'experience.js': ['text/javascript', 'experience.js'],
     'xp-progress.js': ['text/javascript', 'xp-progress.js'],
     'combat.js': ['text/javascript', 'combat.js'],
     'combat-model.js': ['text/javascript', 'combat-model.js'],
+    'combat-training.js': ['text/javascript', 'combat-training.js'],
+    'skill-training.js': ['text/javascript', 'skill-training.js'],
     'preferences.js': ['text/javascript', 'preferences.js'],
+    'access-poll.js': ['text/javascript', 'access-poll.js'],
     'choices.js': ['text/javascript', 'choices.js'],
     'shop.js': ['text/javascript', 'shop.js'],
     'quests.js': ['text/javascript', 'quests.js'],
@@ -134,6 +141,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     });
   }
   let saves = [];
+  let savesByCharacter = new Map();
   const server = http.createServer((request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -146,6 +154,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       return;
     }
     const route = pathname.slice(prefix.length);
+    if (route === 'access-poll') return void accessPoll(request, response, json, 'http://' + host);
     if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json, preferencesFile, log);
     if (route === 'update/install' && request.method === 'POST') {
       if (request.headers.origin !== 'http://' + host || request.headers['x-calculator-update'] !== 'install') {
@@ -156,7 +165,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       beginUpdate();
       return json(response, installation ?? { phase: 'downloading' }, 202);
     }
-    const browserError = /^diagnostics\/client-error(?:\/(language|rank|ui|shop|quests|experience|xp-progress|combat|combat-model|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
+    const browserError = /^diagnostics\/client-error(?:\/(language|rank|production|statistics|ui|shop|quests|experience|xp-progress|combat|combat-model|combat-training|skill-training|preferences|choices|access-poll)\.js\/(\d{1,6}))?$/.exec(route);
     if (browserError && request.method === 'POST') {
       if (loggedClientErrors++ < 20) log.record('browser_error', {
         script: browserError[1], line: browserError[2] && Number(browserError[2])
@@ -180,24 +189,39 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       if (route === 'shop') return json(response, shop);
       if (route === 'saves') {
         saves = findSaves();
+        savesByCharacter = new Map();
         log.record('saves_scanned', { count: saves.length });
         return json(response, saves.map((file, index) => {
           try {
             const { name, characterId } = readHeader(fs.readFileSync(file));
+            if (savesByCharacter.has(characterId)) return null;
+            savesByCharacter.set(characterId, file);
             return { index, name, characterId };
           } catch {
             log.record('save_header_unreadable');
             return { index, unknown: true };
           }
-        }));
+        }).filter(Boolean));
       }
-      const profile = route.match(/^profile\/(\d+)$/);
-      if (profile && saves[Number(profile[1])]) {
-        const data = readProfile(saves[Number(profile[1])], catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
+      const statisticsCharacter = /^statistics\/character\/([a-f0-9]{32})$/.exec(route)?.[1];
+      if (statisticsCharacter) {
+        const file = savesByCharacter.get(statisticsCharacter);
+        if (!file) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 404);
+        const data = readCharacterStatistics(file);
+        if (data.characterId !== statisticsCharacter) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
+        return json(response, data);
+      }
+      const character = /^profile\/character\/([a-f0-9]{32})$/.exec(route)?.[1];
+      const legacyProfile = /^profile\/(\d+)$/.exec(route)?.[1];
+      const saveFile = character ? savesByCharacter.get(character) : saves[Number(legacyProfile)];
+      if (saveFile) {
+        const data = readProfile(saveFile, catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
           (component, skill) => log.record('save_component_unreadable', { component, skill }));
+        if (character && data.characterId !== character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
         log.record('profile_loaded');
         return json(response, data);
       }
+      if (character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 404);
       if (Object.hasOwn(assets, route)) {
         const [type, file] = assets[route];
         const body = fs.readFileSync(path.join(__dirname, file));
@@ -208,7 +232,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       json(response, { error: '页面不存在' }, 404);
     } catch (error) {
       console.error(error.message);
-      const endpoint = route.startsWith('profile/') ? 'profile' : Object.hasOwn(assets, route) ? 'asset' :
+      const endpoint = route.startsWith('profile/') ? 'profile' : route.startsWith('statistics/character/') ? 'statistics' : Object.hasOwn(assets, route) ? 'asset' :
         ['saves', 'shop', 'catalog'].includes(route) ? route : 'other';
       log.record('request_failed', { endpoint, code: /^[A-Z_0-9]+$/.test(error.code ?? '') ? error.code : 'read_error' });
       json(response, { error: '读取失败。可切换到手动设置。' }, 422);
@@ -247,8 +271,15 @@ async function boot(args) {
       const start = directory === __dirname ? launch : require(path.join(directory, 'start.cjs')).launch;
       const { url } = await start({ root: __dirname, args, updateNotice });
       if (!args.includes('--no-open')) {
-        const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { windowsHide: true, stdio: 'ignore' });
-        child.on('error', () => console.log('Open the address above in a browser.'));
+        const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          '$ErrorActionPreference = "Stop"; Start-Process -FilePath $env:MELVOR_CALCULATOR_URL'], {
+          env: { ...process.env, MELVOR_CALCULATOR_URL: url },
+          windowsHide: true,
+          stdio: 'ignore'
+        });
+        const showAddress = () => console.log('请在浏览器中打开上方地址。 / Open the address above in a browser.');
+        child.once('error', showAddress);
+        child.once('exit', code => { if (code !== 0) showAddress(); });
       }
       return;
     } catch (error) {

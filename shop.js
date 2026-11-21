@@ -56,7 +56,7 @@ function calculateShoppingList(shop, items, selected, character, scope = 'all', 
     const remaining = purchaseFilter === 'purchased' ? 0 : Math.max(0, upgrade.target - bought);
     const purchased = purchaseFilter === 'pending' ? 0 : bought;
     if (!remaining && !purchased) continue;
-    const visibility = shopVisibility(upgrade, character, purchased > 0);
+    const visibility = shopVisibility(upgrade, character, bought > 0);
     if (visibility.state === 'hidden') hiddenCount++;
     if (visibility.state === 'unknown') unknownCount++;
     if (scope === 'visible' && visibility.state !== 'visible') continue;

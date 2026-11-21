@@ -121,6 +121,57 @@ function readShopStatistic(reader, precedingLists, statistic) {
   }
 }
 
+function readStatisticsComponent(reader) {
+  const groups = ['value', 'item', 'currency'];
+  const statistics = [];
+  const unavailable = [];
+  for (let index = 0; reader.offset < reader.buffer.length; index++) {
+    const kind = groups[index] ?? 'subject';
+    for (const [name, region] of reader.regions()) {
+      const id = localId(name);
+      try {
+        if (kind === 'value') {
+          const value = region.double();
+          if (region.offset !== region.buffer.length || !Number.isFinite(value)) throw Error('invalid statistic');
+          statistics.push({ id, kind, value });
+        } else {
+          const rows = [];
+          const count = region.count();
+          for (let i = 0; i < count; i++) {
+            const value = region.double();
+            const key = localId(region.string());
+            if (!key || !Number.isFinite(value)) throw Error('invalid statistic entry');
+            rows.push({ id: key, value });
+          }
+          if (region.offset !== region.buffer.length) throw Error('unsupported statistic format');
+          statistics.push({ id, kind, rows });
+        }
+      } catch {
+        unavailable.push(id);
+      }
+    }
+  }
+  return { statistics, unavailable };
+}
+
+function readCharacterStatistics(file) {
+  const { characterId, name, reader } = readHeader(fs.readFileSync(file));
+  const sections = [];
+  const unavailable = [];
+  for (const [entity, region] of reader.regions()) {
+    const id = localId(entity);
+    try {
+      const source = region.regions().get('Statistics');
+      if (!source) continue;
+      const result = readStatisticsComponent(source);
+      if (result.statistics.length || result.unavailable.length) sections.push({ id, ...result });
+    } catch {
+      unavailable.push(id);
+    }
+  }
+  return { characterId, name, sections, unavailable, date: fs.statSync(file).mtime.toISOString() };
+}
+
 function readCurrencies(reader, fallback) {
   if (!reader) return fallback;
   const currencies = Object.assign(Object.create(null), fallback);
@@ -350,6 +401,125 @@ function readQuestProgress(reader) {
   }));
 }
 
+function readHuntingState(action, journal) {
+  const entries = {};
+  if (journal) for (const [id, entry] of journal.regions()) {
+    entries[localId(id)] = { discovered: Boolean(entry.byte()), xp: entry.double() };
+  }
+  if (!action) return { entries };
+  action.take(14); // Started flag and action timer
+  for (const [id, animal] of action.regions()) {
+    animal.take(12); // Tracks, current step, and required steps
+    const trap = animal.byte() ? localId(animal.string()) : null;
+    animal.byte(); // Species set
+    if (animal.byte()) animal.string();
+    animal.int(); // State
+    const bait = Boolean(animal.byte());
+    animal.take(9); // Survey failures, bait already consumed, trap failures
+    const trapless = Boolean(animal.byte());
+    Object.assign(entries[localId(id)] ??= {}, { trap, bait, trapless });
+  }
+  action.byte(); // Allow surveying products
+  for (let i = 0; i < 3; i++) if (action.byte()) action.string();
+  return { entries, autoSwap: Boolean(action.byte()) };
+}
+
+function readFarmingPlots(reader) {
+  if (!reader) return;
+  if (reader.byte()) reader.string();
+  const tick = reader.long();
+  return [...reader.regions()].flatMap(([id, plot]) => {
+    const watered = Boolean(plot.byte());
+    const autoPlant = Boolean(plot.byte());
+    const autoHarvest = Boolean(plot.byte());
+    plot.take(2); // Compost and water automation
+    const selected = plot.byte() ? localId(plot.string()) : null;
+    if (plot.byte()) plot.string();
+    if (plot.byte()) plot.string();
+    const state = plot.int();
+    if (!state) return [];
+    const result = { id: localId(id), selected, autoPlant, autoHarvest, watered, state };
+    if (state > 1 && plot.offset < plot.buffer.length) {
+      result.crop = localId(plot.string());
+      if (state === 2 || state === 4) {
+        plot.take(9);
+        result.seconds = Math.max(0, Number(plot.long() - tick) / 60);
+        if (state === 4) {
+          plot.int(); // Paused ticks
+          result.regrows = plot.int();
+        }
+      } else if (state === 3) {
+        result.seconds = 0;
+        result.regrows = plot.buffer.readInt32LE(plot.buffer.length - 4);
+      }
+    }
+    return [result];
+  });
+}
+
+function readRanchingState(reader) {
+  if (!reader) return;
+  const timer = () => {
+    reader.byte();
+    const state = reader.int();
+    const interval = reader.int() / 60;
+    return { state, interval, first: reader.int() / 60 };
+  };
+  const maintenance = timer();
+  const food = timer();
+  const production = timer();
+  timer(); // Treat schedule
+  reader.take(9);
+  reader.long(); // Land timer queue
+  const lands = [...reader.regions()].flatMap(([id, land]) => {
+    if (!land.byte() || !land.byte()) return [];
+    const enclosure = localId(land.string());
+    const region = land.region();
+    region.take(21); // Breeding timer
+    const safety = region.double();
+    const animals = Array.from({ length: region.count(100) }, () => {
+      const type = localId(region.string());
+      const animal = region.region();
+      const sick = Boolean(animal.byte());
+      const hunger = animal.double();
+      const safety = animal.double();
+      const satisfaction = animal.double();
+      animal.take(5); // Wants pets and pet count
+      const variant = localId(animal.string());
+      for (let i = animal.count(100); i > 0; i--) {
+        animal.byte();
+        animal.string();
+      }
+      const lifeSeconds = animal.double() * 60;
+      const variantSeconds = animal.double() * 60;
+      return { type, sick, hunger, safety, satisfaction, variant, lifeSeconds, variantSeconds };
+    });
+    for (let i = region.count(100); i > 0; i--) region.string(); // Auto-purchase selections
+    region.take(21); // Animal custom tick timer
+    const upgrades = Array.from({ length: region.count(100) }, () => localId(region.string()));
+    return [{ id: localId(id), enclosure, safety, animals, upgrades }];
+  });
+  return { maintenance, food, production, lands };
+}
+
+function readGrainMill(reader, inventory) {
+  if (!reader || !inventory) return;
+  const active = Boolean(reader.byte());
+  reader.take(9); // Timer restart flag, state, and duration
+  const first = reader.int() / 60;
+  const recipe = reader.byte() ? localId(reader.string()) : null;
+  const stock = Object.create(null);
+  inventory.take(14);
+  for (let i = inventory.count(); i > 0; i--) {
+    const quantity = inventory.int();
+    inventory.byte(); // Placeholder
+    const locked = inventory.byte();
+    const item = localId(inventory.string());
+    if (!locked && quantity > 0) stock[item] = (stock[item] ?? 0) + quantity;
+  }
+  return { active, first, recipe, stock };
+}
+
 function readProfile(file, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}) {
   const { reader, ...header } = readHeader(fs.readFileSync(file));
   const entities = reader.regions();
@@ -361,6 +531,7 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
   const levels = {};
   const skillXp = {};
   const equipped = {};
+  const skillToolbelt = {};
   const cookingCharges = [];
   const unlockedPets = [];
   const bankComponents = componentsFor('Bank');
@@ -380,11 +551,13 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
     }
     const slots = components?.get('Toolbelt')?.regions();
     equipped[skill] = [];
-    for (const slot of slots?.values() ?? []) {
+    if (slots) skillToolbelt[skill] = [];
+    for (const [id, slot] of slots ?? []) {
       const quantity = slot.int();
       if (!slot.byte()) continue;
       const item = localId(slot.string());
       equipped[skill].push(item);
+      skillToolbelt[skill].push({ slot: localId(id), id: item, quantity: Math.max(1, quantity) });
       if (skill === 'Cooking' && quantity > 0) cookingCharges.push({ item, quantity });
     }
   }
@@ -427,6 +600,21 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
   } catch {
     onWarning('Quests', 'Quests');
   }
+  const xpSkillState = {};
+  for (const [skill, component, read] of [
+    ['Agility', 'Techniques', techniques => techniques &&
+      Object.fromEntries([...techniques.regions()].map(([id, row]) => [localId(id), row.double()]))],
+    ['Hunting', 'Action', action => readHuntingState(action, componentsFor('Hunting')?.get('Journal'))],
+    ['Farming', 'Passive', readFarmingPlots],
+    ['GrainMill', 'GrainMill', reader => readGrainMill(reader, componentsFor('Farming')?.get('GrainMillInventory'))],
+    ['Ranching', 'Passive', readRanchingState]
+  ]) {
+    try {
+      xpSkillState[skill] = read(componentsFor(skill === 'GrainMill' ? 'Farming' : skill)?.get(component));
+    } catch {
+      onWarning(component, skill);
+    }
+  }
   const ranks = {};
   for (const [skill, description] of Object.entries(mastery)) {
     try {
@@ -436,9 +624,10 @@ function readProfile(file, skills, shopSkills = [], mastery = {}, constellations
     }
   }
   return {
-    ...header, levels, skillXp, equipped, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
+    ...header, levels, skillXp, equipped, skillToolbelt, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
     dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, fishingPriorities, recipeStatistics, unlockedPets, ranks, combat,
     questProgress,
+    xpSkillState,
     currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
     date: fs.statSync(file).mtime.toISOString()
   };
@@ -460,4 +649,4 @@ function findSaves() {
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 }
 
-module.exports = { findSaves, readProfile, readHeader };
+module.exports = { findSaves, readProfile, readHeader, readCharacterStatistics };

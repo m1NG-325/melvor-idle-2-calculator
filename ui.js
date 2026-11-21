@@ -24,7 +24,7 @@ function reportBrowserError(event) {
   if (reportedBrowserError) return;
   reportedBrowserError = true;
   const script = event?.filename?.split('/').pop();
-  const source = ['language.js', 'rank.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'preferences.js', 'choices.js'].includes(script)
+  const source = ['language.js', 'rank.js', 'production.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js', 'access-poll.js'].includes(script)
     ? '/' + script + '/' + (event.lineno || 0) : '';
   fetch('diagnostics/client-error' + source, { method: 'POST', keepalive: true }).catch(() => {});
 }
@@ -36,6 +36,44 @@ function create(tag, content, className) {
   if (content !== undefined) element.textContent = content;
   if (className) element.className = className;
   return element;
+}
+
+function applyIdleDuration(input, value) {
+  input.value = Math.min(Number(input.max), Math.max(Number(input.min), value));
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function initIdleDurations() {
+  for (const input of document.querySelectorAll('[data-idle-duration]')) {
+    const label = input.parentElement;
+    const field = create('div', undefined, 'idle-duration-field');
+    const controls = create('div', undefined, 'idle-duration-controls');
+    label.before(field);
+    label.htmlFor = input.id;
+    field.append(label, controls);
+    controls.append(input);
+    function adjust(step) {
+      const current = Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : Number(input.defaultValue);
+      const next = current + step;
+      const minutes = Math.round(next * 60);
+      applyIdleDuration(input, Math.abs(next * 60 - minutes) < 1e-9 ? minutes / 60 : Number(next.toPrecision(15)));
+    }
+    for (const step of [.5, -.5]) {
+      const button = create('button');
+      button.type = 'button';
+      button.dataset.durationStep = step;
+      button.addEventListener('click', () => adjust(step));
+      controls.append(button);
+    }
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      adjust(event.key === 'ArrowUp' ? .5 : -.5);
+    });
+    input.addEventListener('blur', () => {
+      if (!input.checkValidity()) applyIdleDuration(input, Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : Number(input.defaultValue));
+    });
+  }
 }
 
 async function get(route) {
@@ -66,6 +104,8 @@ function renderProfile(keepCount = false, automatic = false) {
   updateShop(profile);
   updateExperience(profile, automatic);
   updateCombat(profile);
+  renderProduction();
+  void renderStatistics();
   if (!byId('questsPage').hidden) renderQuest();
 }
 
@@ -109,6 +149,7 @@ function numberCell(label, skill, key, value, min, max, placeholder) {
     else (profile.bonuses[skill] ??= {})[key] = input.valueAsNumber;
     calculate();
     updateExperience(profile);
+    renderProduction();
     queuePreferences();
   });
   cell.append(input);
@@ -208,12 +249,12 @@ function incomeSources(result) {
   if (result.directSources?.length) {
     for (const row of result.directSources) {
       list.append(create('li', t('{source} · {value} GP', {
-        source: gameName(row.target) + ' · ' + t('直接获得金币'), value: decimals.format(row.value)
+        source: gameName(row.target) + ' · ' + t('直接获得金币'), value: fullNumber(row.value)
       })));
     }
   } else if (result.direct) {
     const label = result.action.kind === 'Fishing' ? '杂物兑换金币' : '直接获得金币';
-    list.append(create('li', t('{source} · {value} GP', { source: t(label), value: decimals.format(result.direct) })));
+    list.append(create('li', t('{source} · {value} GP', { source: t(label), value: fullNumber(result.direct) })));
   }
   for (const row of result.drops) {
     list.append(create('li', t('{source} · {item} × {quantity} · {value}', {
@@ -221,15 +262,15 @@ function incomeSources(result) {
       item: gameName(catalog.items[row.id]) ?? row.id,
       quantity: decimals.format(row.quantity),
       value: row.sold ? t('{price} GP／件，共 {total} GP', {
-        price: decimals.format(row.unitPrice), total: decimals.format(row.value)
+        price: fullNumber(row.unitPrice), total: fullNumber(row.value)
       }) : t('保留，不计出售收入')
     })));
   }
   for (const row of result.inputs) {
     const item = row.currency ? shopCurrencyName(row.id) : gameName(catalog.items[row.id]) ?? row.id;
     list.append(create('li', t('消耗 · {item} × {quantity} · {value}', {
-      item, quantity: decimals.format(row.quantity),
-      value: row.currency && !row.unitPrice ? t('不折算为 GP') : '−' + decimals.format(row.value) + ' GP'
+      item, quantity: row.currency && row.id === 'GoldPieces' ? fullNumber(row.quantity) : decimals.format(row.quantity),
+      value: row.currency && !row.unitPrice ? t('不折算为 GP') : '−' + fullNumber(row.value) + ' GP'
     })));
   }
   details.append(list);
@@ -386,10 +427,11 @@ async function loadProfile(automatic = false) {
   const current = ++profileRequest;
   profileReading = true;
   try {
-    const data = selected === '' ? manualProfile() : await get('profile/' + selected);
+    const data = selected === '' ? manualProfile() : await get('profile/character/' + selected);
     if (current !== profileRequest) return;
     if (automatic && (data.characterId !== profile.characterId || Date.parse(data.date) <= Date.parse(profile.date))) {
       autoSaveReadFailed = false;
+      if (data.characterId === profile.characterId && statisticsState.failed) void renderStatistics();
       return;
     }
     autoSaveReadFailed = false;
@@ -421,14 +463,20 @@ async function refreshSaves() {
   try {
     const saves = await get('saves');
     select.replaceChildren(...saves.map(({ index, name, unknown, characterId }) => {
-      const option = new Option(unknown ? t('存档 {count}（格式未知）', { count: index + 1 }) : name, index);
-      if (unknown) option.dataset.unknown = 'true';
+      const option = new Option(unknown ? t('存档 {count}（格式未知）', { count: index + 1 }) : name,
+        characterId ?? 'unknown-' + index);
+      if (unknown) {
+        option.dataset.unknown = index + 1;
+        option.disabled = true;
+      }
       if (characterId) option.dataset.characterId = characterId;
       return option;
     }), new Option(t('手动设置'), ''));
     const previous = selectedId && Array.from(select.options).find(option => option.dataset.characterId === selectedId);
     if (selectedId === 'manual') select.value = '';
     else if (previous) select.value = previous.value;
+    else if (selectedId) select.value = '';
+    else select.value = Array.from(select.options).find(option => !option.disabled).value;
     await loadProfile();
   } catch (error) {
     select.replaceChildren(new Option(t('手动设置'), ''));
@@ -466,6 +514,7 @@ function editItem() {
   updateShop(profile);
   updateExperience(profile);
   updateCombat(profile);
+  renderProduction();
   queuePreferences();
 }
 
@@ -493,30 +542,49 @@ function setAction(include) {
   });
   calculate();
   updateExperience(profile);
+  renderProduction();
   queuePreferences();
 }
 
 async function init() {
   preferences = await get('preferences').catch(() => ({}));
   uiLanguage = requestedLanguage ?? supportedLanguage(preferences.language) ?? uiLanguage;
-  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page'].includes(preferences.page)) {
+  experienceSection = preferences.fields?.xpSection === 'combat' ? 'combat' : 'skills';
+  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page', '#production', '#statistics'].includes(preferences.page)) {
     history.replaceState(null, '', preferences.page);
   }
   initTheme();
   function showPage() {
-    const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat' }[location.hash] ?? 'rank';
-    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests']) {
+    const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat', '#production': 'production',
+      '#statistics': 'statistics' }[location.hash] ?? 'rank';
+    showExperienceSection(page === 'xp');
+    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics']) {
       byId(key + 'Page').hidden = key !== page;
       const link = byId(key + 'Link');
       if (key === page) {
         link.setAttribute('aria-current', 'page');
         byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益',
-          quests: '任务材料' }[page]);
+          quests: '任务材料', production: '连锁产线', statistics: '数据统计' }[page]);
       } else link.removeAttribute('aria-current');
     }
+    if (page === 'xp' || page === 'combat') updateCombatTraining();
+    if (page === 'xp' && experienceSection === 'skills') renderExperience();
+  }
+  for (const [id, section] of [['xpSkillsButton', 'skills'], ['xpCombatButton', 'combat']]) {
+    byId(id).addEventListener('click', () => {
+      experienceSection = section;
+      showExperienceSection(true);
+      updateCombatTraining();
+      if (section === 'skills') renderExperience();
+      queuePreferences();
+    });
   }
   function localizeControls() {
     applyLanguage();
+    for (const button of document.querySelectorAll('[data-duration-step]')) {
+      button.title = t(Number(button.dataset.durationStep) > 0 ? '增加 30 分钟' : '减少 30 分钟');
+      button.setAttribute('aria-label', button.title);
+    }
     renderSaveRefreshStatus();
     renderTheme();
     renderRuntimeStatus();
@@ -534,7 +602,7 @@ async function init() {
     byId('dataNotice').hidden = !dataNotes.length;
     for (const option of byId('save').options) {
       if (option.value === '') option.text = t('手动设置');
-      else if (option.dataset.unknown) option.text = t('存档 {count}（格式未知）', { count: +option.value + 1 });
+      else if (option.dataset.unknown) option.text = t('存档 {count}（格式未知）', { count: +option.dataset.unknown });
     }
     for (const option of byId('filter').options) {
       if (option.value) option.text = skillName(option.value, catalog.skills);
@@ -552,7 +620,9 @@ async function init() {
     localizeShop();
     localizeCombat();
     localizeQuests();
+    localizeProduction();
     if (profile) renderProfile(true);
+    else void renderStatistics();
   }
   byId('language').addEventListener('change', event => {
     uiLanguage = supportedLanguage(event.currentTarget.value) ?? 'en';
@@ -566,14 +636,19 @@ async function init() {
   window.addEventListener('hashchange', () => {
     showPage();
     if (!byId('questsPage').hidden) renderQuest();
+    renderProduction();
+    void renderStatistics();
     queuePreferences();
   });
   for (const event of ['input', 'change', 'toggle']) document.addEventListener(event, queuePreferences, true);
   window.addEventListener('pagehide', savePreferences);
   localizeControls();
+  initAccessPoll();
   loadRuntimeStatus();
   try {
     catalog = await get('catalog');
+    initStatistics();
+    initProduction(catalog);
     initExperience(catalog);
     initCombat(catalog);
     initQuests(catalog.questGuide);
@@ -586,6 +661,7 @@ async function init() {
     const filter = byId('filter');
     for (const [id, name] of Object.entries(catalog.skills)) filter.append(new Option(name, id));
     restorePreferences();
+    initIdleDurations();
     localizeControls();
     for (const input of document.querySelectorAll('[data-suggestions]')) initSuggestions(input);
     const keptDropItem = byId('keptDropItem');
@@ -598,8 +674,7 @@ async function init() {
     byId('options').addEventListener('change', calculate);
     byId('options').addEventListener('input', calculate);
     for (const button of document.querySelectorAll('[data-hours]')) {
-      button.addEventListener('click', () => { byId('hours').value = button.dataset.hours; calculate(); });
-      button.addEventListener('click', queuePreferences);
+      button.addEventListener('click', () => applyIdleDuration(byId('hours'), Number(button.dataset.hours)));
     }
     for (const id of ['filter', 'search']) {
       byId(id).addEventListener('input', () => { showCount = 15; renderResults(); });

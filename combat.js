@@ -1,34 +1,89 @@
+function combatHealthLimit(attributes, rate, hitpoints = attributes?.currentHp) {
+  if (!attributes?.enemy || !(rate > 0)) return null;
+  const { enemy, maxHp, enemyHp, lifesteal } = attributes;
+  const initial = Math.max(0, Math.min(maxHp, hitpoints ?? maxHp));
+  const damage = Math.max(0, enemy.turnsPerKill * enemy.damagePerTurn - Math.min(maxHp, (enemyHp ?? 0) * (lifesteal ?? 0))) * rate;
+  if (!Number.isFinite(damage)) return null;
+  const budget = Math.max(0, initial - enemy.maxHit);
+  if (!(damage > 0) && budget > 0) return null;
+  return { hours: budget > 0 ? budget / damage : 0, remaining: hours => Math.max(0, initial - damage * hours) };
+}
+
 function estimateCombat(target, items, options) {
   const plannedHours = Math.min(options.hours, options.cap || Infinity);
-  let activeHours = plannedHours;
+  let activeHours = 0;
+  let killProgress = 0;
   let limit;
-  for (const supply of options.supplies) {
-    if (supply.available == null) continue;
-    let duration = supply.available / supply.perHour;
-    if (supply.projection) {
-      const expected = supply.projection.neededAt(plannedHours);
-      duration = expected > 0 && expected >= supply.available ? supply.projection.hoursAtStock(supply.available) : Infinity;
+  let unknown = false;
+  let stage = options;
+  let hitpoints = options.attributes?.currentHp;
+  const phases = [];
+  const expired = new Map();
+  const remaining = new Map(options.supplies.map(supply => [supply.id, supply.available]));
+  const used = new Map(options.supplies.map(supply => [supply.id, 0]));
+  while (activeHours < plannedHours) {
+    unknown ||= Boolean(stage.unknown);
+    const left = plannedHours - activeHours;
+    let duration = left;
+    const bounds = [];
+    const activeSupplies = stage.supplies.filter(supply => !expired.has(supply.id) &&
+      (!supply.food || (remaining.get(supply.id) ?? supply.available ?? Infinity) > 0));
+    const health = activeSupplies.some(supply => supply.food) ? null :
+      combatHealthLimit(stage.attributes, stage.killsPerHour, hitpoints);
+    if (health) {
+      duration = Math.min(duration, health.hours);
+      bounds.push({ supply: { id: 'Hitpoints' }, hours: health.hours });
     }
-    if (duration < activeHours) {
-      activeHours = duration;
-      limit = supply.id;
+    for (const supply of activeSupplies) {
+      if (!remaining.has(supply.id)) remaining.set(supply.id, supply.available);
+      const available = remaining.get(supply.id);
+      if (available == null) continue;
+      const hours = supply.projection ? supply.projection.hoursAtStock(available) :
+        supply.perHour > 0 ? available / supply.perHour : Infinity;
+      bounds.push({ supply, hours });
+      duration = Math.min(duration, hours);
     }
+    if (duration > 0) {
+      phases.push({ hours: duration, killsPerHour: stage.killsPerHour, progress: killProgress,
+        attributes: stage.attributes, character: stage.character });
+    }
+    activeHours += duration;
+    killProgress += stage.killsPerHour * duration;
+    for (const { id, perHour, projection } of activeSupplies) {
+      const available = remaining.get(id);
+      const quantity = Math.min(projection ? projection.neededAt(duration) : (perHour || 0) * duration, available ?? Infinity);
+      used.set(id, (used.get(id) ?? 0) + quantity);
+      if (available != null) remaining.set(id, Math.max(0, available - quantity));
+      if (projection?.hitpointsAt) hitpoints = projection.hitpointsAt(duration, available);
+    }
+    if (health) hitpoints = health.remaining(duration);
+    if (duration === left) break;
+    const exhausted = bounds.filter(row => row.hours <= duration + 1e-10).map(row => row.supply);
+    const required = exhausted.find(supply => !supply.optional);
+    if (required) {
+      limit = required.id;
+      break;
+    }
+    for (const supply of exhausted) expired.set(supply.id, activeHours);
+    const next = options.nextStage?.({ expired, remaining, hitpoints, kills: Math.floor(killProgress) });
+    if (options.nextStage && !next) {
+      limit = exhausted[0]?.id;
+      break;
+    }
+    stage = next ?? stage;
   }
-  const kills = Math.floor(options.killsPerHour * activeHours);
+  const kills = Math.floor(killProgress);
   const direct = target.gold * kills;
   const drops = target.drops.map(({ id, perKill }) => {
     const quantity = options.collect ? perKill * kills : 0;
-    const price = items[id].price;
+    const price = items[id]?.price ?? 0;
     const sold = options.collect && options.sell && !options.keep.has(id);
     return { id, quantity, price, sold, value: sold ? quantity * price : 0 };
   });
-  const costs = options.supplies.map(({ id, perHour, projection, available }) => {
-    const quantity = projection ? Math.min(projection.neededAt(activeHours), available ?? Infinity) : perHour * activeHours;
-    return { id, quantity, value: quantity * items[id].price };
-  });
+  const costs = [...used].map(([id, quantity]) => ({ id, quantity, value: quantity * (items[id]?.price ?? 0) }));
   const payout = direct + drops.reduce((sum, row) => sum + row.value, 0);
   const net = payout - costs.reduce((sum, row) => sum + row.value, 0);
-  return { plannedHours, activeHours, limit, kills, killsPerHour: options.killsPerHour,
+  return { plannedHours, activeHours, limit, kills, killsPerHour: options.killsPerHour, phases, expired: [...expired], unknown,
     direct, drops, costs, payout, net, netPerHour: net / options.hours };
 }
 
@@ -37,8 +92,13 @@ let combatView;
 function combatSetup(character) {
   const { equipment, toolbelt, spell, imbuement, activeImbuement, stances, food, prayers } = character?.combat ?? {};
   if (!equipment || !toolbelt) return null;
+  const levels = ['Attack', 'Strength', 'Defence', 'Hitpoints', 'Ranged', 'Magic', 'Prayer', 'Slayer']
+    .map(id => character.levels?.[id] ?? 1);
   return JSON.stringify([equipment.map(row => [row.slot, row.id]), toolbelt.map(row => [row.slot, row.id]),
-    spell, imbuement, activeImbuement, stances, food, prayers]);
+    spell, imbuement, activeImbuement, stances, food, prayers, levels,
+    Object.entries(character.purchases ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    Object.entries(character.ranks ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    [...(character.astrologyNodes ?? [])].sort(), [...(character.unlockedPets ?? [])].sort()]);
 }
 
 function measuredCombatRate(before, after) {
@@ -97,59 +157,139 @@ function updateCombatSample(entry, snapshot) {
   return { snapshot, checkedAt: snapshot.date, rates: [result, ...others].slice(0, 12) };
 }
 
-function estimateCombatExperience(character, attributes, target, estimate, model, modifierFor) {
-  const totals = {};
+function combatExperiencePlan(character, attributes, target, estimate, model, modifierFor) {
   const health = Math.max(0, (target.levels?.Hitpoints ?? 0) * 10);
   const stat = id => Math.max(0, target.stats?.Stats?.find(row => row.Stat === 'MelvorBase:' + id)?.Value ?? 0);
   const bonusDamage = 4 * stat('Armour') + 50 * stat('MaximumWard');
-  const stance = model.stances[attributes?.stanceId];
-  const adjusted = (skill, base, awards = 1) => {
-    const mods = modifierFor(skill);
-    return Math.max(0, (base + mods('FlatXPGained') * awards) * (1 + mods('PercentXPGained')));
+  const tasks = (character?.slayerTasks ?? []).filter(task => task.monster === target.id && task.remaining > 0);
+  const phases = estimate.phases ?? [{ hours: estimate.activeHours, killsPerHour: estimate.killsPerHour, progress: 0 }];
+  const rewards = phases.map(phase => {
+    const actor = phase.character ?? character;
+    const stats = phase.attributes ?? attributes;
+    const stance = model.stances[stats?.stanceId];
+    const perKill = {};
+    const perFight = {};
+    const adjusted = (skill, base, awards = 1) => {
+      const mods = modifierFor(skill, actor, stats);
+      return Math.max(0, (base + mods('FlatXPGained') * awards) * (1 + mods('PercentXPGained')));
+    };
+    for (const [skill, coefficient] of Object.entries(stance?.xpPerDamage ?? {})) {
+      perFight[skill] = adjusted(skill, coefficient * health, health);
+      perKill[skill] = adjusted(skill, coefficient * bonusDamage);
+    }
+    if (stats?.prayerXpPerKill > 0) {
+      perFight.Prayer = adjusted('Prayer', stats.prayerXpPerKill, stats.hitsPerKill);
+    }
+    const slayerPerKill = adjusted('Slayer', health / 8 + 4);
+    const rate = phase.killsPerHour;
+    const cycle = rate > 0 ? 3600000 / rate : Infinity;
+    const interval = stats?.interval ?? Infinity;
+    const wait = Math.min(stats?.respawn ?? 0, Math.max(0, cycle - interval));
+    const expectedTurns = Math.max(1, Math.ceil((cycle - wait) / interval));
+    const fightInterval = (cycle - wait) / expectedTurns;
+    const completeBefore = Math.floor(phase.progress);
+    function damageProgress(cycles) {
+      const kills = Math.floor(cycles);
+      const elapsed = (cycles - kills) * cycle;
+      const partial = Number.isFinite(fightInterval) && fightInterval > 0
+        ? Math.floor(Math.max(0, elapsed - wait) / fightInterval) / expectedTurns : 0;
+      return kills + partial;
+    }
+    const damageBefore = damageProgress(phase.progress);
+    return {
+      milliseconds: phase.hours * 3600000,
+      cycle,
+      slayerEnd: Math.max(0, ...tasks.map(task => task.remaining - phase.progress)) * cycle,
+      xpPerCycle: skill => skill === 'Slayer' ? slayerPerKill : (perFight[skill] ?? 0) + (perKill[skill] ?? 0),
+      hasXp: skill => skill === 'Slayer' ? tasks.length > 0 && slayerPerKill > 0 :
+        (perFight[skill] ?? 0) + (perKill[skill] ?? 0) > 0,
+      xpAt(skill, milliseconds) {
+        const cycles = phase.progress + milliseconds * rate / 3600000;
+        const kills = Math.floor(cycles);
+        if (skill === 'Slayer') {
+          return tasks.reduce((sum, task) => sum + Math.min(kills, task.remaining) -
+            Math.min(completeBefore, task.remaining), 0) * slayerPerKill;
+        }
+        return (damageProgress(cycles) - damageBefore) * (perFight[skill] ?? 0) +
+          (kills - completeBefore) * (perKill[skill] ?? 0);
+      }
+    };
+  });
+  function xpAt(skill, milliseconds) {
+    let xp = 0;
+    for (const phase of rewards) {
+      if (milliseconds <= 0) break;
+      xp += phase.xpAt(skill, Math.min(phase.milliseconds, milliseconds));
+      milliseconds -= phase.milliseconds;
+    }
+    return xp;
+  }
+  const end = estimate.activeHours * 3600000;
+  function firstReach(totalAt, remaining, end) {
+    if (!(end >= 0) || !Number.isFinite(end) || !(totalAt(end) >= remaining)) return null;
+    let low = 0;
+    let high = Math.floor(end);
+    if (totalAt(high) < remaining) return end;
+    while (low < high) {
+      const middle = Math.floor((high + low) / 2);
+      if (totalAt(middle) >= remaining) high = middle;
+      else low = middle + 1;
+    }
+    return high;
+  }
+  function timeForGoal(skill, remaining) {
+    if (remaining <= 0) return 0;
+    const reached = firstReach(time => xpAt(skill, time), remaining, end);
+    return reached == null ? null : reached / 3600000;
+  }
+  return {
+    tasks,
+    total: skill => xpAt(skill, end),
+    hasXp: skill => rewards.some(phase => phase.hasXp(skill)),
+    timeForGoal,
+    projectedTimeForGoal(skill, remaining) {
+      const exact = timeForGoal(skill, remaining);
+      if (exact != null) return exact;
+      // Extend the latest XP-producing phase while assuming its supplies can be replenished.
+      const index = rewards.findLastIndex(phase => Number.isFinite(phase.cycle) && phase.hasXp(skill));
+      if (index < 0) return null;
+      const phase = rewards[index];
+      const before = rewards.slice(0, index).reduce((elapsed, entry) => elapsed + entry.milliseconds, 0);
+      const needed = remaining - xpAt(skill, before);
+      const end = skill === 'Slayer' ? phase.slayerEnd + 1 : (needed / phase.xpPerCycle(skill) + 2) * phase.cycle;
+      const reached = firstReach(time => phase.xpAt(skill, time), needed, end);
+      return reached == null ? null : (before + reached) / 3600000;
+    }
   };
-  for (const [skill, coefficient] of Object.entries(stance?.xpPerDamage ?? {})) {
-    totals[skill] = adjusted(skill, coefficient * (health + bonusDamage), health + 1) * estimate.kills;
-  }
-  if (attributes?.prayerXpPerKill > 0) {
-    totals.Prayer = adjusted('Prayer', attributes.prayerXpPerKill, attributes.hitsPerKill) * estimate.kills;
-  }
-  const taskKills = (character?.slayerTasks ?? []).filter(task => task.monster === target.id).reduce((sum, task) =>
-    sum + Math.min(estimate.kills, task.remaining), 0);
-  totals.Slayer = taskKills * adjusted('Slayer', health / 8 + 4);
-  return totals;
 }
 
-function combatKillsForGoal(remaining, kills, xpAt) {
-  if (!(kills > 0) || xpAt(kills) < remaining) return null;
-  let low = 1;
-  let high = kills;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (xpAt(middle) >= remaining) high = middle;
-    else low = middle + 1;
-  }
-  return low;
+function combatXpModifiers(model, catalogue) {
+  const bonuses = new Map();
+  return (skill, actor, stats) => {
+    if (!bonuses.has(actor)) {
+      const gear = [...(actor?.combat?.equipment ?? []), ...(actor?.combat?.toolbelt ?? [])].map(row => row.id);
+      const extras = gear.flatMap(id => model.items[id]?.xpModifiers ?? []);
+      extras.push(...(model.stances[stats?.stanceId]?.xpModifiers ?? []));
+      for (const prayer of actor?.combat?.prayers ?? []) {
+        if (prayer.state === 1) extras.push(...(model.prayers[prayer.active]?.xpModifiers ?? []));
+      }
+      for (const set of model.sets) {
+        const count = set.items.filter(id => gear.includes(id)).length;
+        for (const bonus of set.bonuses) if (count >= bonus.count) extras.push(...(bonus.xpModifiers ?? []));
+      }
+      bonuses.set(actor, extras);
+    }
+    return actionModifiers({ skill }, actor ?? {}, catalogue, bonuses.get(actor));
+  };
 }
 
 function renderCombatExperience(character, attributes, target, estimate) {
   const { model } = combatView;
-  const gear = [...(character?.combat?.equipment ?? []), ...(character?.combat?.toolbelt ?? [])].map(row => row.id);
-  const extras = gear.flatMap(id => model.items[id]?.xpModifiers ?? []);
-  extras.push(...(model.stances[attributes?.stanceId]?.xpModifiers ?? []));
-  for (const prayer of character?.combat?.prayers ?? []) {
-    if (prayer.state === 1) extras.push(...(model.prayers[prayer.active]?.xpModifiers ?? []));
-  }
-  for (const set of model.sets) {
-    const count = set.items.filter(id => gear.includes(id)).length;
-    for (const bonus of set.bonuses) if (count >= bonus.count) extras.push(...(bonus.xpModifiers ?? []));
-  }
-  const modifierFor = skill => actionModifiers({ skill }, character ?? {}, catalog, extras);
-  const totals = estimate ? estimateCombatExperience(character, attributes, target, estimate, model, modifierFor) : {};
-  const tasks = (character?.slayerTasks ?? []).filter(task => task.monster === target.id && task.remaining > 0);
-  const firstKill = estimate ? estimateCombatExperience(character, attributes, target, { kills: 1 }, model, modifierFor) : {};
+  const plan = estimate ? combatExperiencePlan(character, attributes, target, estimate, model, combatXpModifiers(model, catalog)) : null;
+  const tasks = plan?.tasks ?? [];
   const hours = byId('combatHours').valueAsNumber;
   byId('combatXpStatus').textContent = t(!attributes ? '读取角色存档后可按战斗配装估算经验。' :
-    estimate ? '按当前姿态、启用的祝祭及剩余屠杀任务计算。' : '有可用的击杀速度后会显示经验和预计时间。');
+    estimate ? '按当前姿态、祝祭和屠杀任务估算。命中经验计入未打完的一场。' : '有可用的击杀速度后会显示经验和预计时间。');
   const body = byId('combatXpRows');
   COMBAT_XP_SKILLS.forEach((skill, index) => {
     let card = body.children[index];
@@ -167,13 +307,20 @@ function renderCombatExperience(character, attributes, target, estimate) {
       slider.min = '1';
       slider.max = XP_LEVEL_CAP;
       slider.step = '1';
-      const field = create('label', undefined, 'xp-level-slider combat-goal-slider');
-      field.append(create('span'), slider);
+      const field = create('div', undefined, 'xp-level-slider combat-goal-slider');
+      const heading = create('div', undefined, 'combat-goal-heading');
+      const controls = create('div', undefined, 'combat-goal-stepper');
+      const decrease = create('button', undefined, 'combat-goal-decrease');
+      const increase = create('button', undefined, 'combat-goal-increase');
+      decrease.type = increase.type = 'button';
+      controls.append(decrease, increase);
+      heading.append(create('span'), controls);
+      field.append(heading, slider);
       card.append(create('h3'), metrics, field, create('div', undefined, 'combat-goal-progress'),
         create('p', undefined, 'combat-xp-note muted'));
       body.append(card);
     }
-    const xp = totals[skill] ?? (estimate && attributes ? 0 : null);
+    const xp = plan && (attributes || skill === 'Slayer') ? plan.total(skill) : null;
     const rate = xp == null ? null : xp / hours;
     const activeRate = xp == null || !estimate?.activeHours ? null : xp / estimate.activeHours;
     const taskLimited = skill === 'Slayer' && xp > 0 && tasks.every(task => task.remaining <= estimate?.kills);
@@ -197,29 +344,37 @@ function renderCombatExperience(character, attributes, target, estimate) {
     }
     note.textContent = explanation;
     note.hidden = !explanation;
-    const [caption, slider] = field.children;
-    slider.setAttribute('aria-label', t('{skill}目标等级', { skill: skillName(skill, catalog.xpSkills) }));
+    const [heading, slider] = field.children;
+    const [caption, controls] = heading.children;
+    const [decrease, increase] = controls.children;
+    const skillLabel = { skill: label.textContent };
+    slider.setAttribute('aria-label', t('{skill}目标等级', skillLabel));
+    decrease.title = t('{skill}目标等级降低 1 级', skillLabel);
+    increase.title = t('{skill}目标等级提高 1 级', skillLabel);
+    decrease.setAttribute('aria-label', decrease.title);
+    increase.setAttribute('aria-label', increase.title);
     function updateGoal() {
       const goal = selectedExperienceGoal(character, skill);
-      if (slider.valueAsNumber !== goal.level) slider.value = goal.level;
+      renderXpGoalSlider(slider, goal.level);
+      decrease.disabled = goal.level <= Number(slider.min);
+      increase.disabled = goal.level >= Number(slider.max);
       caption.textContent = t('目标等级 {level}', { level: goal.level });
-      const perKill = firstKill[skill] ?? 0;
-      const xpAt = skill === 'Slayer'
-        ? kills => tasks.reduce((sum, task) => sum + Math.min(kills, task.remaining), 0) * (perKill / tasks.length)
-        : kills => kills * perKill;
       const timeForGoal = remaining => {
-        if (!(perKill > 0) || !estimate) return null;
-        const kills = combatKillsForGoal(remaining, estimate.kills, xpAt);
-        return kills == null ? null : kills / estimate.killsPerHour;
+        const actual = plan?.timeForGoal(skill, remaining);
+        return { hours: actual ?? plan?.projectedTimeForGoal(skill, remaining), extended: actual == null };
       };
-      const blocked = !(perKill > 0) ? null : taskLimited ? '当前任务结束前无法升级' :
+      const blocked = !plan?.hasXp(skill) ? null : taskLimited ? '当前任务结束前无法升级' :
         estimate?.limit ? '本次补给或材料不足以升级' : '本次挂机内无法达到目标';
-      progress.replaceChildren(renderXpProgress(character, skill, goal, timeForGoal, blocked));
+      progress.replaceChildren(renderXpProgress(character, skill, goal, timeForGoal, blocked, hours));
     }
-    slider.oninput = () => {
-      setExperienceGoal(character, skill, slider.valueAsNumber);
+    function setGoal(level) {
+      setExperienceGoal(character, skill, level);
       updateGoal();
-    };
+      if (byId('combatTrainingSkill').value === skill) updateCombatTraining();
+    }
+    slider.oninput = () => setGoal(slider.valueAsNumber);
+    decrease.onclick = () => setGoal(slider.valueAsNumber - 1);
+    increase.onclick = () => setGoal(slider.valueAsNumber + 1);
     updateGoal();
   });
 }
@@ -233,6 +388,7 @@ function initCombat(catalog) {
   combatView = { targets, items: { ...currencies, ...catalog.items }, slots: catalog.combatSlots, spells: catalog.combatSpells,
     model, supplyRules: { ...catalog.combatSupplies, ...currencyRules }, suppressed: new Set(),
     kept: new Set(), supplies: [], samples: new Map(), character: null };
+  initCombatTraining();
   const target = byId('combatTarget');
   target.replaceChildren(...targets.map(enemy => new Option('', enemy.id)));
   byId('combatOptions').hidden = !targets.length;
@@ -276,7 +432,8 @@ function updateCombat(character) {
   if (!combatView) return;
   if (character?.characterId && character.date && character.combat?.totals) {
     const entry = combatView.samples.get(character.characterId);
-    const snapshot = { date: character.date, combat: character.combat };
+    const { date, combat, levels, purchases, astrologyNodes, unlockedPets, ranks } = character;
+    const snapshot = { date, combat, levels, purchases, astrologyNodes, unlockedPets, ranks };
     combatView.samples.set(character.characterId, updateCombatSample(entry, snapshot));
   }
   combatView.character = character;
@@ -299,7 +456,7 @@ function renderCombatLoadout(attributes) {
   for (const [title, id] of [['所选法术', state?.spell], ['所选附魔', state?.imbuement], ['已激活附魔', state?.activeImbuement]]) {
     if (!id) continue;
     const spell = spells?.[id];
-    const runes = (spell?.runes ?? []).map(({ id, quantity }) => t('{item} × {quantity}（仓库 {stock}）', {
+    const runes = (attributes?.spellSupplies[id]?.runes ?? spell?.runes ?? []).map(({ id, quantity }) => t('{item} × {quantity}（仓库 {stock}）', {
       item: gameName(items[id]) ?? id, quantity: fullNumber(quantity), stock: fullNumber(character.stock[id] ?? 0)
     }));
     rows.push([t(title), gameName(spell) ?? id, ...runes].join(' · '));
@@ -452,10 +609,8 @@ function equippedSupplyIds() {
     const rule = supplyRules[row.id];
     return rule?.kind === 'charged' || (rule?.kind === 'ammo' && rule.ammoType === weapon?.RequiredAmmoType);
   }).map(row => row.id), ...(state.toolbelt ?? []).map(row => row.id)];
-  if (magic) {
-    for (const id of [state.spell, state.imbuement ?? state.activeImbuement]) {
-      desired.push(...(spells[id]?.runes ?? []).map(row => row.id));
-    }
+  for (const id of [magic ? state.spell : null, state.imbuement]) {
+    desired.push(...(spells[id]?.runes ?? []).map(row => row.id));
   }
   for (const prayer of state.prayers ?? []) {
     if (prayer.state === 1) desired.push(baseCombatId(model.prayers[prayer.active]?.cost?.Currency));
@@ -529,37 +684,78 @@ function renderCombatSupplyChoices() {
   if (!ids.length) byId('combatPickerResults').append(create('p', t('没有匹配的战斗补给。'), 'muted'));
 }
 
-function combatSupplies(context, observed) {
-  const { supplies, character, supplyRules } = combatView;
+function combatSupplies(context, observed, expired = null) {
+  const { supplies, supplyRules } = combatView;
+  const { character } = context;
   const entries = [];
   let unknown = false;
   const actual = equippedSupplyIds();
   for (const { item, use, stock, rate } of supplies) {
     const id = item.value;
-    if (!Object.hasOwn(supplyRules, id)) continue;
+    if (!Object.hasOwn(supplyRules, id) || expired?.has(id)) continue;
     const rule = supplyRules[id];
     const equipped = [...(character?.combat?.equipment ?? []), ...(character?.combat?.toolbelt ?? [])]
       .filter(row => row.id === id).reduce((total, row) => total + Math.max(0, row.quantity), 0);
     const counts = rule.kind === 'prayer' ? character?.currencies : character?.stock;
-    const knownStock = character?.date || Object.hasOwn(counts ?? {}, id) ? (counts?.[id] ?? 0) + equipped : null;
-    stock.placeholder = knownStock ?? '';
+    const knownStock = actual.has(id) && ['ammo', 'charged'].includes(rule.kind) ? equipped :
+      character?.date || Object.hasOwn(counts ?? {}, id) ? (counts?.[id] ?? 0) + equipped : null;
+    if (!expired) stock.placeholder = knownStock ?? '';
     const foodPlan = rule.kind === 'food' ? combatFoodProjection(rule, id, context) : null;
     const measured = actual.has(id) && !use.value
       ? (observed?.foodUsage?.id === id ? observed.foodUsage.perHour * (1 - (foodPlan?.preserve ?? 0)) :
         ['ammo', 'rune'].includes(rule.kind) ? observed?.usage?.[id] : null)
       : null;
-    const projection = !use.value && measured == null ? foodPlan : null;
-    const automatic = measured ?? (foodPlan ? foodPlan.neededAt(1) : combatSupplyRate(rule, id, context));
-    use.placeholder = automatic == null ? '' : String(Math.round(automatic * 100) / 100);
-    rate.textContent = use.value ? t('手动覆盖') : automatic == null ? t('待补充消耗量') :
-      measured != null ? t('存档实测 {value}／小时', { value: decimals.format(automatic) }) :
-        t('自动估算 {value}／小时', { value: decimals.format(automatic) });
+    const estimate = foodPlan ?? combatSupplyEstimate(rule, id, context);
+    const plan = typeof estimate === 'object' ? estimate : null;
+    const projection = !use.value && measured == null ? plan : null;
+    const automatic = measured ?? (plan ? plan.neededAt(1) : estimate);
+    if (!expired) {
+      use.placeholder = automatic == null ? '' : String(Math.round(automatic * 100) / 100);
+      rate.textContent = use.value ? t('手动覆盖') : automatic == null ? t('待补充消耗量') :
+        measured != null ? t('存档实测 {value}／小时', { value: decimals.format(automatic) }) :
+          t('自动估算 {value}／小时', { value: decimals.format(automatic) });
+    }
     if (!use.checkValidity() || !stock.checkValidity()) return null;
     const perHour = use.value ? use.valueAsNumber : automatic;
     if (perHour == null) unknown = true;
-    if (perHour > 0 || projection) entries.push({ id, perHour, projection, available: stock.value ? stock.valueAsNumber : knownStock });
+    if (perHour > 0 || projection) entries.push({ id, perHour, projection, food: rule.kind === 'food', optional: ['charged', 'prayer'].includes(rule.kind),
+      available: stock.value ? stock.valueAsNumber : knownStock });
   }
   return { entries, unknown };
+}
+
+function combatStageCharacter(context, { expired, remaining, hitpoints, kills }, rules) {
+  const { character, target, model } = context;
+  const stock = { ...character.stock };
+  const currencies = { ...character.currencies };
+  for (const [id, quantity] of remaining) {
+    if (quantity == null) continue;
+    const kind = rules[id]?.kind;
+    if (kind === 'prayer') currencies[id] = quantity;
+    else if (kind === 'food' || kind === 'rune') stock[id] = quantity;
+  }
+  const keep = row => !expired.has(row.id);
+  const combat = { ...character.combat, hitpoints,
+    equipment: character.combat.equipment.filter(keep), toolbelt: character.combat.toolbelt?.filter(keep),
+    prayers: character.combat.prayers?.map(prayer => {
+      const currency = baseCombatId(model.prayers[prayer.active]?.cost?.Currency);
+      return expired.has(currency) ? { ...prayer, state: 0 } : prayer;
+    }) };
+  return { ...character, stock, currencies, combat, slayerTasks: character.slayerTasks?.map(task =>
+    task.monster === target.id ? { ...task, remaining: Math.max(0, task.remaining - kills) } : task) };
+}
+
+function combatAfterSupplies(context, manual, state) {
+  const { character, attributes, target, area, spells, model } = context;
+  if (!character?.combat) return manual ? { ...context, supplies: [] } : null;
+  const stageCharacter = combatStageCharacter(context, state, combatView.supplyRules);
+  const stageAttributes = combatAttributes(model, stageCharacter, target, area, spells, combatView.supplyRules);
+  const calibration = attributes?.perHour > 0 ? context.killsPerHour / attributes.perHour : 1;
+  const killsPerHour = manual ? context.killsPerHour : stageAttributes?.perHour * calibration;
+  if (!Number.isFinite(killsPerHour)) return null;
+  const stage = { ...context, character: stageCharacter, attributes: stageAttributes, killsPerHour };
+  const supplies = combatSupplies(stage, null, expired);
+  return supplies && { ...stage, supplies: supplies.entries, unknown: supplies.unknown };
 }
 
 function renderCombat() {
@@ -575,6 +771,13 @@ function renderCombat() {
   byId('combatArea').textContent = (target?.areas.length ?? 0) === 1 ? gameName(area) : '';
   const attributes = combatView.model && combatAttributes(combatView.model, character, target, area,
     combatView.spells, combatView.supplyRules);
+  const availableAt = location => !character?.characterId || trainingRequirementsMet(
+    [...(target?.requirements ?? []), ...(location?.requirements ?? [])], character, attributes?.style, catalog);
+  const encounterAvailable = availableAt(area);
+  for (const option of areaChoice.options) {
+    const location = target.areas.find(row => row.id === option.value);
+    if (!availableAt(location)) option.text += ' · ' + t('未满足解锁条件');
+  }
   renderCombatLoadout(attributes);
   renderCombatAttributes(attributes);
   byId('combatSuppliesTable').hidden = !combatView.supplies.length;
@@ -594,23 +797,31 @@ function renderCombat() {
     rate.id === target?.id && rate.area === area.id && rate.setup === setup);
   const canFight = attributes?.ammoReady !== false && attributes?.usable !== false;
   const observed = !manual && canFight ? sample : null;
-  byId('combatRateStatus').textContent = manual ? t('手填击杀速度时，请计入怪物重生等待。') :
+  byId('combatRateStatus').textContent = !encounterAvailable ? '' : manual ? t('手填击杀速度时，请计入怪物重生等待。') :
     observed ? t('存档实测 {rate} 击杀／小时 · {kills} 次击杀 · {time}', {
       rate: decimals.format(observed.perHour), kills: fullNumber(observed.kills),
       time: t('{value} 秒', { value: decimals.format(observed.milliseconds / 1000) })
     }) : attributes?.perHour != null ? t('按配装估算 {rate} 击杀／小时，暂无该目标的存档实测。', {
       rate: decimals.format(attributes.perHour)
     }) : t('请先读取角色存档，只打选中的怪物一段时间，等游戏再次保存后点击「重新读取存档」。');
-  const killsPerHour = manual ? manualRate.valueAsNumber : observed?.perHour ?? attributes?.perHour;
-  const supplies = combatSupplies({ attributes, character, killsPerHour, target, area,
-    spells: combatView.spells, model: combatView.model }, observed);
+  const killsPerHour = !encounterAvailable ? null : manual ? manualRate.valueAsNumber : observed?.perHour ?? attributes?.perHour;
+  const context = { attributes, character, killsPerHour, target, area, spells: combatView.spells, model: combatView.model };
+  const supplies = combatSupplies(context, observed);
   result.hidden = !target;
   byId('combatXp').hidden = !target;
+  byId('xpCombatUnavailable').hidden = Boolean(target);
+  const sessionHours = byId('combatHours').valueAsNumber;
+  byId('xpCombatContext').textContent = !target ? '' : Number.isFinite(sessionHours) && sessionHours > 0
+    ? t('战斗目标 {target} · 挂机时长 {time}', { target: gameName(target), time: formatDuration(sessionHours, true) })
+    : t('战斗目标 {target}', { target: gameName(target) });
+  updateCombatTraining();
   if (result.hidden) return;
-  const valid = !!supplies && Number.isFinite(killsPerHour) && byId('combatOptions').checkValidity();
+  const valid = encounterAvailable && !!supplies && Number.isFinite(killsPerHour) && byId('combatOptions').checkValidity();
   metrics.hidden = detail.hidden = !valid;
   if (!valid) {
-    status.textContent = t(supplies === null ? '请检查补给的消耗量和库存。' :
+    metrics.replaceChildren();
+    status.textContent = t(!encounterAvailable ? '当前角色尚未解锁该战斗地点或目标。' :
+      supplies === null ? '请检查补给的消耗量和库存。' :
       !manual && !Number.isFinite(killsPerHour) ? '暂无可用击杀速度。请检查存档配装、弹药和符文，或切换到手动输入。' :
         '请检查战斗目标、击杀速度和时长。');
     renderCombatExperience(character, attributes, target, null);
@@ -618,13 +829,15 @@ function renderCombat() {
   }
   const locked = new Set(character?.keep ?? []);
   const estimate = estimateCombat(target, items, {
-    hours: byId('combatHours').valueAsNumber,
+    ...context,
+    hours: sessionHours,
     cap: byId('combatCap').valueAsNumber,
     killsPerHour,
     collect,
     sell: sellInput.checked,
     keep: new Set([...kept, ...locked]),
-    supplies: supplies.entries
+    supplies: supplies.entries,
+    nextStage: state => combatAfterSupplies(context, manual, state)
   });
   renderCombatExperience(character, attributes, target, estimate);
   metrics.replaceChildren(...[
@@ -637,11 +850,18 @@ function renderCombat() {
   }));
   status.textContent = [
     t('预计战斗时长 {time}', { time: formatDuration(estimate.activeHours) }),
-    estimate.limit && t('约 {time}后用完{item}', { time: formatDuration(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
+    estimate.limit === 'Hitpoints' ? t('生命值不足以继续战斗') :
+      estimate.limit && t('约 {time}后用完{item}', { time: formatDuration(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
+    ...estimate.expired.map(([id, hours]) => t('{item}在 {time} 后耗尽，之后按剩余配装计算', {
+      item: combatSupplyName(id), time: formatDuration(hours)
+    })),
     supplies.entries.some(row => row.available == null) && t('部分补给缺少库存信息'),
-    supplies.unknown && t('净收益尚未扣除消耗量未知的补给')
+    (supplies.unknown || estimate.unknown) && t('净收益尚未扣除消耗量未知的补给'),
+    (attributes?.enemy?.maxHit >= attributes?.maxHp ||
+      estimate.phases.some(({ attributes: stats }) => stats?.enemy?.maxHit >= stats?.maxHp)) &&
+      t('敌人普通攻击可能造成满血秒杀，收益未计入死亡中断。')
   ].filter(Boolean).join(' · ');
-  byId('combatGold').textContent = t('直接 GP {value}', { value: decimals.format(estimate.direct) });
+  byId('combatGold').textContent = t('直接 GP {value}', { value: fullNumber(estimate.direct) });
   byId('combatDropsTable').hidden = !estimate.drops.length;
   byId('combatDrops').replaceChildren(...estimate.drops.map(drop => {
     const row = create('tr');
@@ -663,12 +883,12 @@ function renderCombat() {
     cell.append(sale);
     if (locked.has(drop.id)) cell.append(create('small', t('仓库已锁定')));
     row.append(create('td', itemName), create('td', decimals.format(drop.quantity), 'number'),
-      create('td', decimals.format(drop.price), 'number'), cell, create('td', decimals.format(drop.value), 'number'));
+      create('td', fullNumber(drop.price), 'number'), cell, create('td', fullNumber(drop.value), 'number'));
     return row;
   }));
   byId('combatCosts').replaceChildren(...estimate.costs.map(cost => create('li', t('消耗 · {item} × {quantity} · {value}', {
     item: combatSupplyName(cost.id), quantity: decimals.format(cost.quantity),
-    value: combatView.supplyRules[cost.id]?.kind === 'prayer' && !cost.value ? t('不折算为 GP') : '−' + decimals.format(cost.value) + ' GP'
+    value: combatView.supplyRules[cost.id]?.kind === 'prayer' && !cost.value ? t('不折算为 GP') : '−' + fullNumber(cost.value) + ' GP'
   }))));
 }
 
@@ -676,4 +896,4 @@ function rowReplacementFocus(id) {
   [...byId('combatDrops').querySelectorAll('input')].find(input => input.dataset.combatLoot === id)?.focus();
 }
 
-if (typeof module !== 'undefined') module.exports = { estimateCombat, measuredCombatRate, estimateCombatExperience, updateCombatSample };
+if (typeof module !== 'undefined') module.exports = { estimateCombat, measuredCombatRate, combatExperiencePlan, updateCombatSample };

@@ -22,6 +22,20 @@ function compareUpgradePlans(a, b) {
 }
 
 let xpView;
+let experienceSection = 'skills';
+
+function showExperienceSection(isExperiencePage) {
+  const showCombat = experienceSection === 'combat';
+  byId('xpSkillsButton').setAttribute('aria-pressed', String(!showCombat));
+  byId('xpCombatButton').setAttribute('aria-pressed', String(showCombat));
+  byId('xpSkillsSection').hidden = showCombat;
+  const combatSection = byId('xpCombatSection');
+  combatSection.hidden = !showCombat;
+  const panel = byId('combatXp');
+  // Share one panel so both pages show the same estimate and editable targets.
+  const destination = isExperiencePage && showCombat ? combatSection : byId('combatPage');
+  if (panel.parentElement !== destination) destination.append(panel);
+}
 
 function initExperience(catalog) {
   const saved = preferences.fields?.xpSkill;
@@ -32,11 +46,7 @@ function initExperience(catalog) {
   byId('xpHours').addEventListener('input', renderExperience);
   byId('xpMode').addEventListener('change', renderExperience);
   for (const button of document.querySelectorAll('[data-xp-hours]')) {
-    button.addEventListener('click', () => {
-      byId('xpHours').value = button.dataset.xpHours;
-      renderExperience();
-      queuePreferences();
-    });
+    button.addEventListener('click', () => applyIdleDuration(byId('xpHours'), Number(button.dataset.xpHours)));
   }
   byId('xpBonus').addEventListener('input', () => {
     const input = byId('xpBonus');
@@ -50,12 +60,13 @@ function initExperience(catalog) {
   goal.addEventListener('input', () => {
     if (!goal.value || !goal.checkValidity()) return;
     setExperienceGoal(xpView.character, xpView.skill, goal.valueAsNumber);
-    slider.value = goal.value;
+    renderXpGoalSlider(slider, goal.valueAsNumber);
     renderExperience();
   });
   slider.addEventListener('input', () => {
     setExperienceGoal(xpView.character, xpView.skill, slider.valueAsNumber);
     goal.value = slider.value;
+    renderXpGoalSlider(slider, slider.valueAsNumber);
     renderExperience();
   });
   goal.addEventListener('blur', () => { goal.value = selectedExperienceGoal().level; });
@@ -159,11 +170,12 @@ function syncExperienceInputs(preserveDraft = false) {
   localizeExperience();
   if (!preserveDraft || document.activeElement !== byId('xpBonus')) byId('xpBonus').value = experienceBonuses()[xpView.skill] ?? 0;
   if (!preserveDraft || document.activeElement !== byId('xpGoalLevel')) byId('xpGoalLevel').value = selectedExperienceGoal().level;
-  byId('xpGoalSlider').value = selectedExperienceGoal().level;
+  renderXpGoalSlider(byId('xpGoalSlider'), selectedExperienceGoal().level);
 }
 
 function renderExperienceGoal(goal, row, unavailable, plannedHours) {
   const container = byId('xpGoalOverview');
+  const { items } = xpView.catalog;
   if (!goal) {
     container.textContent = t('暂无等级进度');
     return;
@@ -171,14 +183,14 @@ function renderExperienceGoal(goal, row, unavailable, plannedHours) {
   const plan = row?.targetPlan ?? row?.planXp(goal.remaining);
   const blocked = plan && !plan.reaches;
   const timing = goal.remaining === 0 ? t('已达到目标') :
-    blocked ? t('当前库存不足') : formatXpDuration(plan?.hours);
+    blocked ? t(plan.reason ?? '当前库存不足') : formatXpDuration(plan?.hours);
   const metrics = create('dl', undefined, 'xp-goal-metrics');
   const labels = [
     ['等级', t('{current} → {target}', { current: goal.level, target: goal.target })],
     ['剩余 XP', fullNumber(Math.ceil(goal.remaining))],
     ['预计剩余时间', timing]
   ];
-  if (blocked) labels.push(['库存可获 XP', fullNumber(plan.xp)]);
+  if (blocked) labels.push([plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 XP' : '库存可获 XP', fullNumber(plan.xp)]);
   for (const [label, value] of labels) {
     const field = create('div');
     field.append(create('dt', t(label)), create('dd', value));
@@ -194,6 +206,9 @@ function renderExperienceGoal(goal, row, unavailable, plannedHours) {
     blocked && row.stockLimit && t('{time}后缺{item}', {
       time: formatDuration(plan.hours, true), item: limitName({ limit: row.stockLimit })
     }),
+    blocked && plan.limit && t('缺少 {item}', { item: gameName(items[plan.limit]) ?? shopCurrencyName(plan.limit) }),
+    row?.action.kind === 'Farming' && t('目标时间按手动种植和及时收获估算。'),
+    row?.action.kind === 'GrainMill' && t('目标时间允许先把仓库原料装入磨坊。'),
     plan?.reaches && plan.hours > plannedHours && t('超过本次挂机时长'),
     row?.risky && t('失败可受伤，未计生存时间'),
     !goal.exact && t('按所设等级的起始经验计算')
@@ -241,8 +256,10 @@ function renderExperience() {
     const plan = top?.targetPlan;
     const summary = goalMode ? targets[skill]?.remaining === 0 ? t('已达到目标') :
       plan?.reaches ? t('到目标约 {time}', { time: formatXpDuration(plan.hours) }) :
-        plan ? t('库存可获 {xp} XP', { xp: fullNumber(plan.xp) }) : '' :
-      top ? t('整段 {xp} XP', { xp: fullNumber(top.xp) }) : '';
+        plan ? t(plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 {xp} XP' : '库存可获 {xp} XP',
+          { xp: fullNumber(plan.xp) }) : '' :
+      top ? (top.passive?.needsHarvest && top.xp === 0 ? t('需要手动收获') :
+        t('整段 {xp} XP', { xp: fullNumber(top.xp) })) : '';
     card.append(heading, actionLabel, create('span', summary, 'xp-rate'));
     card.dataset.skill = skill;
     card.addEventListener('click', () => {
@@ -260,19 +277,49 @@ function renderExperience() {
   const goal = targets?.[selected] ?? goalForSkill(selected);
   const choice = selectExperienceAction(rows, goalMode, goal);
   renderExperienceGoal(goal, choice.row, choice.unavailable, goalMode ? Infinity : hours);
+  updateSkillTraining({ ...character, xpBonuses: experienceBonuses() }, {
+    skill: selected, hours, goal, goalMode, actionId: choice.unavailable ? '' : experienceActionChoices()[selected]
+  });
   byId('xpTable').hidden = !rows.length;
   byId('xpEmpty').hidden = !!rows.length;
-  byId('xpEmpty').textContent = t(supportedSkills.has(selected)
-    ? '没有同时满足等级、解锁条件和库存的行动。'
-    : '这项技能暂未支持经验排行。');
+  const noAction = {
+    Farming: '没有可用地块或符合条件的作物。请读取农务存档。',
+    Ranching: '没有正在生产的畜群。请先在游戏内饲养动物。',
+    Hunting: '没有可用的狩猎方案。请检查等级、陷阱库存和存档中的选择。'
+  };
+  byId('xpEmpty').textContent = t(supportedSkills.has(selected) ?
+    noAction[selected] ?? '没有同时满足等级、解锁条件和库存的行动。' : '这项技能暂未支持经验排行。');
   const displayed = rows.slice(0, 20);
   if (choice.row && !displayed.includes(choice.row)) displayed.push(choice.row);
   byId('xpRows').replaceChildren(...displayed.map(row => {
     const item = create('tr');
     item.classList.toggle('xp-estimate-action', row === choice.row);
-    const note = [t('基础经验 {value}', { value: decimals.format(row.action.baseXp) }),
+    const note = row.passive ? [] : [t('基础经验 {value}', { value: decimals.format(row.action.baseXp) }),
       t('识别加成 {value}%', { value: decimals.format(row.knownXpPercent) })];
     const percent = value => decimals.format(value * 100) + '%';
+    if (row.agility) note.push(t('每圈平均 {time} · 已计失败重试和入场消耗', {
+      time: formatXpDuration(row.seconds / 3600)
+    }));
+    if (row.skillCharges?.length) note.push(t('道具预计消耗 {items}，耗尽后按剩余加成计算。', {
+      items: row.skillCharges.map(charge => (gameName(catalog.items[charge.id]) ?? charge.id) +
+        ' × ' + fullNumber(Math.ceil(charge.quantity))).join(' · ')
+    }));
+    if (row.hunting) {
+      note.push(t('平均捕获几率 {value} · 已计调查和追踪', { value: percent(row.hunting.success) }));
+      if (row.hunting.trap) note.push(t('使用陷阱 {item}', { item: gameName(catalog.items[row.hunting.trap]) }));
+      if (row.hunting.bait) note.push(t('使用诱饵 {item}，耗尽后按无诱饵计算', { item: gameName(catalog.items[row.hunting.bait]) }));
+      if (row.hunting.firstExtra) note.push(t('已计首次发现的额外追踪时间'));
+    }
+    if (row.action.kind === 'Farming') {
+      note.push(t('可用地块 {count}', { count: fullNumber(row.passive.plots) }),
+        t(goalMode ? '按手动种植和及时收获估算，最多预测 7 天。' : '假设空地已播种，挂机经验按存档里的自动收获和补种设置结算。'));
+      if (!goalMode && row.passive.needsHarvest) note.push(t('需要手动收获'));
+    }
+    if (row.passive?.mill) note.push(t(goalMode ?
+      '按磨坊和仓库中可用的原料估算，最多预测 7 天。' : '挂机只计算存档里已启动的磨坊配方和已装入的原料。'));
+    if (row.action.kind === 'Ranching') note.push(t('当前饲养 {count} 只 · 按生产周期、年龄、饲料及状态估算接下来 24 小时。', {
+      count: fullNumber(row.passive.animals)
+    }));
     if (row.manualXpPercent) note.push(t('额外 {value}%', { value: decimals.format(row.manualXpPercent) }));
     if (row.cooking) {
       const { proficiency, difficulty, success, preserveOnFail } = row.cooking;
@@ -322,7 +369,7 @@ function renderExperience() {
         t('碎裂进度下限 {value}', { value: percent(row.mining.prospecting) }),
         t('产出翻倍 {value}', { value: percent(row.doubleOutput) }));
     }
-    if (!row.wood) note.push(t('平均每次 {value} 秒', { value: decimals.format(row.seconds) }),
+    if (!row.wood && !row.passive && !row.agility) note.push(t('平均每次 {value} 秒', { value: decimals.format(row.seconds) }),
       t('固定经验 {value}', { value: decimals.format(row.flatXp) }));
     const plan = row.targetPlan ?? row.planXp(goal?.remaining);
     if (goalMode && plan && !plan.reaches && row.stockLimit) note.push(t('{time}后缺{item}', {
@@ -331,7 +378,9 @@ function renderExperience() {
     if (!goalMode && row.limit) note.push(t('{time}后缺{item}', { time: formatDuration(row.activeHours), item: limitName(row) }));
     if (row.risky) note.push(t('失败可受伤，未计生存时间'));
     const eta = create('td', goal?.remaining === 0 ? t('已达到目标') : plan && !plan.reaches ?
-      t('当前库存不足') : formatXpDuration(plan?.hours));
+      t(plan.reason ?? '当前库存不足') : formatXpDuration(plan?.hours));
+    const passiveLimit = (goalMode ? plan?.limit : row.passive?.limit);
+    if (passiveLimit) note.push(t('缺少 {item}', { item: gameName(catalog.items[passiveLimit]) ?? shopCurrencyName(passiveLimit) }));
     if (!goalMode && plan?.reaches && plan.hours > hours) eta.append(create('small', t('超过本次挂机时长')));
     if (row.risky) eta.append(create('small', t('受伤风险'), 'xp-risk'));
     const details = create('details', undefined, 'xp-action-details');

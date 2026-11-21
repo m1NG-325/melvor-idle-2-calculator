@@ -39,6 +39,13 @@ function xpGoalProgress(level, savedXp, target, rate, startingXp) {
     progress: remaining === 0 ? 1 : Math.max(0, Math.min(1, (xp - baseline) / (end - baseline))) };
 }
 
+function renderXpGoalSlider(slider, level) {
+  if (slider.valueAsNumber !== level) slider.valueAsNumber = level;
+  const min = Number(slider.min);
+  const range = Number(slider.max) - min;
+  slider.style.setProperty('--goal-fill', (slider.valueAsNumber - min) / range * 100 + '%');
+}
+
 function formatXpDuration(hours) {
   if (!Number.isFinite(hours) || hours < 0) return t('暂无升级时间');
   const exactSeconds = hours * 3600;
@@ -51,7 +58,7 @@ function formatXpDuration(hours) {
   if (remainder || !minutes) parts.push(t('{value} 秒', { value: fullNumber(remainder) }));
   return parts.join(' ');
 }
-function renderXpProgress(character, skill, goal, timeForGoal, limitLabel) {
+function renderXpProgress(character, skill, goal, timeForGoal, limitLabel, plannedHours) {
   const view = create('div', undefined, 'xp-progress');
   const state = xpGoalProgress(character?.levels?.[skill], character?.skillXp?.[skill], goal.level, null, goal.startingXp);
   if (!state) {
@@ -59,7 +66,7 @@ function renderXpProgress(character, skill, goal, timeForGoal, limitLabel) {
     return view;
   }
   const level = t('等级 {level}', { level: state.level });
-  const hours = state.remaining > 0 ? timeForGoal(state.remaining) : 0;
+  const { hours, extended } = state.remaining > 0 ? timeForGoal(state.remaining) : { hours: 0 };
   const timing = state.remaining === 0 ? t('已达到目标') :
     hours == null ? t(limitLabel ?? '暂无升级时间') :
       t('约 {time}后达到 {level} 级', { time: formatXpDuration(hours), level: state.target });
@@ -68,6 +75,8 @@ function renderXpProgress(character, skill, goal, timeForGoal, limitLabel) {
     view.append(create('span', t('距目标 {xp} XP', { xp: decimals.format(state.remaining) }), 'muted'));
     if (!state.exact) view.title = t('按所设等级的起始经验计算');
   }
+  if (hours != null && hours > plannedHours) view.append(create('span', t('超过本次挂机时长'), 'muted'));
+  if (hours != null && extended) view.append(create('span', t('额外用时按持续战斗、补给充足估算。'), 'muted'));
   const progress = create('progress');
   progress.max = 1;
   progress.value = state.progress;

@@ -39,6 +39,14 @@
           <path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6M4.5 11.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/>
         </svg><span>挂机收益</span>
       </a>
+      <a id="productionLink" href="#production">
+        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="3" width="5" height="5" rx="1"/>
+          <rect x="2.5" y="16" width="5" height="5" rx="1"/>
+          <rect x="16.5" y="9.5" width="5" height="5" rx="1"/>
+          <path d="M7.5 5.5H11v13H7.5M11 12h5.5"/>
+        </svg><span>连锁产线</span>
+      </a>
       <a id="combatLink" href="#combat">
         <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
           <path d="m4 20 5-5m-3-1 4 4m-2-3L19 4l2-1-1 5-9 9M20 20l-5-5m3-1-4 4M9 12 4 7 3 3l4 1 5 5"/>
@@ -61,6 +69,11 @@
           <path d="m8 11 1 1 2-2m2 1h3m-8 5 1 1 2-2m2 1h3"/>
         </svg><span>任务材料</span>
       </a>
+      <a id="statisticsLink" href="#statistics">
+        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M4 4v16h16M8 16v-4m5 4V7m5 9V9"/>
+        </svg><span>数据统计</span>
+      </a>
     </nav>
     <div class="save-controls"><label>角色存档<select id="save"></select></label><button id="reload" type="button">重新读取存档</button></div>
     <p id="saveRefreshStatus" class="status muted" hidden>存档每 15 秒刷新</p>
@@ -73,6 +86,7 @@
       <p id="updateFeedback" class="muted" role="status" hidden></p>
       <a id="releaseLink" target="_blank" rel="noopener noreferrer" hidden>查看新版本</a>
       <a href="diagnostics/log" download>下载运行日志</a>
+      <button id="openAccessPoll" type="button" hidden>工具打开方式投票</button>
     </div>
   </aside>
   <main>
@@ -80,7 +94,7 @@
   <h1>挂机收益</h1>
   <form id="options" class="panel">
     <div class="inputs">
-      <label>挂机时长（小时）<input required id="hours" type="number" min=".01" max="720" step="any" value="8"></label>
+      <label>挂机时长（小时）<input required id="hours" data-idle-duration type="number" min="0.016666666666666666" max="24" step="any" value="8"></label>
       <div class="quick"><button type="button" data-hours="2">2 小时</button><button type="button" data-hours="8">8 小时</button><button type="button" data-hours="24">24 小时</button></div>
       <label>排行依据<select id="metric"><option value="net">净收益</option><option value="payout">到手金币</option></select></label>
       <label class="check"><input id="sell" type="checkbox" checked>回归后卖产物</label>
@@ -151,7 +165,7 @@
           <label id="combatAreaField" hidden>战斗地点<select id="combatAreaChoice"></select></label>
           <label>击杀速度来源<select id="combatRateMode"><option value="observed">从存档计算</option><option value="manual">手动输入</option></select></label>
           <label id="combatManualRate" hidden>实际击杀数／小时<input id="combatKillRate" type="number" required min="0" max="100000" step="any" placeholder="填入实际击杀速度" disabled></label>
-          <label>挂机时长（小时）<input id="combatHours" type="number" required min=".01" max="720" step="any" value="1"></label>
+          <label>挂机时长（小时）<input id="combatHours" data-idle-duration type="number" required min="0.016666666666666666" max="24" step="any" value="1"></label>
           <label>离线上限（小时）<input id="combatCap" type="number" required min="0" max="720" step="any" value="24"></label>
           <label class="check"><input id="combatCollect" type="checkbox" checked>收取战利品</label>
           <label class="check"><input id="combatSell" type="checkbox" checked>出售战利品</label>
@@ -210,44 +224,86 @@
         <button id="combatResetGoals" type="button" title="将当前角色的所有战斗目标恢复为下一级">重置目标等级</button>
       </div>
       <p id="combatXpStatus" class="status muted"></p>
+      <div class="combat-training">
+        <div class="inputs">
+          <label>推荐练级方案<select id="combatTrainingSkill"><option value="">选择战斗技能</option></select></label>
+          <label>推荐挂机时长（小时）<input id="combatTrainingHours" data-idle-duration type="number" min="0.016666666666666666" max="24" step="any" value="1" required></label>
+        </div>
+        <section id="combatTrainingOwned" class="combat-training-plan" aria-labelledby="combatTrainingOwnedTitle" hidden>
+          <h3 id="combatTrainingOwnedTitle">现有装备推荐</h3>
+          <p id="combatTrainingStatus" class="muted" role="status" hidden></p>
+          <div id="combatTrainingResult" hidden></div>
+        </section>
+        <section id="combatTrainingCraft" class="combat-training-plan" aria-labelledby="combatTrainingCraftTitle" hidden>
+          <h3 id="combatTrainingCraftTitle">可制造装备推荐</h3>
+          <p id="combatTrainingCraftStatus" class="muted" role="status" hidden></p>
+          <div id="combatTrainingCraftResult" hidden></div>
+        </section>
+      </div>
       <div id="combatXpRows" class="combat-xp-grid"></div>
     </section>
   </div>
   <div id="xpPage" hidden>
     <h1>经验收益</h1>
-    <section class="panel" aria-labelledby="xpBestHeading">
-      <div class="xp-section-heading">
-        <h2 id="xpBestHeading">各技能首选</h2>
-        <div class="inputs">
-          <label>比较方式<select id="xpMode"><option value="idle">长时挂机</option><option value="goal">短时升级</option></select></label>
-          <div class="inputs" id="xpIdleControls">
-            <label>挂机时长（小时）<input id="xpHours" type="number" min=".05" max="24" step="any" value="1"></label>
-            <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+    <div class="xp-section-switch" role="group" aria-label="经验收益分类">
+      <button id="xpSkillsButton" type="button" aria-controls="xpSkillsSection" aria-pressed="true">技能经验</button>
+      <button id="xpCombatButton" type="button" aria-controls="xpCombatSection" aria-pressed="false">战斗经验</button>
+    </div>
+    <div id="xpSkillsSection">
+      <section class="panel" aria-labelledby="xpBestHeading">
+        <div class="xp-section-heading">
+          <h2 id="xpBestHeading">各技能首选</h2>
+          <div class="inputs">
+            <label>比较方式<select id="xpMode"><option value="idle">长时挂机</option><option value="goal">短时升级</option></select></label>
+            <div class="inputs" id="xpIdleControls">
+              <label>挂机时长（小时）<input id="xpHours" data-idle-duration type="number" min="0.016666666666666666" max="24" step="any" value="1" required></label>
+              <div class="quick"><button type="button" data-xp-hours="1">1 小时</button><button type="button" data-xp-hours="8">8 小时</button><button type="button" data-xp-hours="24">24 小时</button></div>
+            </div>
           </div>
         </div>
-      </div>
-      <p id="xpStatus" class="status muted" role="status"></p>
-      <div id="xpBest" class="xp-grid"></div>
-    </section>
-    <section class="panel" aria-labelledby="xpDetailHeading">
-      <h2 id="xpDetailHeading">行动排行</h2>
-      <div class="xp-goal">
-        <div class="inputs">
-          <label class="xp-action-choice">估算行动<select id="xpActionChoice"></select></label>
-          <label>目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
-          <label class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
-          <button id="xpNextLevel" type="button">下一级</button>
-          <button id="xpResetGoals" type="button" title="将当前角色的所有非战斗目标恢复为下一级">重置目标等级</button>
-          <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
+        <p id="xpStatus" class="status muted" role="status"></p>
+        <div id="xpBest" class="xp-grid"></div>
+      </section>
+      <section class="panel" aria-labelledby="xpDetailHeading">
+        <h2 id="xpDetailHeading">行动排行</h2>
+        <div class="xp-goal">
+          <div class="inputs">
+            <label class="xp-action-choice">估算行动<select id="xpActionChoice"></select></label>
+            <label>目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
+            <label class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
+            <button id="xpNextLevel" type="button">下一级</button>
+            <button id="xpResetGoals" type="button" title="将当前角色的所有非战斗目标恢复为下一级">重置目标等级</button>
+            <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
+          </div>
+          <div id="xpGoalOverview"></div>
         </div>
-        <div id="xpGoalOverview"></div>
+        <section id="skillTraining" class="combat-training skill-training" aria-labelledby="skillTrainingTitle">
+          <h3 id="skillTrainingTitle">技能配装推荐</h3>
+          <section class="combat-training-plan" aria-labelledby="skillTrainingOwnedTitle">
+            <h4 id="skillTrainingOwnedTitle">现有装备推荐</h4>
+            <p id="skillTrainingOwnedStatus" class="muted" role="status" hidden></p>
+            <div id="skillTrainingOwnedResult" hidden></div>
+          </section>
+          <section id="skillTrainingShop" class="combat-training-plan" aria-labelledby="skillTrainingShopTitle" hidden>
+            <h4 id="skillTrainingShopTitle">灵巧商店装备推荐</h4>
+            <p id="skillTrainingShopStatus" class="muted" role="status" hidden></p>
+            <div id="skillTrainingShopResult" hidden></div>
+          </section>
+        </section>
+        <p id="xpEmpty" class="muted"></p>
+        <div id="xpTable" class="scroll" hidden><table>
+          <thead><tr><th>行动</th><th id="xpTotalHeading" class="number">预计 XP</th><th id="xpAverageHeading" class="number">整段平均 XP／小时</th><th class="number">行动中 XP／小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
+          <tbody id="xpRows"></tbody>
+        </table></div>
+      </section>
+    </div>
+    <div id="xpCombatSection" hidden>
+      <div class="xp-combat-context muted">
+        <span id="xpCombatContext"></span>
+        <a href="#combat">调整战斗设置</a>
       </div>
-      <p id="xpEmpty" class="muted"></p>
-      <div id="xpTable" class="scroll" hidden><table>
-        <thead><tr><th>行动</th><th id="xpTotalHeading" class="number">预计 XP</th><th id="xpAverageHeading" class="number">整段平均 XP／小时</th><th class="number">行动中 XP／小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
-        <tbody id="xpRows"></tbody>
-      </table></div>
-    </section>
+      <p id="xpCombatUnavailable" class="panel muted" hidden>本机游戏数据没有可用于估算的普通怪物。</p>
+    </div>
   </div>
   <div id="shopPage" hidden>
     <h1>商店升级</h1>
@@ -295,19 +351,122 @@
     </section>
     <div id="questSteps"></div>
   </div>
+  <div id="productionPage" hidden>
+    <h1>连锁产线</h1>
+    <form id="productionOptions" class="panel">
+      <div class="inputs">
+        <label>目标物品<input id="productionTargetInput" data-suggestions="productionTargets" data-select-first data-open-on-focus data-all-suggestions
+          data-empty-suggestions="没有找到可用于产线的物品。"
+          placeholder="搜索目标物品" autocomplete="off"></label>
+        <select id="productionTarget" hidden></select>
+        <datalist id="productionTargets"></datalist>
+        <label>挂机时长（小时）<input id="productionHours" data-idle-duration type="number" value="8" min="0.016666666666666666" max="24" step="any" required></label>
+        <label class="check"><input id="productionStock" type="checkbox">使用仓库库存</label>
+        <label class="check"><input id="productionSellByproducts" type="checkbox">出售剩余副产物</label>
+        <button id="addProductionComparison" type="button" disabled>加入对比</button>
+        <input id="productionComparisonItems" type="hidden" value="[]">
+      </div>
+      <p class="status muted" role="status" id="productionStatus">选择角色存档后可估算连锁产线。</p>
+      <p class="muted">以一个角色依次完成各步骤估算。仓库原料按售价扣除，副产物按出售设置计入收益。</p>
+    </form>
+    <section class="panel" id="productionComparison" hidden>
+      <div class="production-compare-heading">
+        <h2>产线对比</h2>
+        <button id="clearProductionComparison" type="button">清空对比</button>
+      </div>
+      <p class="muted">各方案使用同一挂机时长，并分别从相同的起始库存计算。</p>
+      <p id="productionComparisonHint" class="muted">再选一个目标物品并加入对比。</p>
+      <div class="scroll">
+        <table class="production-table">
+          <thead><tr><th>目标物品</th><th>状态</th><th>预计数量</th><th>产线耗时</th><th>净 GP/小时</th><th>预计净收益</th><th>操作</th></tr></thead>
+          <tbody id="productionComparisonRows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel" id="productionResults" hidden>
+      <h2 class="muted" id="productionHeading">收益最高的产线</h2>
+      <p class="winner" id="productionWinner"></p>
+      <div class="metrics" id="productionMetrics"></div>
+    </section>
+    <section class="panel" id="productionDetail" hidden>
+      <div class="inputs">
+        <label id="productionAlternatives">查看产线<select id="productionPlan"></select></label>
+      </div>
+      <div id="productionPlanBody">
+      <h2 id="productionDetailTitle"></h2>
+      <p id="productionPreview" class="production-restriction" hidden></p>
+      <p id="productionRevenue" class="muted"></p>
+      <p id="productionBank" class="muted"></p>
+      <details id="productionByproducts" class="production-byproducts" hidden>
+        <summary>剩余副产物</summary>
+        <ul id="productionByproductRows"></ul>
+      </details>
+      <div class="scroll">
+        <table class="production-table">
+          <thead><tr><th>行动</th><th>限制</th><th>耗时</th><th>使用材料</th><th>预计产出</th></tr></thead>
+          <tbody id="productionSteps"></tbody>
+        </table>
+      </div>
+      </div>
+    </section>
+  </div>
+  <div id="statisticsPage" hidden>
+    <h1>数据统计</h1>
+    <section class="panel statistics-toolbar">
+      <input id="statisticsSearch" type="search" aria-label="搜索统计" placeholder="搜索行动、物品或指标">
+      <p class="muted status" id="statisticsStatus" role="status"></p>
+    </section>
+    <div id="statisticsResults" hidden>
+      <dl id="statisticsMetrics"></dl>
+      <p class="panel muted" id="statisticsEmpty" hidden>没有匹配的统计。</p>
+      <div id="statisticsSections">
+        <nav id="statisticsCategories" aria-label="统计分类"></nav>
+        <select id="statisticsScope" aria-label="统计分类"></select>
+        <section id="statisticsDetail" aria-labelledby="statisticsDetailTitle"></section>
+      </div>
+    </div>
+  </div>
   </main>
 </div>
+<dialog id="accessPoll" class="supply-picker access-poll" aria-labelledby="accessPollTitle">
+  <h2 id="accessPollTitle">你希望以后怎么打开工具？</h2>
+  <form id="accessPollForm">
+    <div class="poll-choices">
+      <label class="check">
+        <input type="radio" name="accessMode" value="local" aria-labelledby="pollLocalTitle" aria-describedby="pollLocalNote" required>
+        <span><strong id="pollLocalTitle">继续使用现在的方法，在电脑上打开工具</strong>
+          <small id="pollLocalNote">本地版可以离线使用，读取本机游戏存档。</small></span>
+      </label>
+      <label class="check">
+        <input type="radio" name="accessMode" value="website" aria-labelledby="pollWebsiteTitle" aria-describedby="pollWebsiteNote" required>
+        <span><strong id="pollWebsiteTitle">搭建一个网站，在浏览器直接访问工具</strong>
+          <small id="pollWebsiteNote">网页版需要联网。图片等资源由网站提供，无需额外下载，界面可以做得更直观、更好看。后续计划支持在手机等设备查看已保存的数据。</small></span>
+      </label>
+    </div>
+    <p class="muted">投票只提交选项和随机生成的投票编号。</p>
+    <p id="accessPollStatus" class="muted" role="status"></p>
+    <div class="inputs">
+      <button id="submitAccessPoll" type="submit">提交投票</button>
+      <button id="skipAccessPoll" type="button">稍后再投</button>
+    </div>
+  </form>
+</dialog>
 <script src="vendor/opencc/cn2t.js"></script>
 <script src="language.js"></script>
 <script src="rank.js"></script>
+<script src="production.js"></script>
+<script src="statistics.js"></script>
 <script src="xp-progress.js"></script>
 <script src="experience.js"></script>
 <script src="combat-model.js"></script>
 <script src="combat.js"></script>
+<script src="combat-training.js"></script>
+<script src="skill-training.js"></script>
 <script src="shop.js"></script>
 <script src="quests.js"></script>
 <script src="preferences.js"></script>
 <script src="choices.js"></script>
+<script src="access-poll.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

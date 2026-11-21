@@ -1,5 +1,19 @@
 const { localId } = require('./game-data.cjs');
 
+function normalizeRequirements(list) {
+  return (list ?? []).map(({ Type, Data: data }) => {
+    const Data = data ?? {};
+    return {
+      type: localId(Type), skill: localId(Data.Component?.Entity), level: Data.Level, or: !!Data.IsOr,
+      item: localId(Data.Item), rank: localId(Data.Rank), node: localId(Data.MajorNode ?? Data.MinorNode),
+      purchase: localId(Data.ShopPurchase), amount: Data.Amount, statistic: localId(Data.Statistic),
+      statisticTarget: localId(Data.Course ?? Data.Event ?? Data.Item ?? Data.Dungeon ?? Data.SlayerMaster ?? Data.Enemy),
+      statisticValue: Data.Value, technique: localId(Data.Technique), combatStyle: localId(Data.CombatStyle ?? Data.Style),
+      quest: localId(Data.Quest), questStep: Data.Step, questTask: Data.Task, goalIdIncomplete: Data.GoalIdIncomplete
+    };
+  });
+}
+
 const actionTypes = {
   Woodcutting: 'WoodcuttingRecipe', Mining: 'MiningRecipe', Fishing: 'FishingRecipe',
   Cooking: 'CookingRecipe', Firemaking: 'FiremakingRecipe', Thieving: 'ThievingRecipe',
@@ -62,7 +76,8 @@ function makeQuestGuide(data) {
       stages.set(quest + ':' + step, { quest, step });
     }
     return { skill, target: nameRef(type, row), area, kind, level, questOnly: stages.size > 0,
-      stages: [...stages.values()], ingredients: ingredients(row) };
+      stages: [...stages.values()], ingredients: ingredients(row),
+      requirementGroups: groups.filter(group => group.length).map(normalizeRequirements) };
   }
   function addProducts(products, where) {
     for (const entry of products ?? []) {
@@ -79,9 +94,9 @@ function makeQuestGuide(data) {
   }
   function addAction(skill, type, row) {
     const areaId = row.Location ?? row.Category;
-    const areaType = places[skill] ?? 'RecipeCategory';
+    const areaType = type === 'GrainMillRecipe' ? 'FarmingMillCategory' : places[skill] ?? 'RecipeCategory';
     const area = get(areaType, areaId);
-    const actionId = skill + ':' + row.Id;
+    const actionId = (type === 'GrainMillRecipe' ? 'Farming:Mill:' : skill + ':') + row.Id;
     const where = { ...source(skill, type, row, 'action', nameRef(areaType, area), [area]), actionId };
     actions.set(actionId, [where]);
     addProducts([...(row.Products ?? []), ...(row.Product ? [row.Product] : [])], where);
@@ -92,6 +107,7 @@ function makeQuestGuide(data) {
     } else if (skill === 'Fishing') {
       addProducts(row.RandomProducts, where);
       addProducts(row.SpecialProducts, { ...where, kind: 'drop' });
+      if (row.JunkItem) addProducts([{ Item: row.JunkItem }], { ...where, kind: 'drop' });
     } else if (skill === 'Thieving') {
       if (row.BaseCommonLootChance > 0) addProducts(row.CommonDropTable, { ...where, kind: 'drop' });
       if (row.BaseRareLootChance > 0) addProducts(row.RareDropTable, { ...where, kind: 'drop' });
@@ -201,7 +217,7 @@ function makeQuestGuide(data) {
   for (const quest of quests) for (const step of quest.steps) for (const objective of step.tasks.flatMap(task => task.objectives)) {
     for (const where of objective.locations ?? []) for (const { item } of where.ingredients) needed.add(item);
   }
-  for (const item of [...needed]) {
+  for (const item of needed) {
     for (const where of sources.get(item)?.values() ?? []) {
       for (const input of where.ingredients) needed.add(input.item);
       if (where.container) needed.add(where.container);
@@ -221,4 +237,4 @@ function makeQuestGuide(data) {
     sources: itemSources };
 }
 
-module.exports = { makeQuestGuide };
+module.exports = { makeQuestGuide, normalizeRequirements };

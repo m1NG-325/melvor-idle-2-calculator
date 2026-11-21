@@ -6,8 +6,10 @@ function actionModifiers(action, profile, catalog, extraModifiers) {
     for (const modifier of modifiers ?? []) {
       if ((modifier.skill && modifier.skill !== action.skill) || ['recipe', 'category', 'location', 'subcategory', 'constellation', 'recipeType'].some(
         key => modifier[key] && modifier[key] !== action[key]
+      ) || ['animal', 'tool', 'trapType', 'course', 'path', 'obstacle', 'technique', 'plot'].some(
+        key => modifier[key] && modifier[key] !== action[key]
       )) continue;
-      const scale = modifier.scalesWithLevel ? profile.levels[modifier.scalesWithLevel] ?? 0 : 1;
+      const scale = modifier.scalesWithLevel ? profile.levels?.[modifier.scalesWithLevel] ?? 0 : 1;
       const key = [modifier.stat, modifier.item, modifier.event].join(':');
       stats.set(key, (stats.get(key) ?? 0) + modifier.value * quantity * scale);
     }
@@ -33,8 +35,12 @@ function actionModifiers(action, profile, catalog, extraModifiers) {
     add(action.minorNodeModifiers, action.minorNodes.filter(id => profile.astrologyNodes?.includes(id)).length);
   }
   add(extraModifiers);
-  return (key, item, event) => (stats.get([key, '', ''].join(':')) ?? 0) +
-    (item || event ? stats.get([key, item, event].join(':')) ?? 0 : 0);
+  add(profile.skillPhaseModifiers);
+  return (key, item, event) => {
+    const get = (itemId, eventId) => stats.get([key, itemId, eventId].join(':')) ?? 0;
+    return get('', '') + (item ? get(item, '') : 0) +
+      (event ? get('', event) : 0) + (item && event ? get(item, event) : 0);
+  };
 }
 
 function expectedSteps(health, doubleDamage) {
@@ -90,9 +96,16 @@ function meetsRequirements(group, profile, confirmed = false) {
     }
     return confirmed;
   };
-  let passed = !group.length || requirementMet(group[0]);
-  for (const req of group.slice(1)) passed = req.or ? passed || requirementMet(req) : passed && requirementMet(req);
-  return passed;
+  if (!group.length) return true;
+  let alternativePassed = requirementMet(group[0]);
+  for (const req of group.slice(1)) {
+    if (req.or) alternativePassed ||= requirementMet(req);
+    else {
+      if (!alternativePassed) return false;
+      alternativePassed = requirementMet(req);
+    }
+  }
+  return alternativePassed;
 }
 
 function unlocked(action, profile) {
@@ -101,10 +114,377 @@ function unlocked(action, profile) {
   return action.requirementGroups.every(group => meetsRequirements(group, profile, confirmed));
 }
 
+function requirementClauses(groups) {
+  return groups.flatMap(group => {
+    const clauses = [];
+    for (const req of group) {
+      if (!req.or || !clauses.length) clauses.push([]);
+      clauses.at(-1).push(req);
+    }
+    return clauses;
+  });
+}
+
+function productionRestrictions(action, profile) {
+  const restrictions = [];
+  if (profile.excluded?.includes(action.id)) restrictions.push({ type: 'excluded' });
+  const confirmed = profile.confirmed?.includes(action.id);
+  const groups = requirementClauses(action.requirementGroups);
+  for (const clause of groups) {
+    if (!meetsRequirements(clause, profile, confirmed)) restrictions.push({ type: 'requirement', clause });
+  }
+  if (!profile.levels[action.skill] && !restrictions.some(r => r.clause?.some(req => req.type === 'Level' && req.skill === action.skill))) {
+    restrictions.push({ type: 'skill', skill: action.skill });
+  }
+  return restrictions;
+}
+
 function thievingSuccess(action, level, stat, bonus) {
   const stealth = Math.max(0, Math.floor((level + stat('FlatStealth') + (bonus.stealth ?? 0)) * (1 + stat('PercentStealth'))));
   const perception = Math.max(0, Math.floor((action.perception + stat('FlatPerception')) * (1 + stat('PercentPerception'))));
   return probability((100 + stealth) / (100 + perception));
+}
+
+function secondarySkillLevel(xp, cap, bonus, divisor, exponent, scale) {
+  const step = 2 ** (1 / exponent);
+  let level = 1;
+  while (level < cap) {
+    const next = level + 1;
+    const threshold = Math.floor((next * (next - 1) +
+      bonus * (2 ** (next / divisor) - step) / (step - 1)) / scale);
+    if (!(xp >= threshold)) break;
+    level = next;
+  }
+  return level;
+}
+
+function agilityTechniqueLevel(xp, cap = 99) {
+  return secondarySkillLevel(xp, cap, 600, 3.25, 3.25, 6);
+}
+
+function agilityPlan(action, profile, catalog) {
+  const techniques = catalog.xpSkillData.agilityTechniques.map(row => ({
+    ...row, level: agilityTechniqueLevel(profile.xpSkillState?.Agility?.[row.id] ?? 0, row.cap)
+  }));
+  const saved = new Map(techniques.map(row => [row.id, row.level]));
+  let milliseconds = 0;
+  let restarts = 0;
+  let attempts = 0;
+  let successes = 0;
+  let risky = false;
+  for (const [index, obstacle] of action.obstacleData.entries()) {
+    const scoped = { ...action, obstacle: obstacle.id, technique: obstacle.technique };
+    const difficulty = Math.max(0, obstacle.difficulty + actionModifiers(scoped, profile, catalog)('FlatObstacleDifficulty'));
+    const stat = actionModifiers(scoped, profile, catalog,
+      techniques.filter(row => row.level >= difficulty).flatMap(row => row.bonuses));
+    const interval = Math.max(1, Math.floor((obstacle.ms + stat('FlatInterval')) * (1 + stat('PercentInterval'))));
+    const chance = obstacle.trap ? Math.min(.95, probability(.8 + stat('FlatTrapSuccessChance'))) :
+      obstacle.technique ? .95 ** (Math.max(0, difficulty - (saved.get(obstacle.technique) ?? 1) + 1) / 2) : .6;
+    const repeat = probability(stat('RepeatFailedObstacleChance'));
+    const skip = index ? probability(stat('SkipObstacleChance')) : 0;
+    const failure = (1 - skip) * (1 - chance);
+    const reset = failure * (1 - repeat);
+    if (failure >= 1) return;
+    milliseconds += ((1 - skip) * interval + reset * milliseconds) / (1 - failure);
+    attempts += ((1 - skip) + reset * attempts) / (1 - failure);
+    successes += ((1 - skip) * chance + reset * successes) / (1 - failure);
+    restarts += reset * (restarts + 1) / (1 - failure);
+    risky ||= failure > 0 && obstacle.damage > 0 && probability(stat('AvoidDamageChance')) < 1;
+  }
+  const stats = actionModifiers(action, profile, catalog);
+  return { seconds: milliseconds / 1000, entries: 1 + restarts, attempts, successes, risky,
+    preservation: probability(stats('EntryCostPreservationChance')) };
+}
+
+function huntingPlan(action, profile, catalog) {
+  const { hunt } = action;
+  const state = profile.xpSkillState?.Hunting;
+  const saved = state?.entries?.[action.animal];
+  const trapless = hunt.allowTrapless && (!saved || saved.trapless) &&
+    meetsRequirements(hunt.traplessRequirements, profile);
+  const available = id => !profile.keep?.includes(id) && profile.stock[id] > 0;
+  const eligible = id => catalog.items[id]?.huntingTrap?.type === action.trapType && available(id);
+  const trap = trapless || !action.trapType ? null : eligible(saved?.trap) ? saved.trap :
+    (!saved?.trap || state?.autoSwap) ? Object.keys(profile.stock).find(eligible) : null;
+  if (action.trapType && !trap && !trapless) return;
+  const bait = saved?.bait && hunt.bait && available(hunt.bait) ? hunt.bait : null;
+  const journalLevel = secondarySkillLevel(saved?.xp ?? 0, 99, 100, 3.5, 7, 12);
+  const bonuses = [
+    ...catalog.xpSkillData.huntingJournal.filter(row => row.level <= journalLevel).flatMap(row => row.bonuses),
+    ...(trapless ? hunt.traplessBonuses : catalog.items[trap]?.huntingTrap?.bonuses ?? [])
+  ];
+  const stat = actionModifiers(action, profile, catalog, bonuses);
+  const baitStat = bait ? actionModifiers(action, profile, catalog, [...bonuses, ...hunt.baitBonuses]) : stat;
+  const failBonus = (catalog.items[trap]?.huntingTrap?.failBonuses ?? [])
+    .filter(row => row.stat === 'FlatTrappingSuccessChance').reduce((sum, row) => sum + row.value, 0);
+  const meanInterval = ([min, max], phase, mods = stat) => {
+    const endpoint = (base, edge) => Math.max(0, Math.floor((base + mods('Flat' + phase + 'Interval') +
+      mods('Flat' + edge + phase + 'Interval')) * (1 + mods('Percent' + phase + 'Interval') +
+      mods('Percent' + edge + phase + 'Interval'))));
+    return (endpoint(min, 'Min') + endpoint(max, 'Max')) / 2;
+  };
+  const survey = Math.max(0, (hunt.surveyMs + stat('FlatSurveyInterval')) * (1 + stat('PercentSurveyInterval')));
+  const tracking = meanInterval(hunt.trackingInterval, 'Tracking');
+  const trapping = meanInterval(hunt.trappingInterval, 'Trapping');
+  const trackChance = probability(hunt.trackChance * (1 + stat('IncreasedTrackingSuccessChance')) + stat('FlatTrackingSuccessChance'));
+  const trapChance = probability(hunt.trapChance * (1 + stat('IncreasedTrappingSuccessChance')) + stat('FlatTrappingSuccessChance'));
+  if (!(trapChance > 0 || failBonus > 0)) return;
+  let attempts = 1;
+  let failure = 1 - trapChance;
+  if (failBonus > 0) {
+    for (let failures = 1; failure > 1e-10 && failures <= 1000; failures++) {
+      attempts += failure;
+      failure *= 1 - probability(trapChance + failures * failBonus);
+    }
+  } else attempts = 1 / trapChance;
+  const min = Math.max(1, Math.trunc(hunt.tracks[0] + stat('FlatTrackingSteps') + stat('FlatMinTrackingSteps')));
+  const max = Math.max(min, Math.trunc(hunt.tracks[1] + stat('FlatTrackingSteps') + stat('FlatMaxTrackingSteps')));
+  const skip = probability(stat('SkipTrackingStepChance'));
+  const typical = Array.from({ length: max - min + 1 }, (_, i) => expectedSteps(min + i, skip))
+    .reduce((sum, value) => sum + value, 0) / (max - min + 1);
+  const extra = saved?.discovered === false ? Math.max(0, expectedSteps(max * 4, skip) - typical) * tracking / 1000 : 0;
+  const retryTracks = (attempts - 1) * (1 - probability(stat('TrappingReattemptChance'))) * expectedSteps(min, skip);
+  const perCatch = (survey * (1 + (1 - trackChance) + (1 - trackChance) ** 2) +
+    (typical + retryTracks) * tracking + attempts * trapping) / 1000;
+  const seconds = perCatch / attempts;
+  return { seconds, baitSeconds: Math.max(0.001, seconds +
+    (meanInterval(hunt.trappingInterval, 'Trapping', baitStat) - trapping) / 1000),
+    baitAttempts: bait ? Math.floor(profile.stock[bait] * attempts) : 0,
+    firstExtra: extra, success: 1 / attempts, trap, bait, stat, trapless };
+}
+
+function passiveStock(profile) {
+  const items = { ...profile.stock };
+  for (const id of profile.keep ?? []) items[id] = 0;
+  const currencies = { ...profile.currencies };
+  return (costs, consumption = 1, fixedCosts = []) => {
+    const batches = new Map();
+    const add = ([id, amount, currency], factor) => {
+      const key = (currency ? 'currency:' : 'item:') + id;
+      let batch = batches.get(key);
+      if (!batch) {
+        batch = { id, stock: currency ? currencies : items, required: 0, consumed: 0 };
+        batches.set(key, batch);
+      }
+      batch.required += amount;
+      batch.consumed += amount * factor;
+    };
+    for (const cost of costs) add(cost, consumption);
+    for (const cost of fixedCosts) add(cost, 1);
+    for (const { stock, id, required } of batches.values()) {
+      if ((stock[id] ?? 0) + Number.EPSILON * required < required) return id;
+    }
+    for (const { stock, id, consumed } of batches.values()) {
+      stock[id] = Math.max(0, (stock[id] ?? 0) - consumed);
+    }
+    return null;
+  };
+}
+
+function simulateFarming(profile, catalog, stop, manualAction) {
+  const results = new Map();
+  const plots = profile.xpSkillState?.Farming;
+  if (!plots?.length) return results;
+  const crops = new Map(catalog.xpActions.filter(action => action.kind === 'Farming' && unlocked(action, profile))
+    .map(action => [action.recipe, action]));
+  const xpBonus = (profile.xpBonuses?.Farming ?? 0) / 100;
+  const intervalBonus = 1 + (profile.bonuses?.Farming?.interval ?? 0) / 100;
+  const spend = passiveStock(profile);
+  const queue = [];
+  function plan(action, plot) {
+    const { farm } = action;
+    const stat = actionModifiers({ ...action, plot: plot.id }, profile, catalog);
+    const interval = seconds => Math.max(1, ((seconds + stat('FlatInterval') / 1000) *
+      (1 + stat('PercentInterval'))) * intervalBonus);
+    const initial = interval(action.seconds);
+    const regrow = farm.regrowMs > 0 ? interval(farm.regrowMs / 1000) : initial;
+    const regrows = Math.max(0, Math.trunc((farm.regrows ?? 0) + stat('FlatRegrows')));
+    const xp = Math.max(0, (action.baseXp + stat('FlatXPGained')) * (1 + stat('PercentXPGained') + xpBonus));
+    const costs = (items, wallet, change) => [...items.map(([id, amount]) => [id, change(amount, id)]),
+      ...wallet.map(([id, amount]) => [id, change(amount, id), true])].filter(([, amount]) => amount > 0);
+    const planting = costs(action.costs, action.currencyCosts,
+      (amount, id) => Math.max(1, Math.trunc(amount * (1 + stat('PercentIngredientCost', id)))));
+    const service = costs(farm.autoItems, farm.autoCurrencies,
+      amount => Math.max(0, Math.floor((amount + stat('FlatAutomationCost')) * (1 + stat('PercentAutomationCost')))));
+    const preservation = 1 - probability(stat('PreservationChance'));
+    const manual = action === manualAction;
+    const canAutomate = meetsRequirements(farm.automation, profile);
+    if (!results.has(action.recipe)) {
+      results.set(action.recipe, { events: [], limit: '', plots: 0, needsHarvest: false, seconds: action.seconds, forecast: stop });
+    }
+    return { recipe: action.recipe, initial, regrow, regrows, xp, planting, service, preservation, manual, canAutomate,
+      result: results.get(action.recipe) };
+  }
+  function schedule(plot, crop, at, remaining, replant) {
+    if (!(crop.manual || (plot.autoHarvest && crop.canAutomate))) {
+      crop.result.needsHarvest = true;
+      return;
+    }
+    queue.push({ plot, crop, at, remaining, replant });
+  }
+  function plant(plot, crop, at, replant) {
+    if (!crop || (!crop.manual && !(plot.autoPlant && crop.canAutomate))) return;
+    const missing = spend(crop.planting, crop.preservation, crop.manual ? [] : crop.service);
+    if (missing) crop.result.limit ||= missing;
+    else schedule(plot, crop, at + crop.initial, crop.regrows, replant);
+  }
+  for (const plot of plots) {
+    const category = catalog.xpSkillData.farmingPlots[plot.id];
+    const current = crops.get(plot.crop);
+    const selected = !plot.crop && plot.state === 1 && manualAction?.category === category
+      ? manualAction : crops.get(plot.selected);
+    const crop = current && current.category === category ? plan(current, plot) : null;
+    const next = selected && selected.category === category
+      ? (selected === current ? crop : plan(selected, plot)) : null;
+    if (next && next !== crop) next.result.plots++;
+    if (crop && Number.isFinite(plot.seconds)) {
+      crop.result.plots++;
+      schedule(plot, crop, plot.seconds, plot.regrows ?? crop.regrows, crop.manual ? crop : next);
+    } else if (!plot.crop && plot.state === 1) {
+      plant(plot, next, 0, next);
+    }
+  }
+  while (queue.length) {
+    queue.sort((a, b) => a.at - b.at);
+    const { at, plot, crop, remaining, replant } = queue.shift();
+    if (at > stop) break;
+    const missing = crop.manual ? null : spend(crop.service);
+    if (missing) {
+      crop.result.limit ||= missing;
+      continue;
+    }
+    if (crop.xp > 0) crop.result.events.push({ at, xp: crop.xp });
+    if (remaining > 0) schedule(plot, crop, at + crop.regrow, remaining - 1, replant);
+    else plant(plot, replant, at, replant);
+  }
+  return results;
+}
+
+function farmExperience(action, profile, catalog, settings, manual) {
+  if (manual) {
+    return simulateFarming(profile, catalog, 7 * 86400, action).get(action.recipe);
+  }
+  settings.farming ??= simulateFarming(profile, catalog, settings.seconds);
+  const result = settings.farming.get(action.recipe);
+  if (result) return result;
+  const empty = profile.xpSkillState?.Farming?.filter(plot => !plot.crop && plot.state === 1 &&
+    catalog.xpSkillData.farmingPlots[plot.id] === action.category);
+  if (empty?.length) return { events: [], limit: '', plots: empty.length, needsHarvest: false,
+    seconds: action.seconds, forecast: settings.seconds };
+}
+
+function ranchExperience(action, profile, catalog, stop) {
+  const state = profile.xpSkillState?.Ranching;
+  if (!state?.lands.length || !(state.production.interval > 0) || state.production.state !== 2) return;
+  if (!action.land && state.lands.filter(land => land.animals.length).length < 2) return;
+  const { ranchAnimals, ranchVariants, ranchUpgrades } = catalog.xpSkillData;
+  const xpBonus = (profile.xpBonuses?.Ranching ?? 0) / 100;
+  const spend = passiveStock(profile);
+  const animals = state.lands.flatMap(land => land.animals.flatMap(saved => {
+    const animal = ranchAnimals[saved.type];
+    if (!animal) return [];
+    const context = { ...action, animal: saved.type };
+    const upgradeBonuses = land.upgrades?.flatMap(id => ranchUpgrades[id] ?? []) ?? [];
+    const statsFor = variant => actionModifiers(context, profile, catalog, [...upgradeBonuses, ...(ranchVariants[variant] ?? [])]);
+    const stat = statsFor(saved.variant);
+    const gainedXp = mods => Math.max(0, (animal.baseXp + mods('FlatXPGained')) * (1 + mods('PercentXPGained') + xpBonus));
+    const xp = gainedXp(stat);
+    const weight = animal.variants.reduce((sum, [, weight]) => sum + weight, 0);
+    const adultXp = saved.variant === animal.baseVariant && weight > 0 ? animal.variants.reduce((sum, [id, value]) =>
+      sum + gainedXp(statsFor(id)) * value, 0) / weight : xp;
+    const feed = 1 - probability(stat('FoodPreservationChance'));
+    return [{ ...saved, land: land.id, xp, adultXp, feed, foods: animal.foods, flatHappiness: stat('FlatHappiness'),
+      maintenanceSkip: probability(stat('EnclosureMaintenanceSkipChance')) }];
+  }));
+  const count = animals.filter(animal => !action.land || animal.land === action.land).length;
+  if (!count) return;
+  const phases = [
+    { ...state.maintenance, kind: 'maintenance' }, { ...state.food, kind: 'food' }, { ...state.production, kind: 'xp' }
+  ].filter(phase => phase.state === 2 && phase.interval > 0).map(phase => ({ ...phase, at: Math.max(0, phase.first) }));
+  const events = [];
+  let limit = '';
+  while (phases.some(phase => phase.at <= stop)) {
+    const next = phases.reduce((a, b) => a.at <= b.at ? a : b);
+    const { at, kind } = next;
+    next.at += next.interval;
+    let gained = 0;
+    for (const animal of animals) {
+      if (animal.lifeSeconds <= at) continue;
+      if (kind === 'maintenance') animal.safety = Math.max(0, animal.safety - .01 * (1 - animal.maintenanceSkip));
+      else if (kind === 'food' && animal.feed > 0) {
+        const missing = spend(animal.foods, animal.feed);
+        if (missing && (!action.land || animal.land === action.land)) limit ||= missing;
+        animal.hunger = missing ? Math.max(0, animal.hunger - .1 * animal.feed) :
+          animal.feed + animal.hunger * (1 - animal.feed);
+      } else if (kind === 'xp' && (!action.land || animal.land === action.land)) {
+        const safety = animal.safety >= .75 ? 1 : animal.safety;
+        const happiness = Math.max(0, .3 * animal.hunger + .3 * safety + .4 * animal.satisfaction -
+          (animal.sick ? .3 : 0) + animal.flatHappiness);
+        gained += (at >= animal.variantSeconds ? animal.adultXp : animal.xp) * happiness;
+      }
+    }
+    if (gained > 0) events.push({ at, xp: gained });
+  }
+  return { events, limit, animals: count, seconds: state.production.interval, forecast: stop };
+}
+
+function millExperience(action, profile, catalog, settings, manual) {
+  const state = profile.xpSkillState?.GrainMill;
+  if (!state) return;
+  const stat = actionModifiers(action, profile, catalog);
+  const costs = sumIngredients(action.costs.map(([id, amount]) =>
+    [id, Math.max(1, Math.trunc(amount * (1 + stat('PercentIngredientCost', id))))]));
+  const xp = Math.max(0, (action.baseXp + stat('FlatXPGained')) *
+    (1 + stat('PercentXPGained') + (profile.xpBonuses?.Farming ?? 0) / 100));
+  const seconds = Math.max(1, (action.seconds + stat('FlatInterval') / 1000) * (1 + stat('PercentInterval')));
+  const stock = { ...state.stock };
+  if (manual) for (const [id] of costs) {
+    if (!profile.keep?.includes(id)) stock[id] = (stock[id] ?? 0) + (profile.stock[id] ?? 0);
+  }
+  if (!manual && !state.active && costs.every(([id]) => !(stock[id] > 0) && !(profile.stock[id] > 0))) return;
+  const stop = manual ? 7 * 86400 : settings.seconds;
+  const spend = passiveStock({ stock });
+  const events = [];
+  let missing = '';
+  if (manual || (state.active && state.recipe === action.recipe)) {
+    const first = state.active && state.recipe === action.recipe && state.first > 0 ? state.first : seconds;
+    for (let at = first; at <= stop; at += seconds) {
+      missing = spend(costs);
+      if (missing) break;
+      if (xp > 0) events.push({ at, xp });
+    }
+  }
+  return { events, limit: missing, seconds, forecast: stop, mill: true };
+}
+
+function evaluatePassiveExperience(action, profile, catalog, settings) {
+  const ranch = action.kind === 'Ranching';
+  const farm = action.kind === 'GrainMill' ? millExperience : farmExperience;
+  const result = ranch ? ranchExperience(action, profile, catalog, 86400) : farm(action, profile, catalog, settings, false);
+  if (!result) return;
+  const events = result.events.filter(event => event.at <= settings.seconds);
+  const xp = events.reduce((sum, event) => sum + event.xp, 0);
+  const activeHours = (events.at(-1)?.at ?? 0) / 3600;
+  let goal;
+  const planXp = target => {
+    if (!(target > 0)) return null;
+    goal ??= ranch ? result : farm(action, profile, catalog, settings, true);
+    if (!goal) return null;
+    let xp = 0;
+    let hours = (goal.events.at(-1)?.at ?? goal.forecast) / 3600;
+    for (const event of goal.events) {
+      xp += event.xp;
+      if (xp >= target) {
+        hours = event.at / 3600;
+        break;
+      }
+    }
+    const reason = goal.limit && !ranch ? '当前库存不足' : '在可估算时段内无法达到目标';
+    return { xp, hours, rate: hours > 0 ? xp / hours : 0, reaches: xp >= target, reason, limit: goal.limit };
+  };
+  return { action, passive: result, planXp, xp, activeHours, xpPerHour: xp / settings.hours,
+    activeXpPerHour: activeHours > 0 ? xp / activeHours : 0, limit: '', stockLimit: '',
+    knownXpPercent: 0, manualXpPercent: 0, seconds: result.seconds, drops: [], net: 0, flatXp: 0 };
 }
 
 function cookingPlan(action, profile, catalog, stat, bonus) {
@@ -146,7 +526,7 @@ function cookingPlan(action, profile, catalog, stat, bonus) {
       if (bound < phase.length || !Number.isFinite(phase.length)) return attempts + bound;
       attempts += phase.length;
       amount -= phase.length * phase[key];
-      if (amount <= 0) return attempts;
+      if (amount <= 0 && !whole) return attempts;
     }
     return attempts;
   }
@@ -155,12 +535,183 @@ function cookingPlan(action, profile, catalog, stat, bonus) {
 }
 
 function evaluate(action, profile, catalog, settings) {
+  const charges = settings.production ? [] : (profile.skillToolbelt?.[action.skill] ?? []).flatMap(({ id, quantity }) => {
+    const model = catalog.items[id]?.skillCharges;
+    return model && quantity > 0 && model.events.some(event => event.skill === action.skill)
+      ? [{ id, quantity, ...model }] : [];
+  });
+  return charges.length ? evaluateSkillCharges(action, profile, catalog, settings, charges) :
+    evaluateAction(action, profile, catalog, settings);
+}
+
+function chargeUsePerCycle(event, action, row) {
+  if (event.skill !== action.skill || (event.category && event.category !== action.category) ||
+      (event.recipe && event.recipe !== action.recipe) ||
+      (event.subcategory && event.subcategory !== action.subcategory) ||
+      (event.recipeType && event.recipeType !== action.recipeType)) return 0;
+  if (row.agility) return event.chance * (event.successful ? row.agility.successes : row.agility.attempts);
+  if (event.type === 'ArtisanPerformStep') {
+    const step = row.craftingSteps;
+    return step && step.steps >= (event.minSteps ?? 0) ? event.chance * expectedSteps(step.steps, step.skip) : 0;
+  }
+  if (row.thieving && event.successfulOnly) return event.chance * row.thieving.success;
+  if (row.thieving && event.failedOnly) return event.chance * (1 - row.thieving.success);
+  return event.chance * (row.wood?.hits ?? 1);
+}
+
+function evaluateSkillCharges(action, profile, catalog, settings, charges) {
+  const phases = [];
+  let remaining = charges;
+  while (true) {
+    const actor = { ...profile, skillPhaseModifiers: remaining.flatMap(row => row.modifiers) };
+    const row = evaluateAction(action, actor, catalog, { ...settings, production: true });
+    if (!row) break;
+    const usage = remaining.map(charge => ({
+      ...charge, rate: charge.events.reduce((total, event) => total + chargeUsePerCycle(event, action, row), 0)
+    }));
+    const runs = Math.min(Infinity, ...usage.filter(charge => charge.rate > 0).map(charge => charge.quantity / charge.rate));
+    phases.push({ row, usage, runs });
+    if (!Number.isFinite(runs)) break;
+    remaining = usage.map(charge => ({ ...charge, quantity: charge.quantity - runs * charge.rate })).filter(charge => charge.quantity > 1e-8);
+  }
+  if (!phases.length) return;
+
+  function simulate(seconds, runs = Infinity) {
+    const inventory = new Map();
+    const segments = [];
+    let cycles = 0;
+    let limit = '';
+    let elapsed = 0;
+    let xp = 0;
+    for (const phase of phases) {
+      const { row } = phase;
+      let count = Math.min(phase.runs, runs - cycles, (seconds - elapsed) / row.seconds);
+      for (const input of row.inputs) {
+        const key = (input.currency ? 'currency:' : 'item:') + input.id;
+        if (!inventory.has(key)) {
+          inventory.set(key, input.currency ? profile.currencies?.[input.id] ?? 0 :
+            profile.keep?.includes(input.id) ? 0 : profile.stock[input.id] ?? 0);
+        }
+        const available = inventory.get(key);
+        const batch = input.qty / (row.agility?.entries ?? 1);
+        const usable = available < batch ? 0 : input.quantity > 0 ? 1 + (available - batch) / input.quantity : Infinity;
+        if (usable < count) {
+          count = usable;
+          limit = input.id;
+        }
+      }
+      if (count > 0) {
+        segments.push({ ...phase, count });
+        for (const input of row.inputs) {
+          const key = (input.currency ? 'currency:' : 'item:') + input.id;
+          inventory.set(key, Math.max(0, inventory.get(key) - count * input.quantity));
+        }
+        cycles += count;
+        elapsed += count * row.seconds;
+        xp += count * row.xp;
+      }
+      if (limit || cycles >= runs || elapsed >= seconds) break;
+    }
+    return { cycles, elapsed, xp, limit, segments };
+  }
+  const scheduled = simulate(settings.seconds);
+  // Phase rates are expected values. Only completed cycles grant the projected rewards.
+  const cycles = Math.floor(scheduled.cycles + 1e-9);
+  if (!(cycles > 0)) return settings.itemProjection && scheduled.limit ? { limit: scheduled.limit, drops: [] } : undefined;
+  const completed = simulate(settings.seconds, cycles);
+  const inputs = new Map();
+  const drops = new Map();
+  const chargeSpent = new Map();
+  const directSources = new Map();
+  let direct = 0;
+  for (const { row, usage, count } of completed.segments) {
+    direct += row.direct * count;
+    for (const source of row.directSources ?? []) {
+      const key = JSON.stringify([source.source, source.target?.id]);
+      const total = directSources.get(key) ?? { ...source, value: 0 };
+      total.value += source.value * count;
+      directSources.set(key, total);
+    }
+    for (const input of row.inputs) {
+      const key = (input.currency ? 'currency:' : 'item:') + input.id;
+      const total = inputs.get(key) ?? { ...input, quantity: 0, value: 0 };
+      total.quantity += input.quantity * count;
+      total.value += input.value * count;
+      inputs.set(key, total);
+    }
+    for (const drop of row.drops) {
+      const key = JSON.stringify([drop.id, drop.source, drop.target?.id]);
+      const total = drops.get(key) ?? { ...drop, quantity: 0, value: 0 };
+      total.quantity += drop.quantity * count;
+      total.value += drop.value * count;
+      drops.set(key, total);
+    }
+    for (const charge of usage) chargeSpent.set(charge.id, (chargeSpent.get(charge.id) ?? 0) + charge.rate * count);
+  }
+  for (const { id, quantity } of charges) {
+    const spent = Math.min(quantity, chargeSpent.get(id) ?? 0);
+    if (!spent) continue;
+    const unitPrice = catalog.items[id]?.price ?? 0;
+    inputs.set('charge:' + id, { id, quantity: spent, unitPrice, value: spent * unitPrice });
+  }
+  const spent = [...inputs.values()];
+  const products = [...drops.values()].sort((a, b) => b.value - a.value);
+  const sales = products.reduce((sum, item) => sum + item.value, 0);
+  const goldCost = spent.reduce((sum, item) => sum + (item.currency ? item.value : 0), 0);
+  const materialCost = spent.reduce((sum, item) => sum + (item.currency ? 0 : item.value), 0);
+  const payout = direct + sales - goldCost;
+  const net = payout - materialCost;
+  const activeHours = completed.elapsed / 3600;
+  function plan(target, amount) {
+    if (!(target > 0)) return null;
+    const positive = phases.map(({ row }) => amount(row)).filter(value => value > 0);
+    if (!positive.length) return null;
+    const zeroRuns = phases.reduce((sum, phase) => amount(phase.row) > 0 ? sum : sum + phase.runs, 0);
+    const cap = Number.isFinite(zeroRuns) ? Math.ceil(target / Math.min(...positive) + zeroRuns) + 1 :
+      phases.reduce((sum, phase) => sum + (Number.isFinite(phase.runs) ? phase.runs : 0), 0);
+    const valueOf = result => result.segments.reduce((sum, segment) => sum + segment.count * amount(segment.row), 0);
+    const possible = Math.floor(simulate(Infinity, cap).cycles + 1e-9);
+    let low = 0;
+    let high = possible;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (valueOf(simulate(Infinity, middle)) >= target) high = middle;
+      else low = middle + 1;
+    }
+    const result = simulate(Infinity, low);
+    const value = valueOf(result);
+    const hours = result.elapsed / 3600;
+    return { hours, xp: value, rate: hours > 0 ? value / hours : 0, reaches: value >= target, limit: scheduled.limit };
+  }
+  return { ...phases[0].row, cycles, activeHours, xp: completed.xp, xpPerHour: completed.xp / settings.hours,
+    activeXpPerHour: completed.xp / activeHours, xpPerCycle: completed.xp / cycles, seconds: completed.elapsed / cycles,
+    limit: scheduled.limit, stockLimit: scheduled.limit, net, payout, direct,
+    directSources: directSources.size ? [...directSources.values()] : undefined,
+    goldCost, materialCost, sales, drops: products, inputs: spent, netPerHour: net / settings.hours,
+    payoutPerHour: payout / settings.hours, activeNetPerHour: net / activeHours,
+    risky: completed.segments.some(phase => phase.row.risky),
+    skillCharges: [...chargeSpent].map(([id, quantity]) => ({ id, quantity })),
+    planXp: amount => plan(amount, row => row.xp),
+    timeForItems: settings.itemProjection ? (id, quantity) => {
+      const estimate = plan(quantity, row => row.drops.filter(drop => drop.id === id && !drop.target)
+        .reduce((sum, drop) => sum + drop.quantity, 0));
+      return estimate?.reaches ? estimate.hours : null;
+    } : undefined };
+}
+
+function evaluateAction(action, profile, catalog, settings) {
   const { levels, stock, currencies, bonuses } = profile;
-  if (!unlocked(action, profile)) return;
+  if (!settings.productionPreview && !unlocked(action, profile)) return;
+  if (['Farming', 'Ranching', 'GrainMill'].includes(action.kind)) {
+    return settings.experience ? evaluatePassiveExperience(action, profile, catalog, settings) : undefined;
+  }
   const level = levels[action.skill];
+  const agility = action.kind === 'Agility' ? agilityPlan(action, profile, catalog) : null;
+  const hunting = action.kind === 'Hunting' ? huntingPlan(action, profile, catalog) : null;
+  if ((action.kind === 'Agility' && !agility) || (action.kind === 'Hunting' && !hunting)) return;
 
   const bonus = bonuses?.[action.skill] ?? {};
-  const stat = actionModifiers(action, profile, catalog);
+  const stat = hunting?.stat ?? actionModifiers(action, profile, catalog);
   const flatInterval = stat('FlatInterval') / 1000;
   const percentInterval = stat('PercentInterval');
   const manualInterval = 1 + (bonus.interval ?? 0) / 100;
@@ -192,7 +743,7 @@ function evaluate(action, profile, catalog, settings) {
     craftingSteps = { steps, skip };
     seconds *= expectedSteps(steps, skip);
   }
-  seconds = wood ? wood.interval * wood.hits : seconds * manualInterval;
+  seconds = wood ? wood.interval * wood.hits : (agility?.seconds ?? hunting?.seconds ?? seconds) * manualInterval;
   if (!Number.isFinite(seconds) || seconds <= 0) return;
   let cash = action.cash;
   let directSources;
@@ -203,9 +754,9 @@ function evaluate(action, profile, catalog, settings) {
     const prior = rewards.get(key);
     rewards.set(key, { id, source, target, doubling, quantity: (prior?.quantity ?? 0) + quantity });
   };
-  let success = 1;
+  let success = hunting?.success ?? 1;
   let thievingCompletion = 1;
-  let risky = false;
+  let risky = agility?.risky ?? false;
   const cooking = action.kind === 'Cooking' ? cookingPlan(action, profile, catalog, stat, bonus) : null;
   let thieving;
   if (action.kind === 'Thieving') {
@@ -295,7 +846,7 @@ function evaluate(action, profile, catalog, settings) {
         probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id))) * woodHits, 'hit');
     }
   }
-  let xpChance = thievingCompletion;
+  let xpChance = hunting?.success ?? thievingCompletion;
   let mining;
   if (action.kind === 'Mining') {
     const [id, qty, baseChance] = action.ore;
@@ -346,12 +897,26 @@ function evaluate(action, profile, catalog, settings) {
   }
 
   const outputMultiplier = (1 + probability(stat('DoublingChance'))) * (1 + (bonus.output ?? 0) / 100);
-  const ingredients = action.costs.map(([id, qty]) => [id, Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost', id))))]);
-  const currencyIngredients = action.currencyCosts.map(([id, qty]) => [id, Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost'))))]);
-  const preservation = probability(stat('PreservationChance'));
+  const entryFactor = agility?.entries ?? 1;
+  const ingredientRows = action.costs.map(([id, qty]) => [id,
+    Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost', id)))) * entryFactor]);
+  if (hunting?.trap) ingredientRows.push([hunting.trap, 1]);
+  const ingredients = sumIngredients(ingredientRows);
+  const currencyIngredients = sumIngredients(action.currencyCosts.map(([id, qty]) => [id,
+    Math.max(1, Math.trunc(qty * (1 + stat('PercentIngredientCost')))) * entryFactor]));
+  const preservation = agility?.preservation ?? probability(stat('PreservationChance'));
   let consumption = 1 - preservation;
-  let scheduled = Math.floor(settings.seconds / seconds);
-  let durationForCycles = cycles => cycles * seconds;
+  const overhead = (hunting?.firstExtra ?? 0) * manualInterval;
+  let scheduled = Math.floor(Math.max(0, settings.seconds - overhead) / seconds);
+  let durationForCycles = cycles => cycles > 0 ? overhead + cycles * seconds : 0;
+  if (hunting?.baitAttempts && hunting.baitSeconds > 0) {
+    const baitSeconds = hunting.baitSeconds * manualInterval;
+    const work = Math.max(0, settings.seconds - overhead);
+    const baited = Math.min(Math.floor(work / baitSeconds), hunting.baitAttempts);
+    scheduled = baited + (baited === hunting.baitAttempts ? Math.floor(Math.max(0, work - baited * baitSeconds) / seconds) : 0);
+    durationForCycles = cycles => cycles > 0 ? overhead + Math.min(hunting.baitAttempts, cycles) * baitSeconds +
+      Math.max(0, cycles - hunting.baitAttempts) * seconds : 0;
+  }
   if (brewing) {
     const { setup, bottling, batchSize } = brewing;
     const batchTime = setup + bottling * batchSize;
@@ -362,11 +927,18 @@ function evaluate(action, profile, catalog, settings) {
   }
   let stockCycles = Infinity;
   let stockLimit = '';
-  const possibleCycles = portions => !portions ? 0 : cooking ? cooking.attemptsFor(portions, 'consumes', true) :
-    consumption ? Math.floor(portions / consumption) : Infinity;
+  const possibleCycles = (available, quantity) => {
+    const firstBatch = quantity / entryFactor;
+    if (available < firstBatch) return 0;
+    const budget = (available - firstBatch) / quantity;
+    if (cooking) return 1 + cooking.attemptsFor(budget, 'consumes', true);
+    if (!consumption) return Infinity;
+    const prior = budget / consumption;
+    return 1 + Math.floor(prior + Math.abs(prior) * Number.EPSILON * 4);
+  };
   for (const [id, qty] of ingredients) {
     const available = profile.keep?.includes(id) ? 0 : stock[id] ?? 0;
-    const possible = possibleCycles(Math.floor(available / qty));
+    const possible = possibleCycles(available, qty);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
@@ -374,13 +946,13 @@ function evaluate(action, profile, catalog, settings) {
   }
   for (const [id, qty] of currencyIngredients) {
     const available = currencies[id] ?? 0;
-    const possible = possibleCycles(Math.floor(available / qty));
+    const possible = possibleCycles(available, qty);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
     }
   }
-  const cycles = Math.min(scheduled, stockCycles);
+  const cycles = settings.production ? 1 : Math.min(scheduled, stockCycles);
   const limit = stockCycles < scheduled ? stockLimit : '';
   if (cycles <= 0 || !Number.isFinite(cycles)) {
     if (settings.itemProjection && limit) return { limit, drops: [] };
@@ -426,7 +998,7 @@ function evaluate(action, profile, catalog, settings) {
     if (!(target > 0) || !(xpPerReward > 0)) return null;
     const rewards = target / xpPerReward;
     const needed = cooking ? cooking.attemptsFor(rewards, 'success') : rewards;
-    const attempts = Math.ceil(needed - needed * Number.EPSILON);
+    const attempts = Math.max(1, Math.ceil(needed - needed * Number.EPSILON));
     const available = Math.min(attempts, stockCycles);
     if (!Number.isFinite(available)) return null;
     const hours = durationForCycles(available) / 3600;
@@ -437,10 +1009,12 @@ function evaluate(action, profile, catalog, settings) {
     (action.knowledge + stat('FlatKnowledge')) * (1 + stat('PercentKnowledge')));
   const activeHours = durationForCycles(cycles) / 3600;
   const timeForItems = itemRates && ((id, amount) => {
+    if (amount === 0) return 0;
     const rate = itemRates.get(id);
-    if (!(rate > 0)) return null;
+    if (!(rate > 0) || !(amount > 0)) return null;
     const needed = amount / rate;
-    const attempts = Math.ceil(cooking ? cooking.attemptsFor(needed, 'success') : needed);
+    const expected = cooking ? cooking.attemptsFor(needed, 'success') : needed;
+    const attempts = Math.max(1, Math.ceil(expected - expected * Number.EPSILON));
     return attempts <= stockCycles && Number.isFinite(attempts) ? durationForCycles(attempts) / 3600 : null;
   });
   return {
@@ -451,26 +1025,42 @@ function evaluate(action, profile, catalog, settings) {
     activeNetPerHour: net / activeHours,
     xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
     activeXpPerHour: xpPerReward * effectiveCycles / activeHours, stockLimit, knownXpPercent, manualXpPercent, risky,
-    wood, mining, cooking, thieving, fishing, brewing, craftingSteps, preservation, consumption,
+    wood, mining, cooking, thieving, fishing, brewing, craftingSteps, agility, hunting, preservation, consumption,
     planXp, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
   };
 }
 
 function projectHourlyProduction(action, profile, catalog) {
+  if (['Farming', 'Ranching', 'GrainMill', 'Agility'].includes(action.kind)) return;
   if (!unlocked(action, profile)) return { locked: true };
   return evaluate(action, profile, catalog, { seconds: 3600, hours: 1, itemProjection: true });
 }
 
+function productionCycle(action, profile, catalog, { preview = false, requirementsOnly = false } = {}) {
+  const restrictions = preview || requirementsOnly ? productionRestrictions(action, profile) : [];
+  if (requirementsOnly) return { restrictions };
+  const row = evaluate(action, profile, catalog, { seconds: 3600, hours: 1, production: true, productionPreview: preview });
+  return row && { ...row, restrictions };
+}
+
+function sumIngredients(rows) {
+  const quantities = new Map();
+  for (const [id, quantity] of rows) quantities.set(id, (quantities.get(id) ?? 0) + quantity);
+  return [...quantities];
+}
+
 function rank(catalog, profile, options) {
   const { hours, offlineCap, sell, sellSpecial, metric, keptDrops } = options;
+  if (!Number.isFinite(hours) || hours <= 0) return [];
   const seconds = Math.min(hours, offlineCap || Infinity) * 3600;
   const results = [];
   const experience = metric === 'xp';
+  const settings = { seconds, sell, sellSpecial, hours, experience, keptDrops };
   for (const action of experience ? catalog.xpActions : catalog.actions) {
-    const result = evaluate(action, profile, catalog, { seconds, sell, sellSpecial, hours, experience, keptDrops });
-    if (result && result[metric] > 0) results.push(result);
+    const result = evaluate(action, profile, catalog, settings);
+    if (result && (result[metric] > 0 || (experience && result.passive))) results.push(result);
   }
   return results.sort((a, b) => b[metric] - a[metric] || b.net - a.net || a.action.id.localeCompare(b.action.id));
 }
 
-if (typeof module !== 'undefined') module.exports = { rank, actionModifiers, projectHourlyProduction };
+if (typeof module !== 'undefined') module.exports = { rank, actionModifiers, projectHourlyProduction, productionCycle };
