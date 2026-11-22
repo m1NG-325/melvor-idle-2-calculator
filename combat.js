@@ -430,6 +430,10 @@ function localizeCombat() {
 
 function updateCombat(character) {
   if (!combatView) return;
+  const equipment = character?.combat?.equipment;
+  if (equipment?.some(row => !isCombatEquipment(row))) {
+    character = { ...character, combat: { ...character.combat, equipment: equipment.filter(isCombatEquipment) } };
+  }
   if (character?.characterId && character.date && character.combat?.totals) {
     const entry = combatView.samples.get(character.characterId);
     const { date, combat, levels, purchases, astrologyNodes, unlockedPets, ranks } = character;
@@ -451,6 +455,12 @@ function renderCombatLoadout(attributes) {
       const item = gameName(items[entry.id]) ?? entry.id;
       const quantity = entry.quantity > 1 || (equipment && entry.slot === 'Ammo') ? ' × ' + fullNumber(entry.quantity) : '';
       rows.push(slot + ' · ' + item + quantity);
+    }
+    if (equipment) {
+      for (const [id, item] of combatOccupiedSlots(model, entries)) {
+        const slot = gameName(slots?.[id]) ?? id;
+        rows.push(slot + ' · ' + t('由{item}占用', { item: gameName(items[item]) ?? item }));
+      }
     }
   }
   for (const [title, id] of [['所选法术', state?.spell], ['所选附魔', state?.imbuement], ['已激活附魔', state?.activeImbuement]]) {

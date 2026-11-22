@@ -254,13 +254,14 @@ function showSkillTrainingPlan(container, status, result, message, { hours, goal
   for (const id of new Set([...loadout, ...current].map(item => item.slot))) {
     const equipped = loadout.find(item => item.slot === id);
     const slot = create('div');
-    const amount = equipped && catalog.items[equipped.id]?.skillTool?.consumable && equipped.quantity > 1
-      ? ' × ' + fullNumber(equipped.quantity) : '';
     slot.append(create('dt', gameName(catalog.combatSlots[id]) ?? id),
-      create('dd', equipped ? name(equipped.id) + amount : t('卸下')));
+      trainingGearValue(trainingGearName(equipped, name), trainingGearName(current.find(item => item.slot === id), name)));
     gear.append(slot);
   }
-  if (gear.childElementCount) children.push(gear);
+  if (gear.childElementCount) {
+    if (!preparation) children.push(create('p', t('方案会使用身上和仓库里已有的装备。'), 'muted'));
+    children.push(gear);
+  }
   else children.push(create('p', t('本方案无需额外装备。'), 'muted'));
   const details = renderTrainingPreparation(container, preparation, catalog, true);
   if (details) {

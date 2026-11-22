@@ -509,6 +509,9 @@ summary.shop-row::marker { color: var(--aqua); }
 .combat-training-gear div { display: flex; justify-content: space-between; gap: .5rem; padding: .25rem .4rem; background: var(--surface); border-radius: 5px; }
 .combat-training-gear dt { color: var(--muted); }
 .combat-training-gear dd { margin: 0; text-align: right; }
+.combat-training-gear-line { display: flex; align-items: baseline; justify-content: flex-end; flex-wrap: wrap; gap: 0 .4rem; }
+.combat-training-gear-line > small { white-space: nowrap; }
+.combat-training-gear-line:last-child > small { color: var(--aqua); }
 .combat-xp-note { margin: .4rem 0 0; font-size: .8rem; }
 .xp-goal-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr)); gap: .5rem 1rem; margin: 0 0 .6rem; }
 .xp-goal-metrics dt { color: var(--muted); font-size: .86rem; }

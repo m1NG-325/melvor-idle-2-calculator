@@ -3,8 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
-const GOLD = 'MelvorBase:GoldPieces';
-const localId = id => id?.replace(/^MelvorBase:/, '');
+const { GOLD, localId } = require('./game-ids.cjs');
 
 function findSteamGame() {
   const query = spawnSync('reg.exe', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath'], {
@@ -31,7 +30,7 @@ function findSteamGame() {
   throw new Error('未找到 Melvor Idle 2。请将含 Melvor2.exe 的游戏文件夹拖到 Start-GP-Calculator.cmd 上。');
 }
 
-function readPackage(executable, { onChecksumMismatch } = {}) {
+function readPackedFile(executable, resourcePath, { onChecksumMismatch } = {}) {
   const handle = fs.openSync(executable, 'r');
   const size = fs.fstatSync(handle).size;
   function read(offset, length) {
@@ -80,7 +79,7 @@ function readPackage(executable, { onChecksumMismatch } = {}) {
       if (nameLength < 1 || cursor + nameLength + 36 > directory.length) throw new Error('游戏数据目录不完整');
       const name = directory.toString('utf8', cursor, cursor + nameLength).replace(/\0+$/, '');
       cursor += nameLength;
-      if (name.replace(/^res:\/\//, '') === 'Data/Packages/MelvorBase.json') {
+      if (name.replace(/^res:\/\//, '') === resourcePath) {
         const offset = dataStart + u64(directory, cursor);
         const length = u64(directory, cursor + 8);
         if (offset < dataStart || offset + length > directoryStart || length > 64 * 1024 * 1024 ||
@@ -90,14 +89,19 @@ function readPackage(executable, { onChecksumMismatch } = {}) {
         const matched = digest.equals(directory.subarray(cursor + 16, cursor + 32));
         if (!matched && !onChecksumMismatch) throw new Error('物品与配方数据校验失败');
         if (!matched) onChecksumMismatch();
-        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        return bytes;
       }
       cursor += 36;
     }
-    throw new Error('数据包内找不到 MelvorBase.json');
+    throw new Error('数据包内找不到 ' + path.posix.basename(resourcePath));
   } finally {
     fs.closeSync(handle);
   }
+}
+
+function readPackage(executable, options) {
+  const bytes = readPackedFile(executable, 'Data/Packages/MelvorBase.json', options);
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 }
 
 function getBuild(gameDirectory) {
@@ -107,4 +111,4 @@ function getBuild(gameDirectory) {
     : '未知';
 }
 
-module.exports = { findSteamGame, GOLD, getBuild, localId, readPackage };
+module.exports = { findSteamGame, GOLD, getBuild, localId, readPackage, readPackedFile };

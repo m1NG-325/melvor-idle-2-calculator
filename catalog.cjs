@@ -478,6 +478,7 @@ function makeCatalog(data) {
       if (!equipment && !toolTypes.has(tool?.FitsInSlot)) return [];
       return [[item.Id, { stats: equipment?.Stats, weapon: capabilities['MelvorBase:Weapon'],
         slotType: localId(equipment?.Type), occupies: (equipment?.OccupiesSlots ?? []).map(localId),
+        stackable: Boolean(equipment?.CanEquipQuantity),
         requirements: requirements(equipment?.Requirements), specialAttacks: Boolean(equipment?.Attacks?.length),
         ammoType: equipment?.AmmoType, bonuses: equipment?.Bonuses?.Component ?? tool?.Bonuses?.Component,
         xpModifiers: persistentModifiers(equipment?.Bonuses ?? tool?.Bonuses) }]];

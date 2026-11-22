@@ -1,6 +1,7 @@
 'use strict';
 
 const byId = id => document.getElementById(id);
+const webMode = globalThis.calculatorWeb;
 const gpOfflineHours = 24;
 let numbers;
 let decimals;
@@ -21,7 +22,7 @@ let updateMessage;
 let reportedBrowserError = false;
 
 function reportBrowserError(event) {
-  if (reportedBrowserError) return;
+  if (webMode || reportedBrowserError) return;
   reportedBrowserError = true;
   const script = event?.filename?.split('/').pop();
   const source = ['language.js', 'rank.js', 'production.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js', 'access-poll.js'].includes(script)
@@ -77,6 +78,7 @@ function initIdleDurations() {
 }
 
 async function get(route) {
+  if (webMode) return webMode.get(route);
   const response = await fetch(route);
   const body = await response.json();
   if (!response.ok) throw new Error(t(body.error));
@@ -416,6 +418,7 @@ function limitName(row) {
 }
 
 function renderSaveRefreshStatus() {
+  if (webMode) return webMode.renderStatus();
   const status = byId('saveRefreshStatus');
   status.hidden = byId('save').value === '';
   status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' : '存档每 15 秒刷新');
@@ -454,12 +457,13 @@ async function loadProfile(automatic = false) {
   }
 }
 
-async function refreshSaves() {
+async function refreshSaves(preferredCharacter) {
   if (savesRefreshing) return;
   savesRefreshing = true;
   const select = byId('save');
   const selectedId = select.options.length ? (select.value === '' ? 'manual' : select.selectedOptions[0]?.dataset.characterId) :
     preferences.character;
+  const target = typeof preferredCharacter === 'string' ? preferredCharacter : selectedId;
   try {
     const saves = await get('saves');
     select.replaceChildren(...saves.map(({ index, name, unknown, characterId }) => {
@@ -472,10 +476,10 @@ async function refreshSaves() {
       if (characterId) option.dataset.characterId = characterId;
       return option;
     }), new Option(t('手动设置'), ''));
-    const previous = selectedId && Array.from(select.options).find(option => option.dataset.characterId === selectedId);
-    if (selectedId === 'manual') select.value = '';
+    const previous = target && Array.from(select.options).find(option => option.dataset.characterId === target);
+    if (target === 'manual') select.value = '';
     else if (previous) select.value = previous.value;
-    else if (selectedId) select.value = '';
+    else if (target) select.value = '';
     else select.value = Array.from(select.options).find(option => !option.disabled).value;
     await loadProfile();
   } catch (error) {
@@ -632,7 +636,7 @@ async function init() {
     localizeControls();
     queuePreferences();
   });
-  byId('installUpdate').addEventListener('click', startUpdate);
+  byId('installUpdate')?.addEventListener('click', startUpdate);
   window.addEventListener('hashchange', () => {
     showPage();
     if (!byId('questsPage').hidden) renderQuest();
@@ -643,8 +647,10 @@ async function init() {
   for (const event of ['input', 'change', 'toggle']) document.addEventListener(event, queuePreferences, true);
   window.addEventListener('pagehide', savePreferences);
   localizeControls();
-  initAccessPoll();
-  loadRuntimeStatus();
+  if (!webMode) {
+    initAccessPoll();
+    loadRuntimeStatus();
+  }
   try {
     catalog = await get('catalog');
     initStatistics();
@@ -656,6 +662,7 @@ async function init() {
       initShop(shop, catalog.items);
       if (profile) updateShop(profile);
     }).catch(error => {
+      if (webMode) throw error;
       byId('shopStatus').textContent = t('商店数据读取失败。请重新启动计算器。') + ' ' + t(error.message);
     });
     const filter = byId('filter');
@@ -689,14 +696,18 @@ async function init() {
     byId('setItem').addEventListener('click', editItem);
     byId('confirmAction').addEventListener('click', () => setAction(true));
     byId('excludeAction').addEventListener('click', () => setAction(false));
+    if (webMode) await shopLoad;
     await refreshSaves();
-    await shopLoad;
+    if (!webMode) await shopLoad;
     preferencesReady = true;
     renderRuntimeStatus();
-    setInterval(() => loadProfile(true), 15000);
+    if (webMode) webMode.enableImport();
+    else setInterval(() => loadProfile(true), 15000);
   } catch (error) {
-    byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + t(error.message);
+    if (webMode) webMode.initFailed();
+    else byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + t(error.message);
   }
 }
 
-init();
+if (webMode) void init().catch(() => webMode.initFailed());
+else init();

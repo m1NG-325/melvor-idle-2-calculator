@@ -131,7 +131,7 @@ function savePreferences() {
   });
   if (settings === lastSettings) return settingsRequest;
   lastSettings = settings;
-  settingsRequest = settingsRequest.then(() => fetch('preferences', {
+  settingsRequest = settingsRequest.then(() => webMode ? webMode.savePreferences(settings) : fetch('preferences', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: settings, keepalive: new Blob([settings]).size < 60 * 1024
   })).then(response => {
@@ -140,7 +140,7 @@ function savePreferences() {
     return true;
   }).catch(() => {
     if (lastSettings === settings) lastSettings = '';
-    byId('settingsNotice').textContent = t('无法保存工具设置。请检查工具目录的写入权限。');
+    byId('settingsNotice').textContent = t(webMode ? '浏览器无法保存偏好设置。' : '无法保存工具设置。请检查工具目录的写入权限。');
     byId('settingsNotice').hidden = false;
     return false;
   });

@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { readPackage } = require('./game-data.cjs');
+const { readPackage, readPackedFile } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
 
@@ -19,8 +19,40 @@ function originalPackage(game, build) {
 }
 
 const hasChinese = text => /\p{Script=Han}/u.test(text ?? '');
+const displayText = value => typeof value === 'string' ? value : value?.Singular ?? value?.Message;
 
-function addGameLabels(game, build, catalog, shop, useAlternate = true) {
+function readChineseNames(executable) {
+  const source = readPackedFile(executable, 'Locale/zh_CN.po').toString('utf8');
+  const names = new Map();
+  for (const entry of source.split(/\r?\n\s*\r?\n/)) {
+    if (/^#,.*\bfuzzy\b/m.test(entry)) continue;
+    const fields = {};
+    let key;
+    for (const line of entry.split(/\r?\n/)) {
+      const field = /^(msgctxt|msgid|msgid_plural|msgstr(?:\[\d+\])?)\s+(".*")$/.exec(line);
+      const continuation = /^(".*")$/.exec(line);
+      try {
+        if (field) {
+          key = field[1];
+          fields[key] = JSON.parse(field[2]);
+        } else if (key && continuation) {
+          fields[key] += JSON.parse(continuation[1]);
+        }
+      } catch {
+        key = null;
+      }
+    }
+    const { msgid, msgctxt } = fields;
+    const name = fields.msgstr || fields['msgstr[0]'];
+    if (!msgid || !hasChinese(name)) continue;
+    const priority = (entry.includes('Data/Packages/MelvorBase.json') ? 3 : 0) +
+      (!msgctxt ? 2 : msgctxt === 'PluralName' ? 1 : 0);
+    if (priority > (names.get(msgid)?.priority ?? -1)) names.set(msgid, { name, priority });
+  }
+  return names;
+}
+
+function addGameLabels(game, build, catalog, shop, useAlternate = true, executable = path.join(game, 'Melvor2.exe')) {
   const chinese = hasChinese(catalog.items.NormalLog?.name);
   let alternate;
   if (useAlternate && chinese) {
@@ -49,12 +81,31 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true) {
       // Only names are taken from the optional second package.
     }
   }
-  const locale = chinese ? 'zh' : 'en';
-  const otherLocale = chinese ? 'en' : 'zh';
-  const label = (original, translated, id) => {
-    const names = { [locale]: original };
-    if (translated) names[otherLocale] = translated;
-    else if (chinese && hasChinese(original)) names.en = humanize(id);
+  let chineseNames;
+  try {
+    chineseNames = readChineseNames(executable);
+  } catch {
+    // Some game builds omit the Chinese locale. Keep the names that are available.
+  }
+  function officialChinese(original) {
+    const exact = chineseNames?.get(original)?.name;
+    if (exact || !original?.includes(' · ')) return exact;
+    const parts = original.split(' · ');
+    const translated = parts.map(part => chineseNames?.get(part)?.name);
+    if (translated.some(Boolean)) return parts.map((part, i) => translated[i] ?? part).join(' · ');
+  }
+  const label = (source, alternate, id) => {
+    const original = displayText(source);
+    const translated = displayText(alternate);
+    const names = {};
+    if (hasChinese(original)) {
+      names.zh = original;
+      names.en = translated && !hasChinese(translated) ? translated : humanize(id);
+    } else {
+      names.en = original;
+      const localized = hasChinese(translated) ? translated : officialChinese(original);
+      if (localized) names.zh = localized;
+    }
     return names;
   };
   const otherActions = new Map((alternatives.catalog?.xpActions ?? []).map(action => [action.id, action]));

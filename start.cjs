@@ -82,7 +82,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   catalog.build = standalone ? '未知' : getBuild(game);
   catalog.dataSource = standalone ? 'selected-file' : 'installed';
   catalog.checksumMismatch = checksumMismatch;
-  addGameLabels(game, catalog.build, catalog, shop, !standalone);
+  addGameLabels(game, catalog.build, catalog, shop, !standalone, standalone ? source : path.join(game, 'Melvor2.exe'));
   const constellations = catalog.xpActions.filter(action => action.kind === 'Astrology');
   log.record('game_data_loaded', { build: /^\d+$/.test(catalog.build) ? catalog.build : 'unknown',
     gpActions: catalog.actions.length, xpActions: catalog.xpActions.length, source: catalog.dataSource, checksumMismatch });
@@ -216,7 +216,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       const saveFile = character ? savesByCharacter.get(character) : saves[Number(legacyProfile)];
       if (saveFile) {
         const data = readProfile(saveFile, catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
-          (component, skill) => log.record('save_component_unreadable', { component, skill }));
+          (component, skill) => log.record('save_component_unreadable', { component, skill }), catalog.items);
         if (character && data.characterId !== character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
         log.record('profile_loaded');
         return json(response, data);

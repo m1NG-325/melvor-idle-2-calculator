@@ -1,6 +1,15 @@
 const baseCombatId = id => id?.replace(/^MelvorBase:/, '');
 const combatProbability = value => Math.max(0, Math.min(1, value));
 
+function isCombatEquipment(row) {
+  return !(row.quantity < 0);
+}
+
+function combatOccupiedSlots(model, equipment) {
+  return new Map((equipment ?? []).flatMap(({ id, slot }) => (model?.items[id]?.occupies ?? [])
+    .filter(occupied => occupied !== slot).map(occupied => [occupied, id])));
+}
+
 function combatAttributes(model, character, target, area, spells, foodRules = {}, { quick = false } = {}) {
   const saved = character?.combat;
   if (!saved?.equipment) return null;
@@ -308,7 +317,11 @@ function combatSupplyEstimate(rule, id, context) {
     const data = trigger?.Data;
     if (!data || data.Attack || data.TotalAttackCount || data.TotalHitCount || data.TotalMissCount) return null;
     let fraction = 1;
-    for (const condition of data.Conditions ?? []) {
+    const conditions = data.Conditions ?? [];
+    const areaMatches = params => (!params.Area || area?.id === baseCombatId(params.Area)) &&
+      (!params.Category || area?.category === baseCombatId(params.Category));
+    for (let index = 0; index < conditions.length; index++) {
+      const condition = conditions[index];
       if (condition.Data?.IsOr) return null;
       const params = condition.Data;
       switch (baseCombatId(condition.Type)) {
@@ -320,10 +333,16 @@ function combatSupplyEstimate(rule, id, context) {
         case 'CharacterUsingCombatStyle':
           if (attributes.style !== baseCombatId(params.Style)) return 0;
           break;
-        case 'CombatInArea':
-          if ((params.Area && area?.id !== baseCombatId(params.Area)) ||
-              (params.Category && area?.category !== baseCombatId(params.Category))) return 0;
+        case 'CombatInArea': {
+          let matches = areaMatches(params);
+          while (conditions[index + 1]?.Data?.IsOr) {
+            const alternative = conditions[++index];
+            if (baseCombatId(alternative.Type) !== 'CombatInArea') return null;
+            matches ||= areaMatches(alternative.Data);
+          }
+          if (!matches) return 0;
           break;
+        }
         case 'CharacterHasWard':
           if (!attributes.enemy || params.Component?.Component !== 'Enemy' || params.MinWard != null || params.MaxWard != null) return null;
           fraction *= attributes.enemy.wardFraction;
@@ -337,6 +356,9 @@ function combatSupplyEstimate(rule, id, context) {
     let rate;
     if (type === 'CharacterFightStarted') rate = killsPerHour;
     else if (type === 'EnemyKilled') rate = !data.Enemy || target?.id === baseCombatId(data.Enemy) ? killsPerHour : 0;
+    else if (type === 'CharacterDefended' && actor === 'Player' && enemyTurns != null) {
+      rate = enemyTurns * (data.WasHit == null ? 1 : data.WasHit ? attributes.enemy.chance : 1 - attributes.enemy.chance);
+    }
     else if (type === 'FoodEaten' && !data.Item && data.IsAutoEat !== false && enemyTurns != null) {
       rate = combat.food ? enemyTurns * attributes.enemy.damagePerTurn / Math.max(1, attributes.maxHp * .75) : 0;
     }

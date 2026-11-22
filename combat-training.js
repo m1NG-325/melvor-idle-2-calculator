@@ -25,20 +25,22 @@ function trainingRequirementsMet(groups, character, style, catalogue) {
 
 function trainingEquipment(catalogue, character, recipes = new Map()) {
   const model = catalogue.combatModel;
-  const worn = new Map(character.combat.equipment.map(row => [row.slot, row]));
+  const worn = new Map(character.combat.equipment.filter(isCombatEquipment).map(row => [row.slot, row]));
   const owned = { ...character.stock, DefaultWeapon: 1 };
   for (const { id, quantity } of worn.values()) owned[id] = (owned[id] ?? 0) + quantity;
   const slots = model.equipmentSlots.filter(slot => worn.has(slot.id) || trainingRequirementsMet([slot.requirements], character));
   const available = { ...owned };
-  for (const id of recipes.keys()) {
-    const copies = slots.filter(slot => slot.type === model.items[id].slotType).length;
+  for (const [id, sources] of recipes) {
+    const item = model.items[id];
+    const copies = item.stackable ? Math.max(...sources.map(source => source.quantity)) :
+      slots.filter(slot => slot.type === item.slotType).length;
     available[id] = Math.max(available[id] ?? 0, copies);
   }
   const options = new Map(slots.map(slot => [slot.id, Object.entries(available).flatMap(([id, quantity]) => {
     const item = model.items[id];
     if (!(quantity > 0) || item?.slotType !== slot.type ||
         (worn.get(slot.id)?.id !== id && !trainingRequirementsMet([item.requirements], character))) return [];
-    return [{ slot: slot.id, id, quantity: slot.id === 'Ammo' ? quantity : 1 }];
+    return [{ slot: slot.id, id, quantity: item.stackable || slot.id === 'Ammo' ? quantity : 1 }];
   })]));
   function equip(equipment, slot, item) {
     const occupied = model.items[item?.id]?.occupies ?? [];
@@ -50,6 +52,13 @@ function trainingEquipment(catalogue, character, recipes = new Map()) {
     return used + item.quantity <= available[item.id] ? [...next, item] : null;
   }
   return { options, equip, owned };
+}
+
+function trainingAmmoChoices(weapon, model, options) {
+  const item = model.items[weapon.id];
+  const required = item.weapon.RequiredAmmoType;
+  if (!required || (item.ammoType === required && item.occupies?.includes('Ammo'))) return [null];
+  return (options.get('Ammo') ?? []).filter(row => model.items[row.id].ammoType === required);
 }
 
 function trainingCraftRecipes(catalogue, character,
@@ -171,7 +180,7 @@ function updateCombatTraining() {
     return;
   }
   craftSection.hidden = false;
-  const scope = JSON.stringify([skill, hours, character.characterId]);
+  const scope = JSON.stringify([skill, hours, character.characterId, character.combat.equipment]);
   const key = JSON.stringify([scope, combatTrainingInputs(character)]);
   if (combatTraining.key !== key && !(combatTraining.pending && combatTraining.scope === scope)) {
     const previous = combatTraining.scope === scope ? combatTraining.summary : null;
@@ -226,7 +235,7 @@ function updateCombatTraining() {
     !owned ? '当前存档没有估出可用的练级方案。请检查可穿戴装备、补给或屠杀任务。' : null;
   const craftMessage = !current ? '正在比较当前等级可制造的装备…' : current.craftFailed ? '暂时无法计算练级方案。' :
     !expanded ? '当前未找到可用的制造配装方案。' :
-      expanded === owned ? '可制造装备没有更快的方案，沿用现有配装，无需制作。' : null;
+      expanded === owned ? '用已拥有的装备就能达到最佳收益，无需制作。' : null;
   renderTrainingPlan(result, status, owned, ownedMessage, character, skill);
   renderTrainingPlan(craftResult, craftStatus, current?.craftFailed || expanded === owned ? null : expanded, craftMessage, character, skill);
 }
@@ -236,6 +245,22 @@ function renderTrainingPlan(container, status, plan, message, character, skill) 
   if (message && status.textContent !== t(message)) status.textContent = t(message);
   container.hidden = !plan;
   if (plan) renderCombatTraining(container, plan, character, skill);
+}
+
+function trainingGearValue(recommended, current) {
+  if (recommended === current) return create('dd', recommended);
+  const value = create('dd');
+  for (const [label, text] of [['当前装备', current], ['推荐装备', recommended]]) {
+    const line = create('span', undefined, 'combat-training-gear-line');
+    line.append(create('small', t(label)), create('span', text));
+    value.append(line);
+  }
+  return value;
+}
+
+function trainingGearName(item, name) {
+  if (!item) return t('空');
+  return name(item.id) + (item.quantity > 1 || item.slot === 'Ammo' ? ' × ' + fullNumber(item.quantity) : '');
 }
 
 function syncTrainingChildren(container, children) {
@@ -307,13 +332,20 @@ function renderCombatTraining(container, result, character, skill) {
     box.append(metric);
   }
   const gear = create('dl', undefined, 'combat-training-gear');
-  const worn = new Map(character.combat.equipment.map(row => [row.slot, row.id]));
+  const worn = new Map(character.combat.equipment.map(row => [row.slot, row]));
+  const occupied = combatOccupiedSlots(model, combat.equipment);
+  const wornOccupied = combatOccupiedSlots(model, character.combat.equipment);
+  const slotName = (item, occupying) => occupying ? t('由{item}占用', { item: name(occupying) }) : trainingGearName(item, name);
   for (const slot of model.equipmentSlots) {
     const equipped = combat.equipment.find(row => row.slot === slot.id);
-    if (!equipped && !worn.has(slot.id)) continue;
+    const occupiedBy = occupied.get(slot.id);
+    const wearing = worn.get(slot.id);
+    const wornOccupiedBy = wornOccupied.get(slot.id);
+    if (!equipped && !occupiedBy && !wearing && !wornOccupiedBy) continue;
     const label = gameName(catalog.combatSlots[slot.id]) ?? slot.id;
     const row = create('div');
-    row.append(create('dt', label), create('dd', equipped ? name(equipped.id) : t('卸下')));
+    row.append(create('dt', label),
+      trainingGearValue(slotName(equipped, occupiedBy), slotName(wearing, wornOccupiedBy)));
     gear.append(row);
   }
   const setup = [
@@ -332,7 +364,9 @@ function renderCombatTraining(container, result, character, skill) {
   const costs = estimate.costs.filter(cost => cost.id !== 'Hitpoints' && cost.quantity > 0)
     .map(cost => combatSupplyName(cost.id) + ' × ' + fullNumber(Math.ceil(cost.quantity)));
   const preparation = result.preparation;
-  const children = [create('h4', gameName(enemy.target) + ' · ' + gameName(enemy.area), 'combat-training-target'), box, gear];
+  const children = [create('h4', gameName(enemy.target) + ' · ' + gameName(enemy.area), 'combat-training-target'), box];
+  if (!preparation) children.push(create('p', t('方案会使用身上和仓库里已有的装备。'), 'muted'));
+  children.push(gear);
   const details = renderTrainingPreparation(container, preparation, catalog);
   if (details) children.push(details);
   if (costs.length) children.push(create('p', t('预计补给用量 {supplies}', { supplies: costs.join(' · ') }), 'muted'));
@@ -350,7 +384,7 @@ function renderCombatTraining(container, result, character, skill) {
   }
   children.push(create('p', t(preparation
     ? '先备齐材料并完成制作，再按所选挂机时长估算。制作时间不计入战斗时长，弹药和符文仍按库存。'
-    : '按当前库存与战斗时长比较候选方案，速率为估算值。'), 'muted'));
+    : '按所选战斗时长估算收益。'), 'muted'));
   syncTrainingChildren(container, children);
 }
 
@@ -417,7 +451,11 @@ function trainingSupplies(context, rules) {
     if (!projection || attributes.enemy.maxHit >= Math.min(initialHp, Math.max(1, projection.threshold))) return null;
     add(food, character.stock[food], projection);
   }
+  const equippedSupplies = new Map();
   for (const { id, quantity } of [...equipment, ...(toolbelt ?? [])]) {
+    equippedSupplies.set(id, (equippedSupplies.get(id) ?? 0) + Math.max(0, quantity));
+  }
+  for (const [id, quantity] of equippedSupplies) {
     const rule = rules[id];
     if (rule?.kind === 'ammo' || rule?.kind === 'charged') {
       if (!add(id, quantity, combatSupplyEstimate(rule, id, context), rule.kind === 'charged')) return null;
@@ -499,7 +537,7 @@ function* combatTrainingSearch(catalogue, character, skill, hours, cap, { craft 
     const data = model.items[weapon.id].weapon;
     if (!data) continue;
     const type = baseCombatId(data.Type);
-    const ammo = data.RequiredAmmoType ? (options.get('Ammo') ?? []).filter(row => model.items[row.id].ammoType === data.RequiredAmmoType) : [null];
+    const ammo = trainingAmmoChoices(weapon, model, options);
     const held = equip(original.equipment, 'Weapon', weapon);
     if (!held) continue;
     for (const stance of model.weaponTypes[type]?.stances ?? []) {
