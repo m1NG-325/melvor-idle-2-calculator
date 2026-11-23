@@ -14,7 +14,7 @@ function questName(ref) {
 }
 
 function questItem(id) {
-  return gameName(catalog.items[id]) ?? id;
+  return gameName(catalog.items[id]) ?? t('未知物品');
 }
 
 function questSkill(id) {
@@ -78,14 +78,15 @@ function questSourcesFor(item, skill) {
 function questSourceLabel(where) {
   const prefix = {
     open: '打开 {name}', reward: '任务奖励 · {name}', purchase: '购买 · {name}',
-    drop: '掉落 · {name}', clear: '通关奖励 · {name}', modifierDrop: '需额外掉落加成 · {name}'
+    drop: '掉落 · {name}', clear: '通关奖励 · {name}', modifierDrop: '需额外掉落加成 · {name}',
+    upgrade: '升级 · {name}'
   }[where.kind];
   const path = questSourcePath(where);
   return prefix ? t(prefix, { name: path }) : path;
 }
 
 function questSourceStage(quest, step) {
-  const name = gameName(questGuide.quests.find(row => row.id === quest)) ?? quest;
+  const name = gameName(questGuide.quests.find(row => row.id === quest)) ?? t('未知名称');
   return name && Number.isInteger(step) ? t('{name} · 第 {step} 步', { name, step: step + 1 }) : name;
 }
 
@@ -99,31 +100,31 @@ function questSourceNotes(where, restrictions) {
   ].filter(Boolean);
 }
 
-function questSourceRequirementMet(req) {
+function questSourceRequirementMet(req, character = profile) {
   switch (req.type) {
     case 'Level':
-      return meetsShopCondition(req, profile);
+      return meetsShopCondition(req, character);
     case 'ShopPurchase':
-      return meetsShopCondition({ ...req, id: req.purchase }, profile);
+      return meetsShopCondition({ ...req, id: req.purchase }, character);
     case 'DungeonStatistic':
     case 'SlayerMasterStatistic':
-      return meetsShopCondition({ ...req, id: req.statisticTarget, amount: req.statisticValue }, profile);
+      return meetsShopCondition({ ...req, id: req.statisticTarget, amount: req.statisticValue }, character);
     case 'QuestComplete':
-      return profile.questProgress ? profile.questProgress[req.quest]?.status === 3 : null;
+      return character.questProgress ? character.questProgress[req.quest]?.status === 3 : null;
     case 'QuestStepActive':
     case 'QuestTaskGoalActive':
-      return profile.questProgress ? meetsRequirements([req], profile) : null;
+      return character.questProgress ? meetsRequirements([req], character) : null;
     case 'ToolbeltItemEquipped':
-      return profile.equipped?.[req.skill]?.includes(req.item) ?? null;
+      return character.equipped?.[req.skill]?.includes(req.item) ?? null;
     case 'MasteryGuildRank':
-      return profile.ranks?.[req.skill]?.includes(req.rank) ?? null;
+      return character.ranks?.[req.skill]?.includes(req.rank) ?? null;
     case 'AstrologyMajorNodeUnlocked':
     case 'AstrologyMinorNodeUnlocked':
-      return profile.astrologyNodes?.includes(req.node) ?? null;
+      return character.astrologyNodes?.includes(req.node) ?? null;
     case 'AgilityCourseStatistic':
     case 'AstrologyEventStatistic':
     case 'ItemStatistic':
-      return profile.recipeStatistics?.[req.statistic] ? meetsRequirements([req], profile) : null;
+      return character.recipeStatistics?.[req.statistic] ? meetsRequirements([req], character) : null;
     default:
       return null;
   }
@@ -178,12 +179,12 @@ function questProduction(item, where, remaining, projections) {
     .reduce((sum, row) => sum + row.quantity, 0);
   const limit = result.limit && (action.currencyCosts?.some(([id]) => id === result.limit)
     ? shopCurrencyName(result.limit) : questItem(result.limit));
+  const time = remaining > 0 ? result.timeForItems?.(item, remaining) : null;
   const notes = [
     limit && result.activeHours && t('约 {time}后用完{item}', { time: formatDuration(result.activeHours), item: limit }),
     result.risky && t('有受伤风险'),
-    !rate && !limit && t('当前未估出产量')
+    !rate && !limit && time == null && t('当前未估出产量')
   ].filter(Boolean);
-  const time = remaining > 0 ? result.timeForItems?.(item, remaining) : null;
   const restriction = limit && !result.activeHours ? t('所需材料或货币不足 · {item}', { item: limit }) :
     remaining > 0 && rate > 0 && time == null ? t('按现有材料无法凑齐') : null;
   return { rate, time, note: notes.join(' · '), restriction };
@@ -222,6 +223,15 @@ function questSourceList(locations, item, remaining, projections = new Map(), ma
       notes.push(t('约 {time} 可凑齐', { time: formatDuration(production.time, true) }));
     }
     if (notes.length) entry.append(create('small', notes.join(' · ')));
+    const minutes = Math.ceil(production.time * 60);
+    if (!material && !restrictions.length && minutes > 0 && actionQueue.targets.has(where.actionId) &&
+        actionQueue.steps.length < maxQueueSteps) {
+      const goal = Number.isInteger(remaining) && remaining > 0 && remaining <= 1000000000 &&
+        actionQueue.targets.get(where.actionId)?.action.outputItems?.includes(item)
+        ? { type: 'item', item, value: remaining } : null;
+      const step = { key: where.actionId, minutes: goal ? 0 : minutes, ...(goal && { goal }) };
+      if (validQueueStep(step)) entry.append(' ', queueButton('加入定时挂机', () => appendQueuePlan([step])));
+    }
     appendQuestRestrictions(entry, restrictions);
     if (!material && where.ingredients.length) {
       const materialList = create('ul', undefined, 'quest-recipe-inputs');
@@ -276,14 +286,14 @@ function renderQuestObjective(objective, savedTask, completed) {
     observe: '观测 {item} × {quantity}', level: '{item} 达到 {quantity} 级', nodes: '解锁 {item} 的 {quantity} 个主要节点',
     unknown: '请在游戏内查看此目标。'
   };
-  const name = item ? questItem(item) : currency ? shopCurrencyName(currency) : questName(target) ?? objective.id ?? '';
+  const name = item ? questItem(item) : currency ? shopCurrencyName(currency) : questName(target) ?? t('未知名称');
   const what = [name, questName(variant)].filter(Boolean).join(' · ');
   const card = create('div', undefined, 'quest-objective');
   card.append(create('h3', t(labels[kind], { item: what, quantity: fullNumber(quantity ?? 0) })));
   const { remaining, note } = questObjectiveProgress(objective, savedTask, completed);
   if (note) card.append(create('p', note, 'quest-objective-progress'));
   if (style) card.append(create('p', t('需使用 {style} 战斗', {
-    style: gameName(catalog.combatModel.styles[style]) ?? style
+    style: gameName(catalog.combatModel.styles[style]) ?? t('未知名称')
   }), 'muted'));
   if (item || objective.locations) {
     const locations = (item ? questSourcesFor(item, skill) : objective.locations)

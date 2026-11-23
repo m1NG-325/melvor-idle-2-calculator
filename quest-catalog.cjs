@@ -84,7 +84,7 @@ function makeQuestGuide(data) {
       const id = localId(entry.Item);
       if (!id || entry.Chance === 0 || entry.Weight === 0 || entry.Quantity === 0 || entry.MaxQuantity === 0) continue;
       if (!sources.has(id)) sources.set(id, new Map());
-      const key = [where.skill, where.target, where.area, where.variant, where.kind].join(':');
+      const key = [where.skill, where.target, where.area, where.variant, where.kind, where.upgrade].join(':');
       sources.get(id).set(key, where);
     }
   }
@@ -132,6 +132,15 @@ function makeQuestGuide(data) {
     for (const row of records(skill, actionLists[skill] ?? 'Recipes', type)) addAction(skill, type, row);
   }
   for (const row of records('Farming', 'GrainMillRecipes', 'GrainMillRecipe')) addAction('Farming', 'GrainMillRecipe', row);
+  for (const row of objects.ItemUpgrade ?? []) {
+    const item = get('Item', row.UpgradedItem);
+    if (!item || !(row.QuantityPerUpgrade > 0)) continue;
+    const costs = ingredients({ Ingredients: row.Costs });
+    addProducts([{ Item: row.UpgradedItem, Quantity: row.QuantityPerUpgrade }], {
+      ...source(null, 'Item', { ...item, Requirements: row.Requirements, DisplayRequirements: row.DisplayRequirements }, 'upgrade'),
+      ingredients: costs, upgrade: row.Id
+    });
+  }
   for (const type of ['CombatArea', 'Dungeon']) {
     for (const area of records('Combat', 'Areas', type)) {
       const category = label('CombatAreaCategory', area.Category);
@@ -157,13 +166,20 @@ function makeQuestGuide(data) {
   for (const row of questRows) {
     addProducts(row.Rewards?.Items, source('Quests', 'Quest', row, 'reward', label('QuestCategory', row.Category)));
   }
-  for (const row of objects.Item ?? []) {
-    const openable = row.Capabilities?.['MelvorBase:Openable'];
-    if (openable && sources.has(row.Id)) {
+  const opened = new Set();
+  const containers = (objects.Item ?? []).filter(row => row.Capabilities?.['MelvorBase:Openable']);
+  let changed;
+  do {
+    changed = false;
+    for (const row of containers) {
+      if (opened.has(row.Id) || !sources.has(row.Id)) continue;
+      const openable = row.Capabilities['MelvorBase:Openable'];
+      opened.add(row.Id);
+      changed = true;
       addProducts([...(openable.AlwaysDrops ?? []), ...(openable.DropTable ?? [])],
         { ...source(null, 'Item', row, 'open'), container: row.Id });
     }
-  }
+  } while (changed);
 
   function goal({ Type, Data }) {
     if (!Data) return null;
@@ -229,12 +245,14 @@ function makeQuestGuide(data) {
     for (const ref of [target, area, variant]) if (ref) visibleNames.add(ref);
   };
   for (const where of Object.values(itemSources).flat()) collectNames(where);
+  const queueSources = Object.fromEntries(actions);
+  for (const where of Object.values(queueSources).flat()) collectNames(where);
   for (const quest of quests) for (const step of quest.steps) for (const objective of step.tasks.flatMap(task => task.objectives)) {
     collectNames(objective);
     (objective.locations ?? []).forEach(collectNames);
   }
   return { quests, names: Object.fromEntries([...visibleNames].filter(ref => names[ref]).map(ref => [ref, names[ref]])),
-    sources: itemSources };
+    sources: itemSources, queueSources };
 }
 
 module.exports = { makeQuestGuide, normalizeRequirements };

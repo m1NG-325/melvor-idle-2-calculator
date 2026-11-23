@@ -11,7 +11,8 @@ const { addGameLabels } = require('./game-labels.cjs');
 const { findSaves, readHeader, readProfile, readCharacterStatistics } = require('./saves.cjs');
 const { VERSION, RELEASES_URL, checkForUpdate, createLog } = require('./runtime.cjs');
 const { installUpdate, installedUpdates } = require('./updater.cjs');
-const { createAccessPoll } = require('./access-poll.cjs');
+const { createActionRunner } = require('./action-runner.cjs');
+const { bridgeBuild, createGameBridge, directQueueSkills, hasBridgeAssembly } = require('./game-bridge.cjs');
 const preferencesLimit = 512 * 1024;
 
 function readPreferences(preferencesFile) {
@@ -53,7 +54,6 @@ async function writePreferences(request, response, json, preferencesFile, log) {
 async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice } = {}) {
   const log = createLog(root);
   const preferencesFile = path.join(root, 'calculator-settings.json');
-  const accessPoll = createAccessPoll(root);
   log.record('startup', { node: process.versions.node, platform: process.platform });
   const source = path.resolve(args.find(arg => !arg.startsWith('--')) ?? findSteamGame());
   const standalone = fs.statSync(source).isFile();
@@ -91,6 +91,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     'app.css': ['text/css', 'app.css'],
     'rank.js': ['text/javascript', 'rank.js'],
     'production.js': ['text/javascript', 'production.js'],
+    'action-queue.js': ['text/javascript', 'action-queue.js'],
     'statistics.js': ['text/javascript', 'statistics.js'],
     'experience.js': ['text/javascript', 'experience.js'],
     'xp-progress.js': ['text/javascript', 'xp-progress.js'],
@@ -99,7 +100,6 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     'combat-training.js': ['text/javascript', 'combat-training.js'],
     'skill-training.js': ['text/javascript', 'skill-training.js'],
     'preferences.js': ['text/javascript', 'preferences.js'],
-    'access-poll.js': ['text/javascript', 'access-poll.js'],
     'choices.js': ['text/javascript', 'choices.js'],
     'shop.js': ['text/javascript', 'shop.js'],
     'quests.js': ['text/javascript', 'quests.js'],
@@ -116,6 +116,14 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     }
   }
   const canInstall = process.platform === 'win32' && typeof fetch === 'function';
+  const directTargets = new Map(catalog.xpActions.filter(action => directQueueSkills.includes(action.skill))
+    .map(action => [action.id, { skill: action.skill, target: 'MelvorBase:' + action.recipe, items: action.outputItems,
+      materials: action.costs?.map(([id]) => id), crafting: ['Artisan', 'Cooking', 'Firemaking'].includes(action.kind) }]));
+  const gameBridge = process.platform === 'win32' && [bridgeBuild, '未知'].includes(catalog.build) &&
+    (!standalone || path.basename(source).toLowerCase() === 'melvor2.exe') &&
+    hasBridgeAssembly()
+    ? createGameBridge(game, catalog.build) : undefined;
+  const actionRunner = gameBridge && createActionRunner(gameBridge, directTargets);
   let update = { state: 'checking' };
   let installation;
   let loggedClientErrors = 0;
@@ -133,7 +141,10 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     }, report).then(next => {
       log.record('update_installed', { latest: update.latest });
       report({ phase: 'ready', url: next.url });
-      setTimeout(() => server.close(), 120000).unref();
+      setTimeout(() => {
+        actionRunner?.cancel();
+        server.close();
+      }, 120000).unref();
     }).catch(error => {
       const detail = /^[a-z0-9_-]{1,50}$/i.test(error.code ?? error.message) ? error.code ?? error.message : 'installer-error';
       log.record('update_failed', { phase: installation?.phase, code: detail });
@@ -154,7 +165,39 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       return;
     }
     const route = pathname.slice(prefix.length);
-    if (route === 'access-poll') return void accessPoll(request, response, json, 'http://' + host);
+    if (route.startsWith('action-runner/')) {
+      if (!actionRunner) return json(response, { state: 'unavailable' });
+      if (route === 'action-runner/status' && request.method === 'GET') {
+        return json(response, actionRunner.status());
+      }
+      if (request.method !== 'POST' || request.headers.origin !== 'http://' + host ||
+          request.headers['x-calculator-action-runner'] !== '1') return json(response, { state: 'failed' }, 403);
+      void (async () => {
+        try {
+          if (route === 'action-runner/cancel') actionRunner.cancel();
+          else if (route === 'action-runner/start') {
+            const chunks = [];
+            let length = 0;
+            for await (const chunk of request) {
+              length += chunk.length;
+              if (length > preferencesLimit) return json(response, { state: 'invalid-queue' }, 413);
+              chunks.push(chunk);
+            }
+            const { steps, character, characterId, repeat } = JSON.parse(Buffer.concat(chunks).toString());
+            if (typeof characterId !== 'string' || !/^[a-f0-9]{32}$/i.test(characterId)) {
+              return json(response, { state: 'invalid-queue' }, 400);
+            }
+            actionRunner.start(steps, character, repeat, characterId);
+          } else return json(response, { state: 'failed' }, 404);
+          return json(response, actionRunner.status());
+        } catch (error) {
+          const state = ['busy', 'invalid-queue'].includes(error.message) ? error.message :
+            error.name === 'AbortError' ? 'cancelled' : 'failed';
+          return json(response, { state }, 409);
+        }
+      })();
+      return;
+    }
     if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json, preferencesFile, log);
     if (route === 'update/install' && request.method === 'POST') {
       if (request.headers.origin !== 'http://' + host || request.headers['x-calculator-update'] !== 'install') {
@@ -165,7 +208,13 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       beginUpdate();
       return json(response, installation ?? { phase: 'downloading' }, 202);
     }
-    const browserError = /^diagnostics\/client-error(?:\/(language|rank|production|statistics|ui|shop|quests|experience|xp-progress|combat|combat-model|combat-training|skill-training|preferences|choices|access-poll)\.js\/(\d{1,6}))?$/.exec(route);
+    const profileRenderError = /^diagnostics\/profile-render\/(settings|idle|shop|experience|combat|production|queue|statistics|quests)\/(TypeError|RangeError|ReferenceError|SyntaxError|Error)$/.exec(route);
+    if (profileRenderError && request.method === 'POST') {
+      if (loggedClientErrors++ < 20) log.record('profile_render_error', { section: profileRenderError[1], kind: profileRenderError[2] });
+      response.writeHead(204).end();
+      return;
+    }
+    const browserError = /^diagnostics\/client-error(?:\/(language|rank|production|action-queue|statistics|ui|shop|quests|experience|xp-progress|combat|combat-model|combat-training|skill-training|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
     if (browserError && request.method === 'POST') {
       if (loggedClientErrors++ < 20) log.record('browser_error', {
         script: browserError[1], line: browserError[2] && Number(browserError[2])
@@ -257,7 +306,10 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
         log.record('update_checked', result);
         if (result.state === 'available') console.log('发现新版本 / Update available: v' + result.latest + ' ' + RELEASES_URL);
       });
-      resolve({ url, close: () => new Promise(done => server.close(done)) });
+      resolve({ url, close: () => new Promise(done => {
+        actionRunner?.cancel();
+        server.close(done);
+      }) });
     });
   });
 }

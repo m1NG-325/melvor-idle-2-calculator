@@ -1,9 +1,10 @@
 const preferenceFields = [
-  'hours', 'metric', 'sell', 'sellFishingSpecial', 'filter', 'search', 'item', 'quantity', 'action',
-  'xpMode', 'xpHours', 'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
+  'hours', 'metric', 'sell', 'sellFishingSpecial', 'includeRiskyThieving', 'filter', 'search', 'item', 'quantity', 'action',
+  'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
   'productionTarget', 'productionHours', 'productionStock', 'productionSellByproducts', 'productionComparisonItems',
   'statisticsSearch',
-  'combatTrainingSkill', 'combatTrainingHours',
+  'queueDraft', 'queueLibrary', 'queueName', 'queueRepeat', 'queueSkill', 'queueCategory', 'queueQuestActions',
+  'combatTrainingSkill',
   'combatTarget', 'combatAreaChoice', 'combatRateMode', 'combatKillRate', 'combatHours', 'combatCap', 'combatCollect', 'combatSell'
 ];
 const preferenceDetails = ['levelSettings', 'inventorySettings', 'calculationScope', 'keptDropSettings', 'combatLoadout', 'combatAttributes', 'combatBreakdown'];
@@ -68,6 +69,13 @@ function characterEdits(data = profile) {
   return profileEdits.get(key);
 }
 
+function validCharacterEdits(value) {
+  const record = data => data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  const list = data => Array.isArray(data) ? data.filter(id => typeof id === 'string') : [];
+  return { ...record(value), levels: record(value?.levels), stock: record(value?.stock), bonuses: record(value?.bonuses),
+    confirmed: list(value?.confirmed), excluded: list(value?.excluded) };
+}
+
 function restorePreferences() {
   for (const id of preferenceFields) {
     const input = byId(id);
@@ -87,7 +95,7 @@ function restorePreferences() {
     if (byId(id) && typeof preferences.details?.[id] === 'boolean') byId(id).open = preferences.details[id];
   }
   for (const [key, value] of Object.entries(preferences.profileEdits ?? {})) {
-    profileEdits.set(key, { levels: {}, stock: {}, bonuses: {}, confirmed: [], excluded: [], ...value });
+    profileEdits.set(key, validCharacterEdits(value));
   }
   xpView.bonusesByCharacter = new Map(Object.entries(preferences.xpBonuses ?? {}));
   xpView.goalsByCharacter = new Map(Object.entries(preferences.xpGoals ?? {}));
@@ -110,7 +118,7 @@ function savePreferences() {
   if (!preferencesReady) return Promise.resolve(false);
   const settings = JSON.stringify({
     version: 1, language: uiLanguage, page: location.hash, theme,
-    character: byId('save').value ? byId('save').selectedOptions[0]?.dataset.characterId : 'manual',
+    character: profile?.characterId ?? (profileReadError || byId('save').value ? preferences.character : 'manual'),
     fields: { xpSkill: xpView.skill, xpSection: experienceSection, statisticsScope: statisticsScope(),
       ...Object.fromEntries(preferenceFields.filter(id => byId(id)).map(id => {
       const input = byId(id);

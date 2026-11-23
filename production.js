@@ -1,26 +1,33 @@
-const productionKinds = new Set(['Mining', 'Woodcutting', 'Fishing', 'Artisan']);
+const productionKinds = new Set(['Mining', 'Woodcutting', 'Fishing', 'Artisan', 'Cooking', 'Firemaking', 'Herblore', 'Hunting', 'ItemUpgrade']);
 
 function indexProduction(catalog) {
   const producers = new Map();
   const products = new Map();
   const externalSources = new Map();
-  for (const action of catalog.actions) {
-    if (!productionKinds.has(action.kind)) continue;
-    const outputs = action.ore ? [action.ore] : action.fish ?? action.rewards;
-    for (const [id] of outputs) {
-      if (!catalog.items[id] || !id) continue;
+  const actions = new Map([...catalog.actions, ...(catalog.xpActions ?? []), ...(catalog.itemUpgrades ?? [])]
+    .map(action => [action.id, action]));
+  for (const action of actions.values()) {
+    const outputs = new Set([
+      ...(action.rewards ?? []).map(([id]) => id),
+      ...(action.fish ?? []).map(([id]) => id),
+      ...(action.special ?? []).map(([id]) => id),
+      ...(action.hitRewards ?? []).map(([id]) => id),
+      ...(action.events ?? []).map(event => event.item),
+      ...(action.modeProducts ?? []),
+      action.ore?.[0], action.bar, action.stone, action.essence, action.junk
+    ]);
+    for (const id of outputs) {
+      if (!id || !catalog.items[id]) continue;
+      if (!productionKinds.has(action.kind) || (action.kind === 'Hunting' && !action.hunt)) {
+        if (!externalSources.has(id)) externalSources.set(id, action);
+        continue;
+      }
       if (!producers.has(id)) producers.set(id, []);
-      if (!producers.get(id).includes(action)) producers.get(id).push(action);
+      producers.get(id).push(action);
       const main = action.costs[0]?.[0];
       if (!main) continue;
       if (!products.has(main)) products.set(main, new Set());
       products.get(main).add(id);
-    }
-  }
-  for (const action of catalog.xpActions ?? []) {
-    if (productionKinds.has(action.kind)) continue;
-    for (const [id] of action.rewards ?? []) {
-      if (!externalSources.has(id)) externalSources.set(id, action);
     }
   }
   return { producers, products, externalSources };
@@ -50,14 +57,14 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
   const modelFor = action => {
     if (!models.has(action.id)) {
       const row = evaluateCycle(action, profile, catalog, { preview });
-      if (!row || !(row.activeHours > 0)) models.set(action.id, null);
+      if (!row || (!(row.activeHours > 0) && action.kind !== 'ItemUpgrade')) models.set(action.id, null);
       else {
         const output = new Map();
         for (const drop of row.drops) {
           output.set(drop.id, (output.get(drop.id) ?? 0) + drop.quantity);
         }
-        models.set(action.id, { action, output, seconds: row.activeHours * 3600, direct: row.direct,
-          inputs: row.inputs, restrictions: row.restrictions ?? [] });
+        models.set(action.id, { action, output, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
+          inputs: row.inputs, restrictions: row.restrictions ?? [], sacrifice: row.sacrifice });
       }
     }
     return models.get(action.id);
@@ -107,7 +114,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       if (!(amount > 0)) continue;
       sources.push({ model, amount });
       const cycles = Math.max(1, roundUp(missing / amount));
-      if (strategy.rate == null && best && state.seconds + cycles * model.seconds > best.seconds) continue;
+      if (strategy.rate == null && best && state.seconds + model.duration(cycles) > best.seconds) continue;
       const candidate = copy(state);
       if (run(candidate, model, cycles, nextTrail, timeLimit, strategy)) consider(candidate);
     }
@@ -140,12 +147,17 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     return best;
   };
   function run(state, model, cycles, trail, timeLimit, strategy) {
-    const seconds = cycles * model.seconds;
+    const seconds = model.duration(cycles);
     if (state.seconds + seconds > timeLimit && !enough(timeLimit, state.seconds + seconds)) return false;
     const used = [];
     const held = [];
     const restrictions = [...model.restrictions];
-    for (const input of model.inputs) {
+    // Reserve ingredients already on hand before a nested recipe can spend them.
+    const inputs = model.inputs.map(input => ({
+      input, ready: enough(input.currency ? state.wallet.get(input.id) ?? 0 : inventory(state, input.id),
+        input.qty + input.quantity * (cycles - 1))
+    })).sort((a, b) => Number(b.ready) - Number(a.ready));
+    for (const { input } of inputs) {
       const { id, qty, currency } = input;
       const consumed = input.quantity * cycles;
       // A full ingredient batch must be available for the final start, even with preservation.
@@ -172,10 +184,13 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
           } else if (preview && (!index.producers.has(id) || (timeLimit === Infinity && strategy.rate == null)) && catalog.items[id]) {
             state.supplied.set(id, (state.supplied.get(id) ?? 0) + missing);
             state.externalCost += missing * price(id);
-            const action = index.externalSources?.get(id);
+            const sacrificedBy = index.producers.get(id)?.find(source =>
+              modelFor(source)?.sacrifice?.items.some(row => row.id === id));
+            const action = index.externalSources?.get(id) ?? sacrificedBy;
             const source = action && evaluateCycle(action, profile, catalog, { requirementsOnly: true });
             state.steps.push({ item: id, action, seconds: null, used: [],
-              output: [{ id, quantity: missing }], restrictions: [{ type: 'external' }, ...(source?.restrictions ?? [])] });
+              output: [{ id, quantity: missing }], restrictions: [{ type: 'external' },
+                ...(source?.restrictions ?? []), ...(sacrificedBy ? [{ type: 'sacrifice' }] : [])] });
           } else return false;
           if (!enough(free(), required)) return false;
         }
@@ -208,17 +223,20 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     state.direct += direct;
     state.wallet.set('GoldPieces', (state.wallet.get('GoldPieces') ?? 0) + direct);
     state.seconds += seconds;
-    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions });
+    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions,
+      sacrificeGp: (model.sacrifice?.gp ?? 0) * cycles });
     return true;
   }
   function solve(item, action) {
     const model = modelFor(action);
-    if (!(model?.output.get(item) > 0)) return null;
+    const sacrificed = model?.sacrifice?.items.find(row => row.id === item);
+    if (!sacrificed && !(model?.output.get(item) > 0)) return null;
     let result;
     let bestNet = -Infinity;
+    let bestCycles;
     const fastest = { rate: null, alternatives: false };
     function search(strategy) {
-      const maximum = Math.floor(budget / model.seconds);
+      const maximum = model.seconds > 0 ? Math.floor(budget / model.seconds) : preview ? 1 : Number.MAX_SAFE_INTEGER;
       const tested = new Map();
       function assess(cycles) {
         if (cycles < 1 || cycles > maximum) return false;
@@ -232,6 +250,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
         if (net > bestNet || (net === bestNet && state.seconds < result.seconds)) {
           result = state;
           bestNet = net;
+          bestCycles = cycles;
         }
         return true;
       }
@@ -241,6 +260,11 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       }
       let low = 1;
       let high = maximum;
+      if (model.seconds === 0) {
+        high = 1;
+        while (high < maximum && assess(high)) high = Math.min(maximum, high * 2);
+        low = Math.max(1, Math.floor(high / 2));
+      }
       while (low <= high) {
         const cycles = low + Math.floor((high - low) / 2);
         if (assess(cycles)) low = cycles + 1;
@@ -255,12 +279,16 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       }
       for (let cycles = 1; cycles <= high; cycles *= 2) assess(cycles);
       for (let fraction = 1; fraction < 16; fraction++) assess(Math.floor(high * fraction / 16));
+      if (target || items) {
+        const center = bestCycles;
+        for (let offset = -8; center != null && offset <= 8; offset++) assess(center + offset);
+      }
     }
     search(fastest);
     if (fastest.alternatives) {
       search({ rate: 0, unbounded: true });
-      const grossPerSecond = model.output.get(item) * price(item) / model.seconds;
-      if (grossPerSecond > 0) search({ rate: grossPerSecond / 4 });
+      const grossPerSecond = (sacrificed ? model.sacrifice.gp : model.output.get(item) * price(item)) / model.seconds;
+      if (Number.isFinite(grossPerSecond) && grossPerSecond > 0) search({ rate: grossPerSecond / 4 });
       search({ rate: 0, mix: true });
     }
     if (!result && preview) {
@@ -268,8 +296,10 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       if (run(oneBatch, model, 1, new Set([item]), Infinity, fastest)) result = oneBatch;
     }
     if (!result) return null;
-    const quantity = result.made.get(item) ?? 0;
-    const sales = quantity * price(item);
+    const finalStep = result.steps.at(-1);
+    const sacrifice = sacrificed && { quantity: sacrificed.quantity * finalStep.cycles, gp: finalStep.sacrificeGp };
+    const quantity = sacrifice?.quantity ?? (result.made.get(item) ?? 0);
+    const sales = sacrifice ? 0 : quantity * price(item);
     const materials = result.bankCost;
     const byproducts = [...result.made].filter(([id, amount]) => id !== item && amount > 0 && price(id) > 0)
       .map(([id, quantity]) => ({ id, quantity, value: canSell(id) ? quantity * price(id) : 0 }));
@@ -282,7 +312,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
         if (elapsed > budget && !enough(budget, elapsed)) step.restrictions.push({ type: 'time' });
       }
     }
-    return { item, quantity, sales, byproducts, byproductSales, materials, net,
+    return { item, quantity, sales, byproducts, byproductSales, materials, net, sacrifice,
       netPerHour: net / Math.max(hours, result.seconds / 3600), seconds: result.seconds,
       direct: result.direct, goldCost: result.goldCost, steps: result.steps, bankUsed: result.bankUsed, externalCost: result.externalCost, preview };
   }
@@ -320,7 +350,7 @@ if (typeof module !== 'undefined') module.exports = { indexProduction, planProdu
 let productionView;
 
 function initProduction(catalog) {
-  productionView = { index: indexProduction(catalog), catalog, choices: new Map(), plans: [] };
+  productionView = { index: indexProduction(catalog), catalog, plans: [] };
   const target = byId('productionTarget');
   target.replaceChildren(new Option('', ''), ...[...productionView.index.producers.keys()].map(id => new Option(id, id)));
   localizeProduction();
@@ -331,7 +361,7 @@ function initProduction(catalog) {
   });
   input.addEventListener('input', event => {
     if (event.isComposing) return;
-    const id = productionView.choices.get(input.value);
+    const id = suggestionKey(byId('productionTargets').options, input.value);
     if (id === undefined) return;
     target.value = id;
     syncProductionTarget(id);
@@ -370,18 +400,14 @@ function setProductionComparison(items) {
 }
 
 function productionTargetName(id) {
-  return id ? gameName(productionView.catalog.items[id]) ?? id : t('自动推荐');
-}
-
-function productionTargetChoice(name, id) {
-  return id ? name + ' · ' + id : name;
+  return id ? gameName(productionView.catalog.items[id]) ?? t('未知物品') : t('自动推荐');
 }
 
 function syncProductionTarget(id) {
   const input = byId('productionTargetInput');
-  const name = productionTargetName(id);
-  input.value = name;
-  input.dataset.selectedSuggestion = productionTargetChoice(name, id);
+  const option = [...byId('productionTargets').options].find(choice => choice.dataset.key === id);
+  input.value = option?.value ?? productionTargetName(id);
+  input.dataset.selectedSuggestion = input.value;
 }
 
 function localizeProduction() {
@@ -389,16 +415,11 @@ function localizeProduction() {
   const options = [...productionView.index.producers.keys()].map(id => ({ name: productionTargetName(id), id }));
   options.sort((a, b) => a.name.localeCompare(b.name, uiLocale()));
   options.unshift({ name: productionTargetName(''), id: '' });
-  productionView.choices.clear();
-  byId('productionTargets').replaceChildren(...options.map(({ name, id }) => {
-    const value = productionTargetChoice(name, id);
-    productionView.choices.set(value, id);
-    const option = new Option(name, value);
+  byId('productionTargets').replaceChildren(...localizedSuggestions(options.map(({ name, id }) => {
     const item = productionView.catalog.items[id];
-    option.dataset.searchAliases = [name, id, id && 'MelvorBase:' + id, item?.name,
-      ...Object.values(item?.names ?? {}), traditionalText(item?.names?.zh ?? item?.name)].filter(Boolean).join('\n');
-    return option;
-  }));
+    return { key: id, name, aliases: [id && 'MelvorBase:' + id, item?.name,
+      ...Object.values(item?.names ?? {}), traditionalText(item?.names?.zh ?? item?.name)] };
+  })));
   syncProductionTarget(byId('productionTarget').value);
 }
 
@@ -440,11 +461,12 @@ function renderProduction() {
   status.hidden = !status.textContent;
   results.hidden = !selected;
   if (selected) {
-    byId('productionHeading').textContent = t(selected.preview ? '目标产线 · 条件预估' : target ? '目标物品产线' : '收益最高的产线');
+    byId('productionHeading').textContent = t(selected.preview ? '目标产线 · 条件预估' : target ? '目标物品产线' : '已比较产线中的最高收益');
     byId('productionWinner').textContent = gameName(catalog.items[selected.item]);
     byId('productionMetrics').replaceChildren(...[
-      ['预计净收益', fullNumber(selected.net) + ' GP'], ['净 GP/小时', fullNumber(selected.netPerHour)],
-      ['预计数量', decimals.format(selected.quantity)], ['产线耗时', formatDuration(selected.seconds / 3600)]
+      ['预计净收益', formatGp(selected.net)], ['净 GP/小时', fullNumber(selected.netPerHour)],
+      [selected.sacrifice ? '预计献祭数量' : '预计数量', decimals.format(selected.quantity)],
+      ['产线耗时', formatDuration(selected.seconds / 3600)]
     ].map(([label, value]) => {
       const metric = create('div', t(label));
       metric.append(create('strong', value));
@@ -453,7 +475,7 @@ function renderProduction() {
   }
   const options = byId('productionPlan');
   options.replaceChildren(...detailPlans.map(({ item, net, preview }) => new Option(
-    [gameName(catalog.items[item]), fullNumber(net) + ' GP', preview && t('条件预估')].filter(Boolean).join(' · '), item)));
+    [gameName(catalog.items[item]), formatGp(net), preview && t('条件预估')].filter(Boolean).join(' · '), item)));
   options.value = active?.item ?? '';
   byId('productionAlternatives').hidden = detailPlans.length < 2 && (Boolean(selected) || !detailPlans.length);
   renderProductionComparison(compared, true);
@@ -472,9 +494,10 @@ function renderProductionComparison(plans, canCalculate) {
     if (plan === best) item.append(create('small', t('可执行方案中收益最高'), 'production-compare-best'));
     const hasPlan = Boolean(plan.steps);
     const state = hasPlan ? (plan.preview ? '条件预估' : '当前可执行') : (canCalculate ? '暂无完整预估' : '待计算');
-    row.append(item, create('td', t(state), plan.preview ? 'production-restriction' : undefined),
+    row.append(item, create('td', [t(state), plan.sacrifice && t('献祭砧台')].filter(Boolean).join(' · '),
+      plan.preview ? 'production-restriction' : undefined),
       ...[hasPlan ? decimals.format(plan.quantity) : '—', hasPlan ? formatDuration(plan.seconds / 3600) : '—',
-        hasPlan ? fullNumber(plan.netPerHour) : '—', hasPlan ? fullNumber(plan.net) + ' GP' : '—']
+        hasPlan ? fullNumber(plan.netPerHour) : '—', hasPlan ? formatGp(plan.net) : '—']
         .map(value => create('td', value)));
     const actions = create('td');
     if (hasPlan) {
@@ -504,6 +527,7 @@ function productionRestrictionText(restriction, catalog) {
   switch (restriction.type) {
     case 'excluded': return t('此行动已排除');
     case 'external': return t('需另行取得材料');
+    case 'sacrifice': return t('开启献祭砧台时，此成品不会入库');
     case 'time': return t('超过所选时长');
     case 'currency': return t('缺少 {quantity} {currency}', {
       quantity: fullNumber(restriction.quantity), currency: shopCurrencyName(restriction.id)
@@ -517,15 +541,37 @@ function productionRestrictionText(restriction, catalog) {
 }
 
 function renderProductionDetail(plan) {
+  const queueButton = byId('productionToQueue');
+  const queueSteps = (plan?.steps ?? []).map((step, index) => {
+    const key = step.action?.id;
+    const target = actionQueue.targets.get(key);
+    const minutes = Math.ceil(step.seconds / 60);
+    const needed = new Set(plan.steps.slice(index + 1).flatMap(next => next.used.map(row => row.id)));
+    needed.add(plan.item);
+    const products = step.output.filter(row => needed.has(row.id));
+    if (products.length === 1 && queueGoalItems('item', target).includes(products[0].id)) {
+      const { id, quantity } = products[0];
+      return { key, minutes: 0, goal: { type: 'item', item: id, value: Math.ceil(quantity) } };
+    }
+    if (recipeGoalAvailable(target) && Number.isInteger(step.cycles)) {
+      return { key, minutes: 0, goal: { type: 'recipes', value: step.cycles } };
+    }
+    return { key, minutes: minutes || NaN };
+  });
+  queueButton.hidden = plan?.preview || !queueSteps.length || !queueSteps.every(validQueueStep);
+  queueButton.onclick = () => {
+    if (!appendQueuePlan(queueSteps)) byId('productionStatus').textContent =
+      t(queueBusy() ? '挂机中，队列已锁定。' : '队列最多可添加 200 步。');
+  };
   const detail = byId('productionDetail');
   detail.hidden = !plan && byId('productionAlternatives').hidden;
   byId('productionPlanBody').hidden = !plan;
   if (!plan) return;
   const { catalog } = productionView;
-  const itemName = id => gameName(catalog.items[id]) ?? id;
+  const itemName = id => gameName(catalog.items[id]) ?? t('未知物品');
   const quantities = rows => rows.map(({ id, quantity, currency }) => t('{item} × {quantity}', {
     item: currency ? shopCurrencyName(id) : itemName(id),
-    quantity: currency && id === 'GoldPieces' ? fullNumber(quantity) : decimals.format(quantity)
+    quantity: currency && id === 'GoldPieces' ? fullNumber(quantity) : expectedQuantity(quantity)
   })).join(' · ');
   byId('productionDetailTitle').textContent = t('{name}的产线', { name: itemName(plan.item) });
   const notice = byId('productionPreview');
@@ -550,19 +596,25 @@ function renderProductionDetail(plan) {
   const byproducts = byId('productionByproducts');
   byproducts.hidden = !plan.byproducts.length;
   byId('productionByproductRows').replaceChildren(...plan.byproducts.map(row => create('li',
-    quantities([row]) + ' · ' + (row.value > 0 ? fullNumber(row.value) + ' GP' : t('保留')))));
+    quantities([row]) + ' · ' + (row.value > 0 ? formatGp(row.value) : t('保留')))));
   const sale = create('tr', undefined, 'production-sale');
-  sale.append(...[t('出售 {item}', { item: itemName(plan.item) }), '—', '—',
-    quantities([{ id: plan.item, quantity: plan.quantity }]), fullNumber(plan.sales) + ' GP'].map(value => create('td', value)));
+  sale.append(...[t(plan.sacrifice ? '献祭 {item}' : '出售 {item}', { item: itemName(plan.item) }), '—', '—',
+    quantities([{ id: plan.item, quantity: plan.quantity }]),
+    formatGp(plan.sacrifice?.gp ?? plan.sales)].map(value => create('td', value)));
   byId('productionSteps').replaceChildren(...plan.steps.map(step => {
     const row = create('tr');
-    const action = step.action
+    const action = step.action?.kind === 'ItemUpgrade'
+      ? t('升级 {item}', { item: itemName(step.action.item) })
+      : step.action
       ? skillName(step.action.skill, catalog.xpSkills) + ' · ' + gameName(step.action)
       : t('准备 {item}', { item: itemName(step.item) });
     const flags = [...new Set(step.restrictions.map(restriction => productionRestrictionText(restriction, catalog)))];
     row.append(create('td', action), create('td', flags.join(' · ') || '—', flags.length ? 'production-restriction' : undefined),
-      create('td', step.seconds == null ? '—' : formatDuration(step.seconds / 3600)),
-      create('td', quantities(step.used) || '—'), create('td', quantities(step.output) || '—'));
+      create('td', step.seconds == null ? '—' : step.action?.kind === 'ItemUpgrade' ? t('即时') : formatDuration(step.seconds / 3600)),
+      create('td', quantities(step.used) || '—'), create('td', [
+        step.sacrificeGp > 0 && t('献祭折现 {value} GP', { value: fullNumber(step.sacrificeGp) }),
+        quantities(step.output)
+      ].filter(Boolean).join(' · ') || '—'));
     return row;
   }), sale);
 }

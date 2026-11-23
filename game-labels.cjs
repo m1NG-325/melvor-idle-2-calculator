@@ -3,6 +3,7 @@ const path = require('node:path');
 const { readPackage, readPackedFile } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
+const bundledChineseNames = require('./vendor/game-names-zh.json');
 
 function originalPackage(game, build) {
   const backups = path.join(game, 'Melvor2_简体中文', 'backups');
@@ -88,11 +89,13 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
     // Some game builds omit the Chinese locale. Keep the names that are available.
   }
   function officialChinese(original) {
-    const exact = chineseNames?.get(original)?.name;
+    const translatedName = name => chineseNames?.get(name)?.name ??
+      (Object.hasOwn(bundledChineseNames, name) ? bundledChineseNames[name] : undefined);
+    const exact = translatedName(original);
     if (exact || !original?.includes(' · ')) return exact;
     const parts = original.split(' · ');
-    const translated = parts.map(part => chineseNames?.get(part)?.name);
-    if (translated.some(Boolean)) return parts.map((part, i) => translated[i] ?? part).join(' · ');
+    const translated = parts.map(part => hasChinese(part) ? part : translatedName(part));
+    if (translated.some(Boolean)) return translated.filter(Boolean).join(' · ');
   }
   const label = (source, alternate, id) => {
     const original = displayText(source);
@@ -124,6 +127,10 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
   for (const enemy of catalog.combatTargets) {
     enemy.names = label(enemy.name, otherEnemies.get(enemy.id), enemy.id);
     for (const area of enemy.areas) area.names = label(area.name, otherAreas.get(area.id), area.id);
+  }
+  const otherDungeons = new Map((alternatives.catalog?.combatDungeons ?? []).map(row => [row.id, row.name]));
+  for (const dungeon of catalog.combatDungeons ?? []) {
+    dungeon.names = label(dungeon.name, otherDungeons.get(dungeon.id), dungeon.id.slice('Dungeon:'.length));
   }
   for (const key of ['combatSlots', 'combatSpells', 'statisticSubjects']) {
     for (const [id, record] of Object.entries(catalog[key])) {

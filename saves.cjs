@@ -25,17 +25,27 @@ function readCharacterStatistics(file) {
 function findSaves() {
   const gameSaves = path.join(process.env.APPDATA || '', 'Games By Malcs', 'Melvor Idle 2');
   const steam = path.join(gameSaves, 'steam');
-  const directories = [path.join(gameSaves, 'saves')];
-  if (fs.existsSync(steam)) {
-    for (const entry of fs.readdirSync(steam, { withFileTypes: true })) {
-      if (entry.isDirectory()) directories.push(path.join(steam, entry.name, 'saves'));
+  const entries = directory => {
+    try { return fs.readdirSync(directory, { withFileTypes: true }); }
+    catch (error) {
+      if (['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR'].includes(error.code)) return [];
+      throw error;
+    }
+  };
+  const directories = [path.join(gameSaves, 'saves'), ...entries(steam)
+    .filter(entry => entry.isDirectory() || entry.isSymbolicLink()).map(entry => path.join(steam, entry.name, 'saves'))];
+  const discovered = [];
+  for (const directory of directories) for (const entry of entries(directory)) {
+    if ((!entry.isFile() && !entry.isSymbolicLink()) || !/^save_.*\.sav$/i.test(entry.name)) continue;
+    const file = path.join(directory, entry.name);
+    try {
+      const stat = fs.statSync(file);
+      if (stat.isFile()) discovered.push({ file, modified: stat.mtimeMs });
+    } catch (error) {
+      if (!['ENOENT', 'EACCES', 'EPERM'].includes(error.code)) throw error;
     }
   }
-  return directories.filter(directory => fs.existsSync(directory))
-    .flatMap(directory => fs.readdirSync(directory, { withFileTypes: true })
-      .filter(entry => entry.isFile() && /^save_.*\.sav$/i.test(entry.name))
-      .map(entry => path.join(directory, entry.name)))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return discovered.sort((a, b) => b.modified - a.modified).map(row => row.file);
 }
 
 module.exports = { findSaves, readProfile, readHeader, readCharacterStatistics };

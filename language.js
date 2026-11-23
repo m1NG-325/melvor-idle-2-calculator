@@ -1,4 +1,8 @@
 const english = {
+  '语言': 'Language', '英语': 'English', '简体中文': 'Simplified Chinese', '繁体中文': 'Traditional Chinese',
+  '未知名称': 'Unknown Name', '未知物品': 'Unknown Item', '未知行动': 'Unknown Action',
+  '未知货币': 'Unknown Currency', '未知统计项': 'Unknown Statistic',
+  '武器': 'Weapon',
   '账号与已保存方案': 'Account and saved plans',
   '电子邮箱': 'Email',
   '密码': 'Password',
@@ -75,19 +79,19 @@ const english = {
   '{count} 条记录': '{count} entries',
   '存档没有该项明细。': 'No entries recorded for this statistic.',
   '没有匹配的统计。': 'No matching statistics.',
-  '工具打开方式投票': 'Vote on How to Open the Tool',
-  '你希望以后怎么打开工具？': 'How would you prefer to open the tool?',
-  '继续使用现在的方法，在电脑上打开工具': 'Keep launching the tool on my computer',
-  '搭建一个网站，在浏览器直接访问工具': 'Build a website so I can open the tool directly in my browser',
-  '本地版可以离线使用，读取本机游戏存档。': 'The local version works offline and reads the game saves on your computer.',
-  '网页版需要联网。图片等资源由网站提供，无需额外下载，界面可以做得更直观、更好看。后续计划支持在手机等设备查看已保存的数据。': 'The website would require an internet connection. It could use more images and other assets to make the tool easier to use and nicer to look at, with no extra downloads. Later, you could view saved data on your phone and other devices.',
-  '投票只提交选项和随机生成的投票编号。': 'Voting sends only your choice and a randomly generated voter ID.',
-  '提交投票': 'Submit Vote',
-  '稍后再投': 'Vote Later',
-  '正在提交投票…': 'Submitting vote…',
-  '暂时无法提交投票，可以重试或稍后再投。': 'The vote could not be submitted. Try again or vote later.',
   '连锁产线': 'Production Chains',
   '角色存档已变化，请重新读取存档。': 'The character save changed. Reload saves to continue.',
+  '角色已读取，部分板块显示失败：{panels}': 'Character loaded. Some panels could not render: {panels}',
+  '部分板块显示失败：{panels}': 'Some panels could not render: {panels}',
+  '已按期望值计入特殊攻击和区域效果。': 'Expected special attacks and area effects are included.',
+  '部分复杂效果仍为近似估算。': 'Some complex effects are still approximate.',
+  '目标免疫当前攻击方式。': 'The target is immune to the current attack style.',
+  '副本中有敌人免疫当前攻击方式。': 'An enemy in this dungeon is immune to the current attack style.',
+  '副本按完整通关结算。耗时和补给按各波敌人及其战斗效果估算。':
+    'Dungeon rewards require full clears. Time and supplies are estimated across enemy waves and their combat effects.',
+  '角色存档暂无法读取，请重试。': 'The character save could not be read. Try again.',
+  '当前仍显示上次读取的角色：{name}。': 'Still showing the last loaded character: {name}.',
+  '技能修正': 'Skill Adjustments',
   '加入对比': 'Add to Comparison',
   '产线对比': 'Compare Production Chains',
   '状态': 'Status',
@@ -105,6 +109,17 @@ const english = {
   '搜索目标物品': 'Search target items',
   '没有找到可用于产线的物品。': 'No supported production items match.',
   '自动推荐': 'Auto Recommend',
+  '战斗技能': 'Combat Skills',
+  '当前战斗': 'Current Fight',
+  '备齐符文后的推荐': 'Recommended After Restocking Runes',
+  '备齐符文后约 {time}': 'About {time} after restocking runes',
+  '符文缺口（制作与战斗合计）': 'Missing Runes for Crafting and Combat',
+  '先制作所需装备并补齐符文。预计用时只计算战斗。': 'Craft any required gear and restock runes first. The estimate covers combat time.',
+  '战斗配装推荐': 'Combat Loadout Recommendations',
+  '{skill}练级方案': '{skill} Training Plans',
+  '选择战斗技能，在下方比较到目标等级的时间。': 'Select a combat skill to compare times to your target level.',
+  '正在估算…': 'Estimating…',
+  '补足补给后约 {time}': 'About {time} with replenished supplies',
   '目标物品': 'Target Item',
   '使用仓库库存': 'Use Bank Stock',
   '出售剩余副产物': 'Sell Leftover Byproducts',
@@ -113,10 +128,155 @@ const english = {
   '保留': 'Keep',
   '选择角色存档后可估算连锁产线。': 'Select a character save to estimate production chains.',
   '请输入有效的挂机时长。': 'Enter a valid duration.',
-  '以一个角色依次完成各步骤估算。仓库原料按售价扣除，副产物按出售设置计入收益。': 'One character completes the steps in sequence. Bank materials are charged at their sell value, and byproduct sales follow your setting.',
+  '以一个角色依次完成各步骤估算。仓库原料按售价扣除，副产物按出售设置计入收益。按可持续加成估算。': 'One character completes the steps in sequence. Bank materials are charged at their sell value, and byproduct sales follow your setting. Estimates use sustained bonuses.',
   '收益最高的产线': 'Highest-Earning Chain',
   '查看产线': 'View Chain',
   '预计数量': 'Estimated Quantity',
+  '定时挂机': 'Timed Action Queue',
+  '技能': 'Skill',
+  '分类': 'Category',
+  '全部分类': 'All Categories',
+  '搜索当前分类的行动': 'Search actions in this category',
+  '显示任务限定行动': 'Show quest-only actions',
+  '其他行动': 'Other Actions',
+  '开始挂机': 'Start Idling',
+  '录制行动': 'Record Action',
+  '读取角色存档后查看解锁条件': 'Load a character save to check unlock requirements',
+  '未解锁': 'Locked',
+  '部分解锁条件待确认': 'Some unlock requirements could not be verified',
+  '存档缺少此技能的等级信息': 'Skill level unavailable in this save',
+  '已满足解锁条件': 'Unlock requirements met',
+  '此游戏构建暂未接入直接挂机。': 'Direct idling is unavailable for this game build.',
+  '关闭已打开的游戏，在工具里开始挂机，再打开对应角色。行动列表会标明哪些步骤可以直接执行。': 'Close the game, start the queue in the calculator, and then open the selected character. The action list marks which steps can run directly.',
+  '结束条件': 'Stop Condition',
+  '修改结束条件': 'Edit Stop Condition',
+  '修改第 {number} 步的结束条件': 'Edit stop condition for step {number}',
+  '保存修改': 'Save Changes',
+  '挂机中，队列已锁定。': 'The queue is locked while idling.',
+  '无时限': 'No time limit',
+  '配方制作次数': 'Recipe Completions',
+  '获得的产品': 'Products Gained',
+  '拥有的产品': 'Products Owned',
+  '花费的材料': 'Materials Spent',
+  '剩余材料': 'Materials Remaining',
+  '目标材料': 'Target Material',
+  '制作次数': 'Completions',
+  '制作 {value} 次': 'Complete {value} recipes',
+  '拥有 {item} × {value}': 'Own {item} × {value}',
+  '花费 {item} × {value}': 'Spend {item} × {value}',
+  '{item} 剩余 {value} 或更少': '{item} remaining: {value} or fewer',
+  '已保存队列': 'Saved Queue',
+  '队列 {number}': 'Queue {number}',
+  '新建队列': 'New Queue',
+  '删除队列': 'Delete Queue',
+  '删除队列「{name}」？': 'Delete queue “{name}”?',
+  '移除全部步骤': 'Remove All Steps',
+  '拖动排序，也可使用上下方向键': 'Drag to reorder or use the Up and Down arrow keys',
+  '队列包含无时限步骤': 'Queue contains an unlimited step',
+  '第 {step} 步进行中，无时限。': 'Step {step} is running without a time limit.',
+  '开始挂机后，工具会打开已安装的游戏。请在游戏中载入对应角色。': 'Start idling to open the installed game, then load the matching character.',
+  '无法链接已安装的游戏。请检查游戏目录权限；跨盘符号链接可能需要 Windows 开发人员模式。':
+    'Could not link to the installed game. Check folder permissions. Cross-drive symbolic links may require Windows Developer Mode.',
+  '按时长': 'Elapsed Time',
+  '获得物品': 'Items Gained',
+  '达到等级': 'Target Level',
+  '目标数量': 'Target Quantity',
+  '最长等待（分钟）': 'Time Limit (minutes)',
+  '最长等待（分钟，0 为不限时）': 'Time limit in minutes (0 for no limit)',
+  '敌人可能在自动进食前击杀角色，当前收益按存活估算。': 'An enemy may kill your character before auto-eat. Returns assume survival.',
+  '装备制作约 {time}': 'Estimated gear crafting time {time}',
+  '制作和练级合计约 {time}': 'Estimated crafting and training time {time}',
+  '每轮最多 {duration}': 'Up to {duration} per cycle',
+  '达到等级 {value}': 'Reach level {value}',
+  '获得 {item} × {value}': 'Gain {item} × {value}',
+  '目标进度 {current} / {target}': 'Goal progress {current} / {target}',
+  '未识别统计项 {number}': 'Unrecognized statistic {number}',
+  '第 {step} 步已到最长等待时间，目标尚未达成。': 'Step {step} reached its time limit before reaching the goal.',
+  '正在启动并连接游戏。': 'Starting and connecting to the game.',
+  '正在启动第 {step} 步。': 'Starting step {step}.',
+  '请在工具启动的游戏里打开所选角色。': 'Open the selected character in the game started by the calculator.',
+  '游戏中打开的角色与工具所选角色不同。': 'The active character does not match the character selected in the calculator.',
+  '请先关闭已打开的游戏，再由工具启动并连接。': 'Close the running game so the calculator can start and connect to it.',
+  '游戏连接未响应。请检查游戏是否已启动。': 'The game connection did not respond. Check that the game started.',
+  '此游戏版本尚不支持直接挂机。': 'This game version does not support direct idling yet.',
+  '首次准备游戏缓存：{progress}%。': 'Preparing the game cache: {progress}%.',
+  '找不到可用于启动缓存的内置磁盘。': 'No internal drive is available for the game cache.',
+  '内置磁盘没有足够空间写入游戏启动缓存。': 'The internal drive does not have enough space for the game cache.',
+  '另一个计算器正在准备同一份游戏缓存。': 'Another calculator is preparing the same game cache.',
+  '首次启动会限速准备内置盘缓存。后续启动会复用缓存。': 'The first launch prepares a cache on an internal drive at a limited speed. Later launches reuse it.',
+  '启动方式': 'Launch Mode',
+  '使用已安装游戏': 'Use Installed Game',
+  '使用内置盘缓存': 'Use Internal Drive Cache',
+  '复用游戏文件，运行时从游戏所在磁盘读取。': 'Reuses the installed files and reads from the game drive while running.',
+  '无法在游戏盘创建文件链接。可以手动切换到内置盘缓存。': 'Could not create file links on the game drive. You can manually switch to the internal drive cache.',
+  '请先退出已启动的游戏，再切换启动方式。': 'Exit the running game before changing the launch mode.',
+  '读取游戏或写入缓存失败，已停止启动游戏。': 'Game startup stopped because the game could not be read or the cache could not be written.',
+  '游戏中的行动已停止或被切换，队列已结束。': 'The action stopped or changed in the game. The queue has ended.',
+  '游戏未能执行第 {step} 步。': 'The game could not execute step {step}.',
+  '游戏判定第 {step} 步尚未解锁。': 'The game reported that step {step} is locked.',
+  '第 {step} 步暂不支持直接控制。': 'Direct control is unavailable for step {step}.',
+  '队列执行失败。': 'The queue failed.',
+  '已经有队列正在运行。': 'A queue is already running.',
+  '队列包含无法直接执行的步骤。': 'The queue contains steps that cannot run directly.',
+  '新行动首次使用时需要录制。切回游戏，点击开始该行动，再按 Ctrl+F8。点击停止该行动，再按一次 Ctrl+F8 完成录制。同一行动下次可直接开始挂机。': 'Record each new action once. Return to the game, start the action and press Ctrl+F8. Stop it and press Ctrl+F8 again. You can start the same action directly next time.',
+  '搜索技能、地点或行动': 'Search skills, locations, or actions',
+  '挂机时长（分钟）': 'Duration (minutes)',
+  '添加步骤': 'Add Step',
+  '按执行顺序添加挂机行动。': 'Add actions in the order you want them to run.',
+  '调整顺序': 'Reorder',
+  '队列名称': 'Queue Name',
+  '完成后从头循环': 'Repeat from the start',
+  '网页版可保存计划，执行队列请使用 Windows 桌面版。': 'The web version saves your plan. Use the Windows desktop version to run the queue.',
+  '在步骤旁点「录制」，切回游戏，点击开始该行动，再按 Ctrl+F8。点击停止该行动，再按一次 Ctrl+F8 完成录制。': 'Choose Record next to a step, switch to the game, start the action, and press Ctrl+F8. Stop the action and press Ctrl+F8 again to finish recording.',
+  '开始队列前让角色空闲，并保持录制时的游戏窗口尺寸和界面布局。点击开始后有 5 秒切回游戏。': 'Before starting the queue, leave your character idle and keep the same game window size and layout. After starting, you have 5 seconds to return to the game.',
+  '开始队列': 'Start Queue',
+  '继续队列': 'Resume Queue',
+  '取消队列': 'Cancel Queue',
+  '升级 {item}': 'Upgrade {item}',
+  '升级 · {name}': 'Upgrade · {name}',
+  '即时': 'Instant',
+  '加入定时挂机': 'Add to Timed Queue',
+  '已比较产线中的最高收益': 'Highest GP Among Compared Chains',
+  '按星界献祭计算': 'Calculate with Astral Offerings',
+  '星界献祭': 'Astral Offerings',
+  '副本 · {name}': 'Dungeon · {name}',
+  '预计通关次数': 'Estimated Clears',
+  '副本按完整通关结算。耗时和补给按各波敌人的基础战斗估算。': 'Dungeon rewards require full clears. Time and supplies are estimated from basic combat across encounter waves.',
+  '暂无可用的副本战斗速度。请检查存档配装、弹药和符文。': 'Dungeon rate unavailable. Check your saved loadout, ammunition and runes.',
+  '单次预计 {time}': 'Estimated {time} per clear',
+  '计入有受伤风险的偷窃': 'Include risky Thieving',
+  '有风险的偷窃收益未扣除死亡中断。': 'Risky Thieving estimates exclude interruptions from death.',
+  '特殊攻击和区域效果未完全计入，实际击杀与补给可能不同。': 'Some special attacks and area effects are outside this estimate. Actual kills and supply use may differ.',
+  '敌人单次攻击可能造成满血秒杀，收益未计入死亡中断。': 'An enemy attack may kill from full health. The estimate excludes interruptions from death.',
+  '录制': 'Record',
+  '重新录制': 'Record Again',
+  '正在录制。请切回游戏，在开始和停止行动后分别按 Ctrl+F8。': 'Recording. Return to the game and press Ctrl+F8 after starting and after stopping the action.',
+  '已录制本步骤。': 'Step recorded.',
+  '请在 {seconds} 秒内切回游戏。': 'Return to the game within {seconds} seconds.',
+  '正在执行第 {step} 步的点击。': 'Playing the recorded clicks for step {step}.',
+  '第 {step} 步进行中，剩余 {seconds} 秒。': 'Step {step} is running with {seconds} seconds left.',
+  '游戏窗口未在前台。点击继续后切回游戏。': 'The game window is not in the foreground. Resume, then return to the game.',
+  '游戏窗口尺寸与录制时不同。恢复原尺寸后再继续。': 'The game window size has changed. Restore its recorded size before resuming.',
+  '队列已完成。': 'Queue complete.',
+  '队列已取消。': 'Queue cancelled.',
+  '游戏已暂停，队列正在等待继续。': 'Game paused. The queue is waiting to resume.',
+  '正在等待游戏确认停止。': 'Waiting for the game to confirm the action stopped.',
+  '队列已终止，未能确认游戏行动是否已停止。请查看游戏。': 'Queue ended. Check in game whether the action stopped.',
+  '此行动已在游戏中运行。请先在游戏中停止，再启动队列。': 'This action is already running. Stop it in the game before starting the queue.',
+  '第 {step} 步缺少开工材料，队列已结束。': 'Step {step} lacks the materials to start. The queue stopped.',
+  '队列执行失败。请检查游戏窗口和录制步骤。': 'The queue failed. Check the game window and the recorded steps.',
+  '已有队列或录制正在运行。': 'A queue or recording is already running.',
+  '队列包含无效或尚未录制的步骤。': 'The queue contains invalid or unrecorded steps.',
+  '录制超时。请重新录制。': 'Recording timed out. Record the step again.',
+  '录制期间窗口尺寸发生变化。请固定尺寸后重新录制。': 'The window size changed during recording. Keep it fixed and record the step again.',
+  '每段录制最多可包含 20 次点击。': 'Each recording segment supports up to 20 clicks.',
+  '游戏数据中找不到此行动。': 'This action is missing from the game data.',
+  '每轮计划时长 {duration}': 'Planned duration per round: {duration}',
+  '第 {number} 步的挂机分钟数': 'Minutes for step {number}',
+  '上移': 'Move Up',
+  '下移': 'Move Down',
+  '请从搜索结果中选择一个行动。': 'Choose an action from the search results.',
+  '队列最多可添加 200 步。': 'The queue supports up to 200 steps.',
   '产线耗时': 'Chain Time',
   '在所选时长和库存下暂无可行产线。': 'No production chain fits this duration and inventory.',
   '当前无法估算所选物品的完整产线。': 'A complete estimate is unavailable for the selected item.',
@@ -139,6 +299,17 @@ const english = {
   '准备 {item}': 'Obtain {item}',
   '{name}的产线': 'Chain for {name}',
   '出售 {item}': 'Sell {item}',
+  '献祭砧台': 'Sacrificial Anvil',
+  '按献祭砧台计算': 'Calculate with the Sacrificial Anvil',
+  '存档尚未解锁献祭砧台。': 'This save has not unlocked the Sacrificial Anvil.',
+  '献祭砧台折现': 'Sacrificial Anvil proceeds',
+  '献祭砧台额外金币': 'Sacrificial Anvil bonus GP',
+  '献祭收藏品': 'Sacrificial Anvil collectables',
+  '献祭砧台平均额外经验 {value}': 'Sacrificial Anvil average bonus XP {value}',
+  '预计献祭数量': 'Estimated Quantity Sacrificed',
+  '献祭 {item}': 'Sacrifice {item}',
+  '献祭折现 {value} GP': '{value} GP from sacrifice',
+  '开启献祭砧台时，此成品不会入库': 'The Sacrificial Anvil destroys this product',
   '金币消耗 {value} GP': 'GP spent {value}',
   '已用仓库材料价值 {value} GP': 'Value of bank materials used {value} GP',
   '取自仓库：{items}': 'Taken from bank: {items}',
@@ -272,6 +443,7 @@ const english = {
   '技能经验': 'Skill XP',
   '战斗经验': 'Combat XP',
   '推荐练级方案': 'Recommended Training',
+  '练级方案': 'Training Plan',
   '推荐挂机时长（小时）': 'Training Duration (hours)',
   '挂机时长须为 1 分钟到 24 小时。': 'Idle duration must be between 1 minute and 24 hours.',
   '增加 30 分钟': 'Add 30 minutes',
@@ -312,6 +484,7 @@ const english = {
   '生命值不足以继续战斗': 'Insufficient hitpoints to continue fighting',
   '此方案含特殊攻击或区域效果，实际经验和补给消耗可能不同。': 'This plan includes special attacks or area effects. Actual XP and supply use may differ.',
   '按所选战斗时长估算收益。': 'Gains are estimated for the selected session length.',
+  '先备齐材料并完成制作。制作时间不计入练级用时，弹药和符文仍按库存。': 'Craft the equipment first. Training time excludes crafting, and ammunition and runes are limited by stock.',
   '调整战斗设置': 'Edit combat settings',
   '战斗目标 {target}': 'Combat target {target}',
   '战斗目标 {target} · 挂机时长 {time}': 'Combat target {target} · Session length {time}',
@@ -423,6 +596,12 @@ const english = {
     'Load the character save, fight only the selected monster for a while, then click Reload Save after the game saves again.',
   '金币和掉落按普通怪物的基础战利品估算。': 'GP and drops are estimated from regular monsters’ base rewards.',
   '战斗收益': 'Combat Gains',
+  '战斗技能等级收益': 'Combat Skill Level Gains',
+  '当前配装打同一目标约 {time}': 'About {time} against the same target with your current gear',
+  '当前等级': 'Current Level',
+  '预计等级': 'Projected Level',
+  '距下一级 XP': 'XP to Next Level',
+  '副本经验按预计完整通关和各波敌人估算。': 'Dungeon XP is estimated from completed clears and the enemies in each wave.',
   '本机游戏数据没有可用于估算的普通怪物。': 'No supported monsters were found in the local game data.',
   '战斗目标': 'Combat Target',
   '实际击杀数／小时': 'Observed Kills per Hour',
@@ -615,7 +794,13 @@ const english = {
 };
 
 const uiLocales = { en: 'en-US', zh: 'zh-CN', 'zh-Hant': 'zh-Hant' };
-const supportedLanguage = language => Object.hasOwn(uiLocales, language) ? language : undefined;
+function supportedLanguage(language) {
+  if (typeof language !== 'string') return;
+  const tag = language.trim().toLowerCase().replaceAll('_', '-');
+  if (tag === 'zh' || /^zh-(cn|sg|hans)(-|$)/.test(tag)) return 'zh';
+  if (/^zh-(tw|hk|mo|hant)(-|$)/.test(tag)) return 'zh-Hant';
+  if (tag === 'en' || tag.startsWith('en-')) return 'en';
+}
 const requestedLanguage = supportedLanguage(new URLSearchParams(location.search).get('lang'));
 let uiLanguage = requestedLanguage ?? 'en';
 let staticLabels;
@@ -625,7 +810,8 @@ const traditionalStrings = new Map();
 function traditionalText(text) {
   if (!/\p{Script=Han}/u.test(text ?? '')) return text;
   if (!traditionalStrings.has(text)) {
-    convertToTraditional ??= OpenCC.Converter({ from: 'cn', to: 't' });
+    if (typeof globalThis.OpenCC?.Converter !== 'function') return text;
+    convertToTraditional ??= globalThis.OpenCC.Converter({ from: 'cn', to: 't' });
     traditionalStrings.set(text, convertToTraditional(text));
   }
   return traditionalStrings.get(text);
@@ -634,7 +820,12 @@ function traditionalText(text) {
 function t(source, args = {}) {
   const message = uiLanguage === 'en' ? english[source] ?? source :
     uiLanguage === 'zh-Hant' ? traditionalText(source) : source;
-  return message.replace(/\{(\w+)\}/g, (token, key) => args[key] ?? token);
+  const localized = uiLanguage === 'en' ? message :
+    message.replace(/(\p{Script=Han}) +(?=\b(?:GP|XP|ID)\b)/gu, '$1').replace(/\b(GP|XP|ID)\b/g, unit => {
+    const label = { GP: '金币', XP: '经验', ID: '编号' }[unit];
+    return uiLanguage === 'zh-Hant' ? traditionalText(label) : label;
+  });
+  return localized.replace(/\{(\w+)\}/g, (token, key) => args[key] ?? token);
 }
 
 function uiLocale() {
@@ -659,8 +850,15 @@ function formatDuration(hours, includeDays = false) {
 }
 
 function localizedName(names, fallback) {
-  if (uiLanguage === 'zh-Hant') return names?.['zh-Hant'] ?? traditionalText(names?.zh ?? fallback ?? names?.en);
-  return names?.[uiLanguage] ?? fallback;
+  const name = names?.[uiLanguage] ?? (uiLanguage === 'zh-Hant' ? names?.zh : undefined) ?? fallback;
+  if (typeof name !== 'string' || !name) return name;
+  const hasChinese = /\p{Script=Han}/u.test(name);
+  if (uiLanguage === 'en' ? hasChinese : !hasChinese && /[A-Za-z]/.test(name)) return t('未知名称');
+  return uiLanguage === 'zh-Hant' && !names?.['zh-Hant'] ? traditionalText(name) : name;
+}
+
+function formatGp(value) {
+  return t('{value} GP', { value: fullNumber(value) });
 }
 
 function gameName(record) {
@@ -696,11 +894,15 @@ function applyLanguage() {
         if (label) staticLabels.push(() => node.setAttribute(attr, t(label)));
       }
     }
-    for (const button of document.querySelectorAll('[data-hours], [data-xp-hours]')) {
-      const hours = button.dataset.hours ?? button.dataset.xpHours;
+    for (const button of document.querySelectorAll('[data-hours]')) {
+      const hours = button.dataset.hours;
       staticLabels.push(() => { button.textContent = t('{value} 小时', { value: hours }); });
     }
   }
   for (const update of staticLabels) update();
-  document.getElementById('language').value = uiLanguage;
+  const language = document.getElementById('language');
+  for (const option of language.options) {
+    option.text = t({ en: '英语', zh: '简体中文', 'zh-Hant': '繁体中文' }[option.value]);
+  }
+  language.value = uiLanguage;
 }

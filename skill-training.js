@@ -71,23 +71,20 @@ function skillTrainingProfile(character, skill, loadout, current, preparation) {
   return updated;
 }
 
-function compareSkillTraining(a, b, goalMode) {
-  if (goalMode) {
-    const reachable = Number(Boolean(b.target?.reaches)) - Number(Boolean(a.target?.reaches));
-    if (reachable) return reachable;
-    if (a.target?.reaches) return a.target.hours - b.target.hours;
-    return (b.target?.xp ?? 0) - (a.target?.xp ?? 0);
-  }
-  return b.row.xp - a.row.xp;
+function compareSkillTraining(a, b) {
+  const reachable = Number(Boolean(b.target?.reaches)) - Number(Boolean(a.target?.reaches));
+  if (reachable) return reachable;
+  if (a.target?.reaches) return a.target.hours - b.target.hours;
+  return (b.target?.xp ?? 0) - (a.target?.xp ?? 0);
 }
 
-function* skillTrainingSearch(catalogue, character, { skill, hours, goal, goalMode, actionId }, shop = false) {
+function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId }, shop = false) {
   const actions = catalogue.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId));
   const { current, candidates, owned, offers } = skillTrainingOptions(catalogue, character, skill, actions, shop);
   if (!actions.length || (shop && !offers.size)) return null;
   const skillCatalogue = { ...catalogue, xpActions: actions };
   const saved = new Map(current.map(row => [row.slot, row]));
-  const compare = (a, b) => compareSkillTraining(a, b, goalMode) ||
+  const compare = (a, b) => compareSkillTraining(a, b) ||
     (a.preparation?.crafts.length ?? 0) - (b.preparation?.crafts.length ?? 0) || a.changes - b.changes;
   const evaluated = new Map();
   function score(loadout) {
@@ -165,7 +162,7 @@ let skillTrainingState = {};
 function updateSkillTraining(character, settings) {
   const panel = byId('skillTraining');
   if (panel.closest('[hidden]')) return;
-  const { skill, actionId, hours, goalMode, goal } = settings;
+  const { skill, actionId, hours, goal } = settings;
   const ownedStatus = byId('skillTrainingOwnedStatus');
   const shopStatus = byId('skillTrainingShopStatus');
   const ownedResult = byId('skillTrainingOwnedResult');
@@ -178,7 +175,7 @@ function updateSkillTraining(character, settings) {
     return;
   }
   shopSection.hidden = false;
-  const scope = JSON.stringify([character.characterId, skill, hours, goalMode, actionId, goal?.target]);
+  const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target]);
   const key = JSON.stringify([scope, goal?.remaining, character.levels, character.stock, character.currencies,
     character.equipped, character.skillToolbelt?.[skill], character.bonuses, character.xpBonuses, character.purchases,
     character.ranks, character.astrologyNodes, character.unlockedPets, character.questProgress, character.recipeStatistics,
@@ -223,26 +220,26 @@ function updateSkillTraining(character, settings) {
   const summary = skillTrainingState.summary;
   const owned = summary?.owned;
   const purchased = summary?.shop;
-  const upgrade = purchased?.preparation && (!owned || compareSkillTraining(purchased, owned, goalMode) < 0) ? purchased : null;
+  const upgrade = purchased?.preparation && (!owned || compareSkillTraining(purchased, owned) < 0) ? purchased : null;
   const ownedMessage = !summary ? '正在比较可用的技能配装…' : summary.ownedFailed ? '暂时无法计算练级方案。' :
     !owned ? '没有同时满足等级、解锁条件和库存的行动。' : null;
   const shopMessage = !summary ? '正在比较灵巧商店的装备…' : summary.shopFailed ? '暂时无法计算练级方案。' :
     !upgrade ? (owned ? '灵巧商店暂无更快的配装，沿用现有装备即可。' : '当前未找到可用的商店配装。') : null;
-  showSkillTrainingPlan(ownedResult, ownedStatus, owned, ownedMessage, settings);
-  showSkillTrainingPlan(shopResult, shopStatus, upgrade, shopMessage, settings);
+  showSkillTrainingPlan(ownedResult, ownedStatus, owned, ownedMessage);
+  showSkillTrainingPlan(shopResult, shopStatus, upgrade, shopMessage);
 }
 
-function showSkillTrainingPlan(container, status, result, message, { hours, goalMode }) {
+function showSkillTrainingPlan(container, status, result, message) {
   container.hidden = !result;
   status.hidden = !message;
   if (message && status.textContent !== t(message)) status.textContent = t(message);
   if (!result) return;
   const { row, target, preparation, loadout, current } = result;
-  const name = id => gameName(catalog.items[id]) ?? id;
+  const name = id => gameName(catalog.items[id]) ?? t('未知物品');
   const metrics = create('div', undefined, 'metrics');
   for (const [label, value] of [
-    [goalMode ? '预计可获 XP' : '预计 XP', fullNumber(goalMode ? target?.xp ?? row.xp : row.xp)],
-    [goalMode ? '行动中 XP／小时' : '整段平均 XP／小时', fullNumber(goalMode ? target?.rate ?? row.activeXpPerHour : row.xpPerHour)],
+    ['预计可获 XP', fullNumber(target?.xp ?? row.xp)],
+    ['行动中 XP／小时', fullNumber(target?.rate ?? row.activeXpPerHour)],
     ['到目标需时', target?.reaches ? formatXpDuration(target.hours) : target ? t(target.reason ?? '当前库存不足') : '—']
   ]) {
     const metric = create('div', t(label));
@@ -254,7 +251,7 @@ function showSkillTrainingPlan(container, status, result, message, { hours, goal
   for (const id of new Set([...loadout, ...current].map(item => item.slot))) {
     const equipped = loadout.find(item => item.slot === id);
     const slot = create('div');
-    slot.append(create('dt', gameName(catalog.combatSlots[id]) ?? id),
+    slot.append(create('dt', gameName(catalog.combatSlots[id]) ?? t('未知名称')),
       trainingGearValue(trainingGearName(equipped, name), trainingGearName(current.find(item => item.slot === id), name)));
     gear.append(slot);
   }
@@ -267,7 +264,6 @@ function showSkillTrainingPlan(container, status, result, message, { hours, goal
   if (details) {
     children.push(details, create('p', t('经验收益按买齐并装备后估算，所需资源不足时会标出缺口。'), 'muted'));
   }
-  if (!goalMode && target?.reaches && target.hours > hours) children.push(create('p', t('超过本次挂机时长'), 'muted'));
   if (row.risky) children.push(create('p', t('失败可受伤，未计生存时间'), 'xp-risk'));
   if (row.skillCharges?.length) children.push(create('p', t('道具预计消耗 {items}，耗尽后按剩余加成计算。', {
     items: row.skillCharges.map(charge => name(charge.id) + ' × ' + fullNumber(Math.ceil(charge.quantity))).join(' · ')

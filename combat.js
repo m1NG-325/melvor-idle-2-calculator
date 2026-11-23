@@ -2,7 +2,8 @@ function combatHealthLimit(attributes, rate, hitpoints = attributes?.currentHp) 
   if (!attributes?.enemy || !(rate > 0)) return null;
   const { enemy, maxHp, enemyHp, lifesteal } = attributes;
   const initial = Math.max(0, Math.min(maxHp, hitpoints ?? maxHp));
-  const damage = Math.max(0, enemy.turnsPerKill * enemy.damagePerTurn - Math.min(maxHp, (enemyHp ?? 0) * (lifesteal ?? 0))) * rate;
+  const damage = Math.max(0, enemy.turnsPerKill * enemy.damagePerTurn + (enemy.passiveDamagePerKill ?? 0) -
+    Math.min(maxHp, (enemyHp ?? 0) * (lifesteal ?? 0))) * rate;
   if (!Number.isFinite(damage)) return null;
   const budget = Math.max(0, initial - enemy.maxHit);
   if (!(damage > 0) && budget > 0) return null;
@@ -28,7 +29,8 @@ function estimateCombat(target, items, options) {
     const bounds = [];
     const activeSupplies = stage.supplies.filter(supply => !expired.has(supply.id) &&
       (!supply.food || (remaining.get(supply.id) ?? supply.available ?? Infinity) > 0));
-    const health = activeSupplies.some(supply => supply.food) ? null :
+    const food = activeSupplies.filter(supply => supply.food);
+    const health = food.length ? null :
       combatHealthLimit(stage.attributes, stage.killsPerHour, hitpoints);
     if (health) {
       duration = Math.min(duration, health.hours);
@@ -45,7 +47,8 @@ function estimateCombat(target, items, options) {
     }
     if (duration > 0) {
       phases.push({ hours: duration, killsPerHour: stage.killsPerHour, progress: killProgress,
-        attributes: stage.attributes, character: stage.character });
+        attributes: stage.attributes, character: stage.character, encounters: stage.encounters,
+        lethalHit: lethalCombatHit(stage.attributes, food, hitpoints) });
     }
     activeHours += duration;
     killProgress += stage.killsPerHour * duration;
@@ -85,6 +88,14 @@ function estimateCombat(target, items, options) {
   const net = payout - costs.reduce((sum, row) => sum + row.value, 0);
   return { plannedHours, activeHours, limit, kills, killsPerHour: options.killsPerHour, phases, expired: [...expired], unknown,
     direct, drops, costs, payout, net, netPerHour: net / options.hours };
+}
+
+function lethalCombatHit(attributes, food, hitpoints) {
+  const maxHit = attributes?.enemy?.maxHit;
+  if (!(maxHit > 0)) return false;
+  const hp = hitpoints ?? attributes.currentHp ?? attributes.maxHp;
+  return maxHit >= hp || maxHit >= attributes.maxHp ||
+    food.some(row => (row.threshold ?? row.projection?.threshold) < maxHit);
 }
 
 let combatView;
@@ -244,7 +255,14 @@ function combatExperiencePlan(character, attributes, target, estimate, model, mo
   }
   return {
     tasks,
+    at: (skill, hours) => xpAt(skill, hours * 3600000),
     total: skill => xpAt(skill, end),
+    completedFights(skill, count) {
+      const reward = rewards[0];
+      if (!reward) return 0;
+      const kills = skill === 'Slayer' ? tasks.reduce((sum, task) => sum + Math.min(count, task.remaining), 0) : count;
+      return kills * reward.xpPerCycle(skill);
+    },
     hasXp: skill => rewards.some(phase => phase.hasXp(skill)),
     timeForGoal,
     projectedTimeForGoal(skill, remaining) {
@@ -261,6 +279,19 @@ function combatExperiencePlan(character, attributes, target, estimate, model, mo
       return reached == null ? null : (before + reached) / 3600000;
     }
   };
+}
+
+function forecastCombatExperience(target, items, options, goals, modifiers) {
+  // Start with a finite projection, then extend it only as far as the selected goals need.
+  let hours = 24;
+  while (true) {
+    const estimate = estimateCombat(target, items, { ...options, hours, cap: 0 });
+    const plan = combatExperiencePlan(options.character, options.attributes, target, estimate, options.model, modifiers);
+    if (estimate.limit) return { estimate, plan };
+    const next = Math.max(hours, ...[...goals].map(([skill, remaining]) => plan.projectedTimeForGoal(skill, remaining) ?? 0));
+    if (next <= hours) return { estimate, plan };
+    hours = next + 1 / 3600000;
+  }
 }
 
 function combatXpModifiers(model, catalogue) {
@@ -283,100 +314,171 @@ function combatXpModifiers(model, catalogue) {
   };
 }
 
-function renderCombatExperience(character, attributes, target, estimate) {
-  const { model } = combatView;
-  const plan = estimate ? combatExperiencePlan(character, attributes, target, estimate, model, combatXpModifiers(model, catalog)) : null;
-  const tasks = plan?.tasks ?? [];
-  const hours = byId('combatHours').valueAsNumber;
-  byId('combatXpStatus').textContent = t(!attributes ? '读取角色存档后可按战斗配装估算经验。' :
-    estimate ? '按当前姿态、祝祭和屠杀任务估算。命中经验计入未打完的一场。' : '有可用的击杀速度后会显示经验和预计时间。');
-  const body = byId('combatXpRows');
-  COMBAT_XP_SKILLS.forEach((skill, index) => {
-    let card = body.children[index];
-    if (!card) {
-      card = create('article', undefined, 'combat-xp-card');
-      card.dataset.skill = skill;
-      const metrics = create('dl', undefined, 'combat-xp-metrics');
-      for (const metric of ['预计 XP', '整段平均 XP／小时', '行动中 XP／小时']) {
-        const field = create('div');
-        field.append(create('dt', t(metric)), create('dd'));
-        metrics.append(field);
-      }
-      const slider = create('input');
-      slider.type = 'range';
-      slider.min = '1';
-      slider.max = XP_LEVEL_CAP;
-      slider.step = '1';
-      const field = create('div', undefined, 'xp-level-slider combat-goal-slider');
-      const heading = create('div', undefined, 'combat-goal-heading');
-      const controls = create('div', undefined, 'combat-goal-stepper');
-      const decrease = create('button', undefined, 'combat-goal-decrease');
-      const increase = create('button', undefined, 'combat-goal-increase');
-      decrease.type = increase.type = 'button';
-      controls.append(decrease, increase);
-      heading.append(create('span'), controls);
-      field.append(heading, slider);
-      card.append(create('h3'), metrics, field, create('div', undefined, 'combat-goal-progress'),
-        create('p', undefined, 'combat-xp-note muted'));
-      body.append(card);
+function renderCombatExperience(attributes, target, options) {
+  combatView.xpEncounter = { attributes, target, options };
+  updateCombatTraining();
+}
+
+function renderCombatLevelGains(character, status, xpForSkill) {
+  byId('combatLevelsStatus').textContent = status;
+  const available = Boolean(xpForSkill && character?.characterId);
+  byId('combatLevelsTable').hidden = !available;
+  if (!available) {
+    byId('combatLevelsRows').replaceChildren();
+    return;
+  }
+  byId('combatLevelsRows').replaceChildren(...COMBAT_XP_SKILLS.map(skill => {
+    const row = create('tr');
+    const level = character.levels[skill];
+    const state = xpGoalProgress(level, character.skillXp?.[skill], Math.min(XP_LEVEL_CAP, level + 1));
+    const gained = Math.max(0, xpForSkill(skill));
+    const xp = state ? state.xp + gained : null;
+    const projected = xp == null ? null : levelFor(xp);
+    const remaining = projected == null || projected >= XP_LEVEL_CAP ? null : Math.ceil(xpThresholds[projected + 1] - xp);
+    const levelChange = projected != null && projected > level ? level + ' → ' + projected : level ?? '—';
+    row.append(create('td', skillName(skill, catalog.xpSkills)), create('td', levelChange),
+      create('td', fullNumber(gained)),
+      create('td', remaining == null ? '—' : fullNumber(remaining)));
+    return row;
+  }));
+}
+
+function renderCombatXpOverview(character, selected, owned, craft, prepared) {
+  const { attributes, target, options } = combatView.xpEncounter ?? {};
+  const goals = new Map(COMBAT_XP_SKILLS.map(skill => {
+    const goal = selectedExperienceGoal(character, skill);
+    return [skill, xpGoalProgress(character?.levels?.[skill], character?.skillXp?.[skill], goal.level, null, goal.startingXp)];
+  }));
+  const { plan, estimate } = options
+    ? forecastCombatExperience(target, combatView.items, options,
+      new Map([...goals].map(([skill, goal]) => [skill, goal?.remaining ?? 0])), combatXpModifiers(combatView.model, catalog)) : {};
+  byId('combatXpStatus').textContent = t(!character?.characterId ? '读取角色存档后可按战斗配装估算经验。' :
+    '选择战斗技能，在下方比较到目标等级的时间。');
+  const grid = byId('combatXpRows');
+  const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.skill : null;
+  const encounterName = target ? gameName(target) : '';
+  const current = new Map(COMBAT_XP_SKILLS.map(skill => {
+    if (!plan || (!attributes && skill !== 'Slayer')) return [skill, null];
+    const remaining = goals.get(skill)?.remaining ?? 0;
+    const goalHours = plan.hasXp(skill) ? plan.timeForGoal(skill, remaining) : null;
+    const xp = goalHours == null ? plan.total(skill) : Math.max(remaining, plan.at(skill, goalHours));
+    const hours = goalHours ?? estimate.activeHours;
+    const explanation = skill === 'Slayer' && plan.tasks.length
+      ? t('当前任务剩余 {count} 次', { count: fullNumber(plan.tasks.reduce((sum, task) => sum + task.remaining, 0)) })
+      : xp === 0 && remaining > 0 && estimate.kills > 0
+        ? t(skill === 'Slayer' ? '当前目标无匹配的屠杀任务' : skill === 'Prayer'
+          ? '暂无可计入的祝祭经验' : '当前姿态不提供此项经验') : '';
+    return [skill, {
+      xp, goalHours, projectedHours: plan.projectedTimeForGoal(skill, remaining),
+      perHour: hours ? xp / hours : null, estimate, explanation
+    }];
+  }));
+  const alternatives = combatCardPlans(character, selected, goals);
+  const ranked = [
+    ['owned', '已拥有装备推荐', owned],
+    ['craft', '可制造装备推荐', craft],
+    ['prepared', '备齐符文后的推荐', prepared],
+    ['current', '当前战斗', current.get(selected)]
+  ].filter(([, , result]) => result).sort((a, b) => compareCombatTraining(a[2], b[2]));
+  const actionName = result => result.enemy ? gameName(result.enemy.target) + ' · ' + gameName(result.enemy.area) : encounterName;
+  const choices = experienceActionChoices(character);
+  const saved = choices[selected] ?? '';
+  const best = ranked.find(([, , result]) => result.xp > 0);
+  const picked = ranked.find(([id]) => id === saved) ?? best ?? ranked[0];
+  const input = byId('combatXpAction');
+  const automatic = goals.get(selected)?.remaining === 0 ? t('已达到目标') : best
+    ? t(best[2].goalHours == null ? '当前库存经验最多 · {action}' : '最快升级 · {action}', { action: actionName(best[2]) })
+    : t('暂无可用行动');
+  const optionsList = [new Option(automatic, ''), ...ranked.map(([id, label, result]) =>
+    new Option(t(label) + ' · ' + actionName(result), id))];
+  if (saved && !ranked.some(([id]) => id === saved)) {
+    const label = { owned: '已拥有装备推荐', craft: '可制造装备推荐', current: '当前战斗', prepared: '备齐符文后的推荐' }[saved];
+    if (label) {
+      const unavailable = new Option(t('{action}（暂不可用）', { action: t(label) }), saved);
+      unavailable.disabled = true;
+      optionsList.push(unavailable);
     }
-    const xp = plan && (attributes || skill === 'Slayer') ? plan.total(skill) : null;
-    const rate = xp == null ? null : xp / hours;
-    const activeRate = xp == null || !estimate?.activeHours ? null : xp / estimate.activeHours;
-    const taskLimited = skill === 'Slayer' && xp > 0 && tasks.every(task => task.remaining <= estimate?.kills);
-    const [label, metrics, field, progress, note] = card.children;
-    const [[totalLabel, totalCell], [rateLabel, rateCell], [activeLabel, activeCell]] =
-      Array.from(metrics.children, node => node.children);
-    label.textContent = skillName(skill, catalog.xpSkills);
-    totalLabel.textContent = t('预计 XP');
-    rateLabel.textContent = t('整段平均 XP／小时');
-    activeLabel.textContent = t('行动中 XP／小时');
-    totalCell.textContent = xp == null ? '—' : fullNumber(xp);
-    rateCell.textContent = rate == null ? '—' : fullNumber(rate);
-    activeCell.textContent = activeRate == null ? '—' : fullNumber(activeRate);
-    let explanation = '';
-    if (skill === 'Slayer' && tasks.length) {
-      explanation = t('当前任务剩余 {count} 次', { count: fullNumber(tasks.reduce((sum, task) => sum + task.remaining, 0)) });
-    } else if (xp === 0 && estimate?.kills > 0) {
-      const reason = skill === 'Slayer' ? '当前目标无匹配的屠杀任务' :
-        skill === 'Prayer' ? '暂无可计入的祝祭经验' : '当前姿态不提供此项经验';
-      explanation = t(reason);
-    }
-    note.textContent = explanation;
-    note.hidden = !explanation;
-    const [heading, slider] = field.children;
-    const [caption, controls] = heading.children;
-    const [decrease, increase] = controls.children;
-    const skillLabel = { skill: label.textContent };
-    slider.setAttribute('aria-label', t('{skill}目标等级', skillLabel));
-    decrease.title = t('{skill}目标等级降低 1 级', skillLabel);
-    increase.title = t('{skill}目标等级提高 1 级', skillLabel);
-    decrease.setAttribute('aria-label', decrease.title);
-    increase.setAttribute('aria-label', increase.title);
-    function updateGoal() {
-      const goal = selectedExperienceGoal(character, skill);
-      renderXpGoalSlider(slider, goal.level);
-      decrease.disabled = goal.level <= Number(slider.min);
-      increase.disabled = goal.level >= Number(slider.max);
-      caption.textContent = t('目标等级 {level}', { level: goal.level });
-      const timeForGoal = remaining => {
-        const actual = plan?.timeForGoal(skill, remaining);
-        return { hours: actual ?? plan?.projectedTimeForGoal(skill, remaining), extended: actual == null };
-      };
-      const blocked = !plan?.hasXp(skill) ? null : taskLimited ? '当前任务结束前无法升级' :
-        estimate?.limit ? '本次补给或材料不足以升级' : '本次挂机内无法达到目标';
-      progress.replaceChildren(renderXpProgress(character, skill, goal, timeForGoal, blocked, hours));
-    }
-    function setGoal(level) {
-      setExperienceGoal(character, skill, level);
-      updateGoal();
-      if (byId('combatTrainingSkill').value === skill) updateCombatTraining();
-    }
-    slider.oninput = () => setGoal(slider.valueAsNumber);
-    decrease.onclick = () => setGoal(slider.valueAsNumber - 1);
-    increase.onclick = () => setGoal(slider.valueAsNumber + 1);
-    updateGoal();
-  });
+  }
+  if (input.options.length !== optionsList.length || optionsList.some((option, index) => {
+    const previous = input.options[index];
+    return previous.value !== option.value || previous.text !== option.text || previous.disabled !== option.disabled;
+  })) input.replaceChildren(...optionsList);
+  input.value = optionsList.some(option => option.value === saved) ? saved : '';
+  input.disabled = !ranked.length;
+
+  grid.replaceChildren(...COMBAT_XP_SKILLS.map(skill => {
+    const estimate = current.get(skill);
+    const alternative = alternatives.get(skill);
+    const row = skill === selected ? picked?.[2] :
+      alternative && (!estimate || compareCombatTraining(alternative, estimate) < 0) ? alternative : estimate;
+    const waiting = row?.goalHours == null && goals.get(skill)?.remaining > 0 && character?.characterId &&
+      character.combat?.equipment && (skill === selected ? combatTraining.pending && saved !== 'current' : !alternatives.has(skill));
+    const summary = goals.get(skill)?.remaining === 0 ? t('已达到目标') : row?.goalHours != null
+      ? t(row.missingRunes?.length ? '备齐符文后约 {time}' : '到目标约 {time}', { time: formatXpDuration(row.goalHours) })
+      : waiting ? t('正在估算…')
+        : row?.projectedHours != null ? t('补足补给后约 {time}', { time: formatXpDuration(row.projectedHours) })
+          : row?.xp > 0 ? t('库存可获 {xp} XP', { xp: fullNumber(row.xp) })
+            : row?.explanation || t('暂无升级时间');
+    return experienceCard(grid, skill, selected, skillName(skill, catalog.xpSkills), character?.levels?.[skill],
+      row && (row.xp > 0 || row.projectedHours > 0) ? actionName(row) : t('暂无可用行动'), summary, id => {
+        byId('combatTrainingSkill').value = id;
+        updateCombatTraining();
+      });
+  }));
+  if (focused === selected) grid.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+
+  byId('combatXpDetailHeading').textContent = t('{skill}练级方案', { skill: skillName(selected, catalog.xpSkills) });
+  const level = selectedExperienceGoal(character, selected).level;
+  const field = byId('combatGoalLevel');
+  if (document.activeElement !== field || field.dataset.skill !== selected ||
+      field.dataset.character !== (character?.characterId ?? '')) field.value = level;
+  field.dataset.skill = selected;
+  field.dataset.character = character?.characterId ?? '';
+  renderXpGoalSlider(byId('combatGoalSlider'), level);
+
+  const limit = result => result.estimate.limit === 'Hitpoints' ? t('生命值不足以继续战斗') :
+    result.estimate.limit ? t('限制：{conditions}', { conditions: combatSupplyName(result.estimate.limit) }) : '';
+  const timing = result => {
+    if (!result) return t('暂无升级时间');
+    if (result.goalHours != null) return result.missingRunes?.length
+      ? t('备齐符文后约 {time}', { time: formatXpDuration(result.goalHours) }) : formatXpDuration(result.goalHours);
+    if (result.projectedHours != null) return formatXpDuration(result.projectedHours);
+    if (selected === 'Slayer' && result.xp > 0 && !result.estimate.limit) return t('当前任务结束前无法升级');
+    return t(result.estimate.limit ? '本次补给或材料不足以升级' : '暂无升级时间');
+  };
+  const goal = goals.get(selected);
+  const overview = byId('combatGoalOverview');
+  if (!goal) overview.textContent = t('暂无等级进度');
+  else {
+    const row = picked?.[2];
+    const notes = [
+      goal.remaining > 0 && row && t('按「{action}」的经验收益估算', { action: actionName(row) }),
+      saved && picked?.[0] !== saved && row && t('所选行动暂不可用，当前按推荐行动估算'),
+      row && limit(row),
+      row?.missingRunes?.length && t('先制作所需装备并补齐符文。预计用时只计算战斗。'),
+      row?.goalHours == null && row?.projectedHours != null && t('额外用时按持续战斗、补给充足估算。'),
+      !goal.exact && t('按所设等级的起始经验计算')
+    ].filter(Boolean);
+    renderExperienceGoalSummary(overview, goal, [
+      ['等级', t('{current} → {target}', { current: goal.level, target: goal.target })],
+      ['剩余 XP', fullNumber(Math.ceil(goal.remaining))],
+      ['预计剩余时间', goal.remaining === 0 ? t('已达到目标') : timing(row)]
+    ], notes);
+  }
+  byId('combatXpTable').hidden = !ranked.length;
+  byId('combatXpPlans').replaceChildren(...ranked.map(entry => {
+    const [, label, result] = entry;
+    const row = create('tr');
+    row.classList.toggle('xp-estimate-action', entry === picked);
+    const action = create('td', actionName(result));
+    action.append(create('small', t(label), 'muted'));
+    const restriction = [result.explanation, limit(result),
+      result.goalHours == null && result.projectedHours != null && t('额外用时按持续战斗、补给充足估算。')].filter(Boolean);
+    row.append(action, create('td', fullNumber(result.xp), 'number'),
+      create('td', result.perHour == null ? '—' : fullNumber(result.perHour), 'number'),
+      create('td', timing(result)), create('td', restriction.join(' · ') || '—', 'muted'));
+    return row;
+  }));
 }
 
 function initCombat(catalog) {
@@ -385,12 +487,13 @@ function initCombat(catalog) {
   const prayerCosts = Object.values(model.prayers).map(row => baseCombatId(row.cost?.Currency)).filter(Boolean);
   const currencyRules = Object.fromEntries(prayerCosts.map(id => [id, { kind: 'prayer' }]));
   const currencies = Object.fromEntries(prayerCosts.map(id => [id, { name: id, price: id === 'GoldPieces' ? 1 : 0 }]));
-  combatView = { targets, items: { ...currencies, ...catalog.items }, slots: catalog.combatSlots, spells: catalog.combatSpells,
+  const dungeons = catalog.combatDungeons ?? [];
+  combatView = { targets, dungeons, items: { ...currencies, ...catalog.items }, slots: catalog.combatSlots, spells: catalog.combatSpells,
     model, supplyRules: { ...catalog.combatSupplies, ...currencyRules }, suppressed: new Set(),
     kept: new Set(), supplies: [], samples: new Map(), character: null };
   initCombatTraining();
   const target = byId('combatTarget');
-  target.replaceChildren(...targets.map(enemy => new Option('', enemy.id)));
+  target.replaceChildren(...targets.map(enemy => new Option('', enemy.id)), ...dungeons.map(dungeon => new Option('', dungeon.id)));
   byId('combatOptions').hidden = !targets.length;
   byId('combatUnavailable').hidden = !!targets.length;
   const form = byId('combatOptions');
@@ -402,7 +505,7 @@ function initCombat(catalog) {
   byId('combatPickerSearch').addEventListener('input', renderCombatSupplyChoices);
   byId('combatResetGoals').addEventListener('click', () => {
     resetExperienceGoals(COMBAT_XP_SKILLS, combatView.character);
-    renderCombat();
+    updateCombatTraining();
   });
   byId('combatRestoreSupplies').addEventListener('click', () => {
     combatView.suppressed.clear();
@@ -421,8 +524,11 @@ function initCombat(catalog) {
 
 function localizeCombat() {
   if (!combatView) return;
-  const targets = new Map(combatView.targets.map(enemy => [enemy.id, enemy]));
-  for (const option of byId('combatTarget').options) option.text = gameName(targets.get(option.value));
+  const targets = new Map([...combatView.targets, ...combatView.dungeons].map(enemy => [enemy.id, enemy]));
+  for (const option of byId('combatTarget').options) {
+    const name = gameName(targets.get(option.value));
+    option.text = option.value.startsWith('Dungeon:') ? t('副本 · {name}', { name }) : name;
+  }
   for (const supply of combatView.supplies) localizeCombatSupply(supply);
   renderCombatSupplyChoices();
   renderCombat();
@@ -451,15 +557,15 @@ function renderCombatLoadout(attributes) {
   const rows = [];
   for (const [equipment, entries] of [[true, state?.equipment], [false, state?.toolbelt]]) {
     for (const entry of entries ?? []) {
-      const slot = gameName(slots?.[entry.slot]) ?? entry.slot;
-      const item = gameName(items[entry.id]) ?? entry.id;
+      const slot = gameName(slots?.[entry.slot]) ?? t('未知名称');
+      const item = gameName(items[entry.id]) ?? t('未知物品');
       const quantity = entry.quantity > 1 || (equipment && entry.slot === 'Ammo') ? ' × ' + fullNumber(entry.quantity) : '';
       rows.push(slot + ' · ' + item + quantity);
     }
     if (equipment) {
       for (const [id, item] of combatOccupiedSlots(model, entries)) {
-        const slot = gameName(slots?.[id]) ?? id;
-        rows.push(slot + ' · ' + t('由{item}占用', { item: gameName(items[item]) ?? item }));
+        const slot = gameName(slots?.[id]) ?? t('未知名称');
+        rows.push(slot + ' · ' + t('由{item}占用', { item: gameName(items[item]) ?? t('未知物品') }));
       }
     }
   }
@@ -467,22 +573,22 @@ function renderCombatLoadout(attributes) {
     if (!id) continue;
     const spell = spells?.[id];
     const runes = (attributes?.spellSupplies[id]?.runes ?? spell?.runes ?? []).map(({ id, quantity }) => t('{item} × {quantity}（仓库 {stock}）', {
-      item: gameName(items[id]) ?? id, quantity: fullNumber(quantity), stock: fullNumber(character.stock[id] ?? 0)
+      item: gameName(items[id]) ?? t('未知物品'), quantity: fullNumber(quantity), stock: fullNumber(character.stock[id] ?? 0)
     }));
-    rows.push([t(title), gameName(spell) ?? id, ...runes].join(' · '));
+    rows.push([t(title), gameName(spell) ?? t('未知名称'), ...runes].join(' · '));
   }
   if (state) {
     if (!state.equipment?.some(row => row.slot === 'Weapon')) {
-      rows.push((gameName(slots?.Weapon) ?? t('武器')) + ' · ' + (gameName(items.DefaultWeapon) ?? 'DefaultWeapon'));
+      rows.push((gameName(slots?.Weapon) ?? t('武器')) + ' · ' + (gameName(items.DefaultWeapon) ?? t('未知物品')));
     }
     const selectedFood = state.food ? t('{item} × {quantity}', {
-      item: gameName(items[state.food]) ?? state.food, quantity: fullNumber(character.stock[state.food] ?? 0)
+      item: gameName(items[state.food]) ?? t('未知物品'), quantity: fullNumber(character.stock[state.food] ?? 0)
     }) : t('未选择');
     rows.push(t('食物') + ' · ' + selectedFood);
-    if (attributes) rows.push(t('攻击姿态') + ' · ' + (gameName(model.stances[attributes.stanceId]) ?? attributes.stanceId));
+    if (attributes) rows.push(t('攻击姿态') + ' · ' + (gameName(model.stances[attributes.stanceId]) ?? t('未知名称')));
     for (const prayer of state.prayers ?? []) {
       const id = prayer.active ?? prayer.selected;
-      const label = gameName(model.prayers[id]) ?? id;
+      const label = gameName(model.prayers[id]) ?? t('未知名称');
       const currency = model.prayers[id]?.cost?.Currency?.replace(/^MelvorBase:/, '');
       const status = t(prayer.state === 1 ? '已启用' : prayer.state === 2 ? '待生效' : '已选择');
       rows.push([t('祝祭'), label, status, currency && t('{item} × {quantity}', {
@@ -504,7 +610,7 @@ function renderCombatAttributes(attributes) {
   byId('combatAttributes').hidden = !attributes;
   if (!attributes) return;
   const model = combatView.model;
-  const label = (group, id) => gameName(model[group][id]) ?? id;
+  const label = (group, id) => gameName(model[group][id]) ?? t('未知名称');
   const number = value => value == null ? '—' : decimals.format(value);
   const percent = value => value == null ? '—' : number(value * 100) + '%';
   const damageType = label('names', attributes.damageType);
@@ -598,7 +704,7 @@ function combatSupplyId(text) {
 }
 
 function combatSupplyName(id) {
-  return combatView.supplyRules[id]?.kind === 'prayer' ? shopCurrencyName(id) : gameName(combatView.items[id]) ?? id;
+  return combatView.supplyRules[id]?.kind === 'prayer' ? shopCurrencyName(id) : gameName(combatView.items[id]) ?? t('未知物品');
 }
 
 function exclusiveSupplyRole(id) {
@@ -619,7 +725,7 @@ function equippedSupplyIds() {
     const rule = supplyRules[row.id];
     return rule?.kind === 'charged' || (rule?.kind === 'ammo' && rule.ammoType === weapon?.RequiredAmmoType);
   }).map(row => row.id), ...(state.toolbelt ?? []).map(row => row.id)];
-  for (const id of [magic ? state.spell : null, state.imbuement]) {
+  for (const id of [magic ? state.spell : null, state.imbuement ?? state.activeImbuement]) {
     desired.push(...(spells[id]?.runes ?? []).map(row => row.id));
   }
   for (const prayer of state.prayers ?? []) {
@@ -665,7 +771,7 @@ function renderCombatSupplyChoices() {
     [id, combatSupplyName(id), ...Object.values(items[id]?.names ?? {})].some(name => name?.toLocaleLowerCase().includes(search))
   ).sort((a, b) => Number(useful.has(b)) - Number(useful.has(a)) || combatSupplyName(a).localeCompare(combatSupplyName(b), uiLocale()));
   byId('combatPickerResults').replaceChildren(...ids.map(id => {
-    const button = create('button', combatSupplyName(id) + ' · ' + id);
+    const button = create('button', combatSupplyName(id));
     button.type = 'button';
     button.setAttribute('aria-pressed', String(pickerRow?.item.value === id));
     button.addEventListener('click', () => {
@@ -728,7 +834,8 @@ function combatSupplies(context, observed, expired = null) {
     if (!use.checkValidity() || !stock.checkValidity()) return null;
     const perHour = use.value ? use.valueAsNumber : automatic;
     if (perHour == null) unknown = true;
-    if (perHour > 0 || projection) entries.push({ id, perHour, projection, food: rule.kind === 'food', optional: ['charged', 'prayer'].includes(rule.kind),
+    if (perHour > 0 || projection) entries.push({ id, perHour, projection, food: rule.kind === 'food', threshold: foodPlan?.threshold,
+      optional: ['charged', 'prayer'].includes(rule.kind) || Boolean(plan?.optional),
       available: stock.value ? stock.valueAsNumber : knownStock });
   }
   return { entries, unknown };
@@ -752,7 +859,7 @@ function combatStageCharacter(context, { expired, remaining, hitpoints, kills },
       return expired.has(currency) ? { ...prayer, state: 0 } : prayer;
     }) };
   return { ...character, stock, currencies, combat, slayerTasks: character.slayerTasks?.map(task =>
-    task.monster === target.id ? { ...task, remaining: Math.max(0, task.remaining - kills) } : task) };
+    task.monster === target?.id ? { ...task, remaining: Math.max(0, task.remaining - kills) } : task) };
 }
 
 function combatAfterSupplies(context, manual, state) {
@@ -764,14 +871,18 @@ function combatAfterSupplies(context, manual, state) {
   const killsPerHour = manual ? context.killsPerHour : stageAttributes?.perHour * calibration;
   if (!Number.isFinite(killsPerHour)) return null;
   const stage = { ...context, character: stageCharacter, attributes: stageAttributes, killsPerHour };
-  const supplies = combatSupplies(stage, null, expired);
+  const supplies = combatSupplies(stage, null, state.expired);
   return supplies && { ...stage, supplies: supplies.entries, unknown: supplies.unknown };
 }
 
 function renderCombat() {
   if (!combatView) return;
+  const targetId = byId('combatTarget').value;
+  const dungeon = combatView.dungeons.find(row => row.id === targetId);
+  byId('combatRateMode').disabled = Boolean(dungeon);
+  if (dungeon) return renderDungeon(dungeon);
   const { targets, items, character, kept } = combatView;
-  const target = targets.find(enemy => enemy.id === byId('combatTarget').value);
+  const target = targets.find(enemy => enemy.id === targetId);
   const areaChoice = byId('combatAreaChoice');
   const previousArea = areaChoice.value || preferences.fields?.combatAreaChoice;
   areaChoice.replaceChildren(...(target?.areas ?? []).map(area => new Option(gameName(area), area.id)));
@@ -821,20 +932,28 @@ function renderCombat() {
   byId('combatXp').hidden = !target;
   byId('xpCombatUnavailable').hidden = Boolean(target);
   const sessionHours = byId('combatHours').valueAsNumber;
-  byId('xpCombatContext').textContent = !target ? '' : Number.isFinite(sessionHours) && sessionHours > 0
-    ? t('战斗目标 {target} · 挂机时长 {time}', { target: gameName(target), time: formatDuration(sessionHours, true) })
-    : t('战斗目标 {target}', { target: gameName(target) });
-  updateCombatTraining();
-  if (result.hidden) return;
+  byId('xpCombatContext').textContent = target ? t('战斗目标 {target}', { target: gameName(target) }) : '';
+  if (result.hidden) {
+    renderCombatLevelGains(character, t('本机游戏数据没有可用于估算的普通怪物。'));
+    return;
+  }
+  const canEstimate = encounterAvailable && !!supplies && Number.isFinite(killsPerHour) && killsPerHour > 0 &&
+    (!manual || manualRate.checkValidity());
+  const options = canEstimate ? {
+    ...context, supplies: supplies.entries,
+    nextStage: state => combatAfterSupplies(context, manual, state)
+  } : null;
+  renderCombatExperience(attributes, target, options);
   const valid = encounterAvailable && !!supplies && Number.isFinite(killsPerHour) && byId('combatOptions').checkValidity();
   metrics.hidden = detail.hidden = !valid;
   if (!valid) {
     metrics.replaceChildren();
     status.textContent = t(!encounterAvailable ? '当前角色尚未解锁该战斗地点或目标。' :
+      !manual && attributes?.immune ? '目标免疫当前攻击方式。' :
       supplies === null ? '请检查补给的消耗量和库存。' :
       !manual && !Number.isFinite(killsPerHour) ? '暂无可用击杀速度。请检查存档配装、弹药和符文，或切换到手动输入。' :
         '请检查战斗目标、击杀速度和时长。');
-    renderCombatExperience(character, attributes, target, null);
+    renderCombatLevelGains(character, status.textContent);
     return;
   }
   const locked = new Set(character?.keep ?? []);
@@ -849,17 +968,19 @@ function renderCombat() {
     supplies: supplies.entries,
     nextStage: state => combatAfterSupplies(context, manual, state)
   });
-  renderCombatExperience(character, attributes, target, estimate);
-  metrics.replaceChildren(...[
-    ['预计净收益', estimate.net], ['预计到手 GP', estimate.payout],
-    ['净 GP/小时', estimate.netPerHour], ['预计击杀数', estimate.kills]
-  ].map(([label, value]) => {
-    const field = create('div', t(label));
-    field.append(create('strong', fullNumber(value)));
-    return field;
-  }));
+  renderCombatRewards(estimate, locked, collect);
+  const plan = combatExperiencePlan(character, attributes, target, estimate, combatView.model,
+    combatXpModifiers(combatView.model, catalog));
+  renderCombatLevelGains(character, character?.characterId ? [
+    t('预计战斗时长 {time}', { time: formatDuration(estimate.activeHours) }),
+    t('按当前姿态、祝祭和屠杀任务估算。命中经验计入未打完的一场。'),
+    estimate.limit && t('限制：{conditions}', { conditions: estimate.limit === 'Hitpoints' ?
+      t('生命值不足以继续战斗') : combatSupplyName(estimate.limit) })
+  ].filter(Boolean).join(' · ') : t('读取角色存档后可按战斗配装估算经验。'), skill => plan.total(skill));
   status.textContent = [
     t('预计战斗时长 {time}', { time: formatDuration(estimate.activeHours) }),
+    attributes?.effectsApplied && t('已按期望值计入特殊攻击和区域效果。'),
+    attributes?.effectsPartial && t('部分复杂效果仍为近似估算。'),
     estimate.limit === 'Hitpoints' ? t('生命值不足以继续战斗') :
       estimate.limit && t('约 {time}后用完{item}', { time: formatDuration(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
     ...estimate.expired.map(([id, hours]) => t('{item}在 {time} 后耗尽，之后按剩余配装计算', {
@@ -867,10 +988,23 @@ function renderCombat() {
     })),
     supplies.entries.some(row => row.available == null) && t('部分补给缺少库存信息'),
     (supplies.unknown || estimate.unknown) && t('净收益尚未扣除消耗量未知的补给'),
-    (attributes?.enemy?.maxHit >= attributes?.maxHp ||
-      estimate.phases.some(({ attributes: stats }) => stats?.enemy?.maxHit >= stats?.maxHp)) &&
-      t('敌人普通攻击可能造成满血秒杀，收益未计入死亡中断。')
+    estimate.phases.some(phase => phase.lethalHit) &&
+      t('敌人可能在自动进食前击杀角色，当前收益按存活估算。')
   ].filter(Boolean).join(' · ');
+}
+
+function renderCombatRewards(estimate, locked, collect, dungeon = false) {
+  const { items, kept } = combatView;
+  const sellInput = byId('combatSell');
+  const metrics = byId('combatMetrics');
+  metrics.replaceChildren(...[
+    ['预计净收益', estimate.net], ['预计到手 GP', estimate.payout],
+    ['净 GP/小时', estimate.netPerHour], [dungeon ? '预计通关次数' : '预计击杀数', estimate.kills]
+  ].map(([label, value]) => {
+    const field = create('div', t(label));
+    field.append(create('strong', fullNumber(value)));
+    return field;
+  }));
   byId('combatGold').textContent = t('直接 GP {value}', { value: fullNumber(estimate.direct) });
   byId('combatDropsTable').hidden = !estimate.drops.length;
   byId('combatDrops').replaceChildren(...estimate.drops.map(drop => {
@@ -898,12 +1032,147 @@ function renderCombat() {
   }));
   byId('combatCosts').replaceChildren(...estimate.costs.map(cost => create('li', t('消耗 · {item} × {quantity} · {value}', {
     item: combatSupplyName(cost.id), quantity: decimals.format(cost.quantity),
-    value: combatView.supplyRules[cost.id]?.kind === 'prayer' && !cost.value ? t('不折算为 GP') : '−' + fullNumber(cost.value) + ' GP'
+    value: combatView.supplyRules[cost.id]?.kind === 'prayer' && !cost.value ? t('不折算为 GP') : '−' + formatGp(cost.value)
   }))));
+}
+
+function renderDungeon(dungeon) {
+  const { character, items, kept, model, spells, supplyRules } = combatView;
+  const result = byId('combatResult');
+  const status = byId('combatStatus');
+  const unavailable = message => {
+    status.textContent = t(message);
+    renderCombatLevelGains(character, status.textContent);
+  };
+  result.hidden = false;
+  byId('combatMetrics').hidden = true;
+  byId('combatBreakdown').hidden = true;
+  byId('combatAreaField').hidden = true;
+  byId('combatManualRate').hidden = true;
+  byId('combatKillRate').disabled = true;
+  byId('combatArea').textContent = gameName(dungeon);
+  byId('combatXp').hidden = !combatView.targets.length;
+  byId('xpCombatUnavailable').hidden = Boolean(combatView.targets.length);
+  byId('xpCombatContext').textContent = gameName(dungeon);
+  renderCombatExperience(null, null, null);
+  byId('combatRateStatus').textContent = t('副本按完整通关结算。耗时和补给按各波敌人及其战斗效果估算。');
+  renderCombatLoadout(combatAttributes(model, character, null, dungeon, spells, supplyRules));
+  renderCombatAttributes(null);
+  const collect = byId('combatCollect').checked;
+  byId('combatSell').disabled = !collect;
+  const hours = byId('combatHours').valueAsNumber;
+  if (!Number.isFinite(hours) || !byId('combatOptions').checkValidity()) {
+    unavailable('请检查战斗目标、击杀速度和时长。');
+    return;
+  }
+  const waves = [];
+  for (const stage of dungeon.encounters) {
+    const weight = stage.options.reduce((sum, option) => sum + option.weight, 0);
+    for (const option of stage.options) {
+      if (!option.enemy || !(weight > 0) || !(option.weight > 0)) continue;
+      if (stage.count > 0) waves.push({ enemy: option.enemy, count: stage.count * option.weight / weight });
+    }
+  }
+  const context = { character, model };
+  const forecast = (current, expired) => {
+    const encounters = [];
+    for (const wave of waves) {
+      const attributes = combatAttributes(model, current, wave.enemy, dungeon, spells, supplyRules);
+      if (!(attributes?.perHour > 0)) return { error: attributes?.immune ? '副本中有敌人免疫当前攻击方式。' :
+        '暂无可用的副本战斗速度。请检查存档配装、弹药和符文。' };
+      encounters.push({ ...wave, attributes, hours: wave.count / attributes.perHour });
+    }
+    const hoursPerClear = encounters.reduce((sum, row) => sum + row.hours, 0);
+    if (!(hoursPerClear > 0)) return { error: '请检查战斗目标、击杀速度和时长。' };
+    const supplies = new Map();
+    let unknown = false;
+    let incoming = 0;
+    let maxHit = 0;
+    for (const { count, attributes, enemy, hours: phaseHours } of encounters) {
+      const phase = combatSupplies({ character: current, attributes, target: enemy, area: dungeon, model, spells,
+        killsPerHour: attributes.perHour }, null, expired);
+      if (!phase) return { error: '请检查补给的消耗量和库存。' };
+      unknown ||= phase.unknown;
+      maxHit = Math.max(maxHit, attributes.enemy?.maxHit ?? 0);
+      incoming += count * Math.max(0, (attributes.enemy?.turnsPerKill ?? 0) * (attributes.enemy?.damagePerTurn ?? 0) +
+        (attributes.enemy?.passiveDamagePerKill ?? 0) -
+        Math.min(attributes.maxHp, attributes.enemyHp * attributes.lifesteal));
+      for (const { id, perHour, available, food, optional, threshold } of phase.entries) {
+        const row = supplies.get(id) ?? { id, perHour: 0, available, food, optional, threshold };
+        row.perHour += (perHour ?? 0) * phaseHours / hoursPerClear;
+        supplies.set(id, row);
+      }
+    }
+    const attributes = { ...encounters[0].attributes, lifesteal: 0, enemyHp: 0, attacksPerKill: 1,
+      enemy: { turnsPerKill: 1, damagePerTurn: incoming, maxHit } };
+    const killsPerHour = 1 / hoursPerClear;
+    for (const field of combatView.supplies) {
+      const row = supplies.get(field.item.value);
+      if (!row?.food || field.use.value) continue;
+      row.projection = combatFoodProjection(supplyRules[row.id], row.id, { character: current, model, attributes, killsPerHour });
+      row.perHour = row.projection?.neededAt(1) ?? row.perHour;
+    }
+    return { character: current, encounters, attributes, killsPerHour, hoursPerClear,
+      supplies: [...supplies.values()], unknown };
+  };
+  const first = forecast(character);
+  if (first.error) {
+    unavailable(first.error);
+    return;
+  }
+  if (character?.characterId && !trainingRequirementsMet(dungeon.requirements, character, first.attributes.style, catalog)) {
+    unavailable('当前角色尚未解锁该战斗地点或目标。');
+    return;
+  }
+  for (const supply of combatView.supplies) {
+    if (supply.use.value) continue;
+    const quantity = first.supplies.find(row => row.id === supply.item.value)?.perHour;
+    if (quantity != null) {
+      supply.use.placeholder = decimals.format(quantity);
+      supply.rate.textContent = t('自动估算 {value}／小时', { value: decimals.format(quantity) });
+    }
+  }
+  const locked = new Set(character?.keep ?? []);
+  const estimate = estimateCombat(dungeon, items, { ...first, hours, cap: byId('combatCap').valueAsNumber,
+    collect, sell: byId('combatSell').checked, keep: new Set([...locked, ...kept]),
+    nextStage: state => {
+      const stage = forecast(combatStageCharacter(context, state, supplyRules), state.expired);
+      return stage.error ? null : stage;
+    } });
+  byId('combatMetrics').hidden = false;
+  byId('combatBreakdown').hidden = false;
+  status.textContent = [
+    t('单次预计 {time}', { time: formatDuration(first.hoursPerClear, true) }),
+    first.encounters.some(row => row.attributes.effectsApplied) && t('已按期望值计入特殊攻击和区域效果。'),
+    first.encounters.some(row => row.attributes.effectsPartial) && t('部分复杂效果仍为近似估算。'),
+    estimate.limit === 'Hitpoints' ? t('生命值不足以继续战斗') :
+      estimate.limit && t('约 {time}后用完{item}', { time: formatDuration(estimate.activeHours), item: combatSupplyName(estimate.limit) }),
+    ...estimate.expired.map(([id, elapsed]) => t('{item}在 {time} 后耗尽，之后按剩余配装计算', {
+      item: combatSupplyName(id), time: formatDuration(elapsed)
+    })),
+    estimate.unknown && t('净收益尚未扣除消耗量未知的补给'),
+    estimate.phases.some(phase => phase.lethalHit) && t('敌人可能在自动进食前击杀角色，当前收益按存活估算。')
+  ].filter(Boolean).join(' · ');
+  renderCombatRewards(estimate, locked, collect, true);
+  const modifiers = combatXpModifiers(model, catalog);
+  const fights = estimate.phases.flatMap(phase => {
+    const clears = Math.max(0, Math.min(estimate.kills - phase.progress, phase.hours * phase.killsPerHour));
+    if (!clears) return [];
+    return phase.encounters.map(({ count, attributes, enemy }) => ({
+      count: count * clears,
+      plan: combatExperiencePlan(phase.character, attributes, enemy, {
+        activeHours: 1, killsPerHour: 1
+      }, model, modifiers)
+    }));
+  });
+  renderCombatLevelGains(character, t('副本经验按预计完整通关和各波敌人估算。'),
+    skill => fights.reduce((xp, { count, plan }) => xp + plan.completedFights(skill, count), 0));
 }
 
 function rowReplacementFocus(id) {
   [...byId('combatDrops').querySelectorAll('input')].find(input => input.dataset.combatLoot === id)?.focus();
 }
 
-if (typeof module !== 'undefined') module.exports = { estimateCombat, measuredCombatRate, combatExperiencePlan, updateCombatSample };
+if (typeof module !== 'undefined') module.exports = {
+  estimateCombat, measuredCombatRate, combatExperiencePlan, forecastCombatExperience, updateCombatSample
+};

@@ -6,6 +6,8 @@ const gpOfflineHours = 24;
 let numbers;
 let decimals;
 const fullNumber = value => numbers.format(value);
+const expectedQuantity = value => value > 0 && value < 0.01
+  ? value.toLocaleString(uiLocale(), { maximumSignificantDigits: 2 }) : decimals.format(value);
 const actionArea = action => localizedName(action.areaNames, action.area);
 let catalog;
 let profile;
@@ -16,6 +18,12 @@ let profileRequest = 0;
 let profileReading = false;
 let savesRefreshing = false;
 let autoSaveReadFailed = false;
+let profileReadError;
+const profileRenderErrors = new Set();
+const profileSections = {
+  settings: '技能修正', idle: '挂机收益', shop: '商店升级', experience: '经验收益',
+  combat: '战斗收益', production: '连锁产线', queue: '定时挂机', statistics: '数据统计', quests: '任务材料'
+};
 let runtimeStatus;
 let updateActionPending = false;
 let updateMessage;
@@ -25,7 +33,7 @@ function reportBrowserError(event) {
   if (webMode || reportedBrowserError) return;
   reportedBrowserError = true;
   const script = event?.filename?.split('/').pop();
-  const source = ['language.js', 'rank.js', 'production.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js', 'access-poll.js'].includes(script)
+  const source = ['language.js', 'rank.js', 'production.js', 'action-queue.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js'].includes(script)
     ? '/' + script + '/' + (event.lineno || 0) : '';
   fetch('diagnostics/client-error' + source, { method: 'POST', keepalive: true }).catch(() => {});
 }
@@ -81,7 +89,7 @@ async function get(route) {
   if (webMode) return webMode.get(route);
   const response = await fetch(route);
   const body = await response.json();
-  if (!response.ok) throw new Error(t(body.error));
+  if (!response.ok) throw new Error(body.error);
   return body;
 }
 
@@ -92,23 +100,57 @@ function manualProfile() {
 function configureProfile(data, automatic = false) {
   const edits = characterEdits(data);
   profile = { ...data, levels: { ...data.levels, ...edits.levels }, stock: { ...data.stock, ...edits.stock },
-    bonuses: edits.bonuses, confirmed: [...edits.confirmed], excluded: [...edits.excluded] };
+    bonuses: edits.bonuses, confirmed: [...edits.confirmed], excluded: [...edits.excluded],
+    sacrificialAnvil: edits.sacrificialAnvil === true, astralOfferings: edits.astralOfferings === true };
   renderProfile(automatic, automatic);
   queuePreferences();
 }
 
 function renderProfile(keepCount = false, automatic = false) {
+  const previousErrors = new Set(profileRenderErrors);
+  profileRenderErrors.clear();
+  const sections = {
+    settings: () => renderProfileSettings(automatic),
+    idle: () => calculate(keepCount),
+    shop: () => updateShop(profile),
+    experience: () => updateExperience(profile, automatic),
+    combat: () => updateCombat(profile),
+    production: renderProduction,
+    queue: refreshActionQueue,
+    statistics: () => { void renderStatistics(); },
+    quests: () => { if (!byId('questsPage').hidden) renderQuest(); }
+  };
+  for (const [section, render] of Object.entries(sections)) {
+    try {
+      render();
+    } catch (error) {
+      profileRenderErrors.add(section);
+      if (!webMode && !previousErrors.has(section)) {
+        const kind = ['TypeError', 'RangeError', 'ReferenceError', 'SyntaxError'].includes(error?.name) ? error.name : 'Error';
+        fetch('diagnostics/profile-render/' + section + '/' + kind, { method: 'POST', keepalive: true }).catch(() => {});
+      }
+    }
+  }
+  renderProfileNotice();
+}
+
+function renderProfileSettings(automatic) {
+  const anvil = byId('sacrificialAnvil');
+  const anvilStatus = byId('sacrificialAnvilStatus');
+  const canUseAnvil = canUseSacrificialAnvil(catalog, profile);
+  byId('sacrificialAnvilSettings').hidden = !catalog.sacrificialAnvil;
+  anvil.checked = canUseAnvil && profile.sacrificialAnvil;
+  anvil.disabled = !canUseAnvil;
+  anvilStatus.hidden = canUseAnvil;
+  anvilStatus.textContent = canUseAnvil ? '' : t('存档尚未解锁献祭砧台。');
+  const offering = byId('astralOfferings');
+  byId('astralOfferingsSettings').hidden = !catalog.astralOfferings;
+  offering.disabled = !canUseAstralOfferings(catalog, profile);
+  offering.checked = !offering.disabled && profile.astralOfferings;
   if (!automatic || !byId('levels').contains(document.activeElement)) {
     renderSkillSettings();
   }
   if (!automatic) byId('editStatus').textContent = '';
-  calculate(keepCount);
-  updateShop(profile);
-  updateExperience(profile, automatic);
-  updateCombat(profile);
-  renderProduction();
-  void renderStatistics();
-  if (!byId('questsPage').hidden) renderQuest();
 }
 
 function renderSkillSettings() {
@@ -165,12 +207,14 @@ function calculate(keepCount = false) {
   byId('sellFishingSpecial').disabled = !sell;
   const sellSpecial = byId('sellFishingSpecial').checked;
   const metric = byId('metric').value;
-  results = rank(catalog, profile, { hours, offlineCap: gpOfflineHours, sell, sellSpecial, metric, keptDrops });
+  const includeRisky = byId('includeRiskyThieving').checked;
+  results = rank(catalog, profile, { hours, offlineCap: gpOfflineHours, sell, sellSpecial, metric, keptDrops, includeRisky });
   const now = profile.date && new Date(profile.date).toLocaleString(uiLocale(), { hour12: false });
   const source = now ? t('存档 {name}', { name: profile.name }) + ' · ' + now : t('手动设置');
   byId('status').textContent = [
     source, t('仓库 {count} 种物品', { count: fullNumber(Object.keys(profile.stock).length) }),
     t('{count} 项正收益方案', { count: fullNumber(results.length) }),
+    ...(includeRisky ? [t('有风险的偷窃收益未扣除死亡中断。')] : []),
     ...(hours > gpOfflineHours ? [t('离线最多结算 {time}', { time: formatDuration(gpOfflineHours) })] : [])
   ].join(' · ');
   byId('status').classList.remove('error');
@@ -181,7 +225,7 @@ function calculate(keepCount = false) {
 function renderKeptDrops() {
   byId('keptDropCount').textContent = t('（{count} 种）', { count: fullNumber(keptDrops.size) });
   byId('keptDropList').replaceChildren(...[...keptDrops].map(id => {
-    const name = gameName(catalog.items[id]) ?? id;
+    const name = gameName(catalog.items[id]) ?? t('未知物品');
     const button = create('button', name + ' ×');
     button.type = 'button';
     button.setAttribute('aria-label', t('恢复出售 {item}', { item: name }));
@@ -245,13 +289,15 @@ function incomeSources(result) {
   const labels = {
     product: '动作产物', hit: '敲击掉落', cut: '砍倒掉落', break: '碎裂掉落',
     common: '普通战利品', rare: '稀有战利品', completion: '完成奖励', fish: '鱼获', junk: '杂物', special: '钓鱼特殊物品',
-    event: '事件掉落'
+    event: '事件掉落', collectable: '献祭收藏品', offering: '星界献祭'
   };
   const list = create('ul');
   if (result.directSources?.length) {
     for (const row of result.directSources) {
+      const label = row.source === 'sacrifice' ? '献祭砧台折现' :
+        row.source === 'sacrificeBonus' ? '献祭砧台额外金币' : '直接获得金币';
       list.append(create('li', t('{source} · {value} GP', {
-        source: gameName(row.target) + ' · ' + t('直接获得金币'), value: fullNumber(row.value)
+        source: [row.target && gameName(row.target), t(label)].filter(Boolean).join(' · '), value: fullNumber(row.value)
       })));
     }
   } else if (result.direct) {
@@ -261,18 +307,18 @@ function incomeSources(result) {
   for (const row of result.drops) {
     list.append(create('li', t('{source} · {item} × {quantity} · {value}', {
       source: [gameName(row.target), t(labels[row.source])].filter(Boolean).join(' · '),
-      item: gameName(catalog.items[row.id]) ?? row.id,
-      quantity: decimals.format(row.quantity),
+      item: gameName(catalog.items[row.id]) ?? t('未知物品'),
+      quantity: expectedQuantity(row.quantity),
       value: row.sold ? t('{price} GP／件，共 {total} GP', {
         price: fullNumber(row.unitPrice), total: fullNumber(row.value)
       }) : t('保留，不计出售收入')
     })));
   }
   for (const row of result.inputs) {
-    const item = row.currency ? shopCurrencyName(row.id) : gameName(catalog.items[row.id]) ?? row.id;
+    const item = row.currency ? shopCurrencyName(row.id) : gameName(catalog.items[row.id]) ?? t('未知物品');
     list.append(create('li', t('消耗 · {item} × {quantity} · {value}', {
       item, quantity: row.currency && row.id === 'GoldPieces' ? fullNumber(row.quantity) : decimals.format(row.quantity),
-      value: row.currency && !row.unitPrice ? t('不折算为 GP') : '−' + fullNumber(row.value) + ' GP'
+      value: row.currency && !row.unitPrice ? t('不折算为 GP') : '−' + formatGp(row.value)
     })));
   }
   details.append(list);
@@ -418,37 +464,52 @@ function limitName(row) {
 }
 
 function renderSaveRefreshStatus() {
+  renderProfileNotice();
   if (webMode) return webMode.renderStatus();
   const status = byId('saveRefreshStatus');
   status.hidden = byId('save').value === '';
   status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' : '存档每 15 秒刷新');
 }
 
+function renderProfileNotice() {
+  const notice = byId('profileNotice');
+  notice.hidden = !profileReadError && !profileRenderErrors.size;
+  const panels = [...profileRenderErrors].map(section => t(profileSections[section])).join(' · ');
+  notice.textContent = profileReadError
+    ? [
+      t(profileReadError),
+      profile?.characterId && t('当前仍显示上次读取的角色：{name}。', { name: profile.name })
+    ].filter(Boolean).join(' ')
+    : panels ? t(profile?.characterId ? '角色已读取，部分板块显示失败：{panels}' : '部分板块显示失败：{panels}', { panels }) : '';
+}
+
+function noteProfileReadFailure(error, automatic) {
+  autoSaveReadFailed = true;
+  profileReadError = typeof error?.message === 'string' && Object.hasOwn(english, error.message)
+    ? error.message : '角色存档暂无法读取，请重试。';
+  if (!automatic && !profile) configureProfile(manualProfile());
+}
+
 async function loadProfile(automatic = false) {
   const selected = byId('save').value;
-  if (automatic && (!selected || !profile?.characterId || profileReading || savesRefreshing)) return;
+  if (automatic && (!selected || profileReading || savesRefreshing)) return;
   const current = ++profileRequest;
   profileReading = true;
   try {
     const data = selected === '' ? manualProfile() : await get('profile/character/' + selected);
     if (current !== profileRequest) return;
-    if (automatic && (data.characterId !== profile.characterId || Date.parse(data.date) <= Date.parse(profile.date))) {
-      autoSaveReadFailed = false;
-      if (data.characterId === profile.characterId && statisticsState.failed) void renderStatistics();
+    if (selected && data.characterId !== selected) throw new Error('角色存档已变化，请重新读取存档。');
+    autoSaveReadFailed = false;
+    profileReadError = undefined;
+    if (automatic && data.characterId === profile?.characterId && Date.parse(data.date) <= Date.parse(profile.date)) {
+      if (profileRenderErrors.size) renderProfile(true, true);
+      else if (statisticsState.failed) void renderStatistics();
       return;
     }
-    autoSaveReadFailed = false;
     configureProfile(data, automatic);
   } catch (error) {
     if (current !== profileRequest) return;
-    if (automatic) {
-      autoSaveReadFailed = true;
-      return;
-    }
-    byId('save').value = '';
-    configureProfile(manualProfile());
-    byId('status').textContent = t(error.message);
-    byId('status').classList.add('error');
+    noteProfileReadFailure(error, automatic);
   } finally {
     if (current === profileRequest) {
       profileReading = false;
@@ -461,8 +522,9 @@ async function refreshSaves(preferredCharacter) {
   if (savesRefreshing) return;
   savesRefreshing = true;
   const select = byId('save');
-  const selectedId = select.options.length ? (select.value === '' ? 'manual' : select.selectedOptions[0]?.dataset.characterId) :
-    preferences.character;
+  const selectedId = select.options.length && (!profileReadError || select.value)
+    ? (select.value === '' ? 'manual' : select.selectedOptions[0]?.dataset.characterId)
+    : profile?.characterId ?? preferences.character;
   const target = typeof preferredCharacter === 'string' ? preferredCharacter : selectedId;
   try {
     const saves = await get('saves');
@@ -479,14 +541,11 @@ async function refreshSaves(preferredCharacter) {
     const previous = target && Array.from(select.options).find(option => option.dataset.characterId === target);
     if (target === 'manual') select.value = '';
     else if (previous) select.value = previous.value;
-    else if (target) select.value = '';
     else select.value = Array.from(select.options).find(option => !option.disabled).value;
     await loadProfile();
   } catch (error) {
-    select.replaceChildren(new Option(t('手动设置'), ''));
-    configureProfile(manualProfile());
-    byId('status').textContent = t(error.message);
-    byId('status').classList.add('error');
+    if (!select.options.length) select.add(new Option(t('手动设置'), ''));
+    noteProfileReadFailure(error, false);
   } finally {
     savesRefreshing = false;
     renderSaveRefreshStatus();
@@ -496,6 +555,8 @@ async function refreshSaves(preferredCharacter) {
 function findItem(text = byId('item').value) {
   const value = text.trim();
   if (Object.hasOwn(catalog.items, value)) return value;
+  const choice = suggestionKey(byId('items').options, value);
+  if (choice) return choice;
   const separator = value.lastIndexOf(' · ');
   if (separator === -1) return;
   const id = value.slice(separator + 3);
@@ -524,6 +585,8 @@ function editItem() {
 
 function findAction(text = byId('action').value) {
   const value = text.trim();
+  const choice = suggestionKey(byId('actions').options, value);
+  if (choice) return catalog.actions.find(action => action.id === choice);
   const separator = value.lastIndexOf(' · ');
   const id = separator === -1 ? value : value.slice(separator + 3);
   const action = catalog.actions.find(entry => entry.id === id);
@@ -554,30 +617,30 @@ async function init() {
   preferences = await get('preferences').catch(() => ({}));
   uiLanguage = requestedLanguage ?? supportedLanguage(preferences.language) ?? uiLanguage;
   experienceSection = preferences.fields?.xpSection === 'combat' ? 'combat' : 'skills';
-  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page', '#production', '#statistics'].includes(preferences.page)) {
+  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page', '#production', '#statistics', '#action-queue'].includes(preferences.page)) {
     history.replaceState(null, '', preferences.page);
   }
   initTheme();
   function showPage() {
     const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat', '#production': 'production',
-      '#statistics': 'statistics' }[location.hash] ?? 'rank';
-    showExperienceSection(page === 'xp');
-    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics']) {
+      '#statistics': 'statistics', '#action-queue': 'queue' }[location.hash] ?? 'rank';
+    showExperienceSection();
+    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics', 'queue']) {
       byId(key + 'Page').hidden = key !== page;
       const link = byId(key + 'Link');
       if (key === page) {
         link.setAttribute('aria-current', 'page');
         byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益',
-          quests: '任务材料', production: '连锁产线', statistics: '数据统计' }[page]);
+          quests: '任务材料', production: '连锁产线', statistics: '数据统计', queue: '定时挂机' }[page]);
       } else link.removeAttribute('aria-current');
     }
-    if (page === 'xp' || page === 'combat') updateCombatTraining();
+    if (page === 'xp' && experienceSection === 'combat') updateCombatTraining();
     if (page === 'xp' && experienceSection === 'skills') renderExperience();
   }
   for (const [id, section] of [['xpSkillsButton', 'skills'], ['xpCombatButton', 'combat']]) {
     byId(id).addEventListener('click', () => {
       experienceSection = section;
-      showExperienceSection(true);
+      showExperienceSection();
       updateCombatTraining();
       if (section === 'skills') renderExperience();
       queuePreferences();
@@ -611,20 +674,30 @@ async function init() {
     for (const option of byId('filter').options) {
       if (option.value) option.text = skillName(option.value, catalog.skills);
     }
-    byId('items').replaceChildren(...Object.entries(catalog.items).map(([id, item]) => new Option('', gameName(item) + ' · ' + id)));
-    byId('actions').replaceChildren(...catalog.actions.map(action => new Option('', gameName(action) + ' · ' + action.id)));
+    const itemFields = [byId('item'), byId('keptDropItem')].map(input => [input, findItem(input.value)]);
+    const actionField = byId('action');
+    const actionId = findAction(actionField.value)?.id;
+    const itemOptions = localizedSuggestions(Object.entries(catalog.items).map(([id, item]) => ({
+      key: id, name: gameName(item) ?? t('未知物品'), aliases: ['MelvorBase:' + id, ...Object.values(item.names ?? {})]
+    })));
+    const actionOptions = localizedSuggestions(catalog.actions.map(action => ({
+      key: action.id, name: [skillName(action.skill, catalog.skills), gameName(action), actionArea(action)].filter(Boolean).join(' · '),
+      aliases: [action.recipe, ...Object.values(action.names ?? {})]
+    })));
+    byId('items').replaceChildren(...itemOptions);
+    byId('actions').replaceChildren(...actionOptions);
+    for (const [input, id] of [...itemFields, [actionField, actionId]]) {
+      const options = input === actionField ? actionOptions : itemOptions;
+      const selected = options.find(option => option.dataset.key === id);
+      if (selected) input.value = selected.value;
+    }
     renderKeptDrops();
-    const item = byId('item');
-    const action = byId('action');
-    const itemId = item.value.includes(' · ') && findItem(item.value);
-    const selectedAction = action.value.includes(' · ') && findAction(action.value);
-    if (itemId) item.value = gameName(catalog.items[itemId]) + ' · ' + itemId;
-    if (selectedAction) action.value = gameName(selectedAction) + ' · ' + selectedAction.id;
     localizeExperience();
     localizeShop();
     localizeCombat();
     localizeQuests();
     localizeProduction();
+    localizeActionQueue();
     if (profile) renderProfile(true);
     else void renderStatistics();
   }
@@ -648,7 +721,6 @@ async function init() {
   window.addEventListener('pagehide', savePreferences);
   localizeControls();
   if (!webMode) {
-    initAccessPoll();
     loadRuntimeStatus();
   }
   try {
@@ -663,11 +735,12 @@ async function init() {
       if (profile) updateShop(profile);
     }).catch(error => {
       if (webMode) throw error;
-      byId('shopStatus').textContent = t('商店数据读取失败。请重新启动计算器。') + ' ' + t(error.message);
+      byId('shopStatus').textContent = t('商店数据读取失败。请重新启动计算器。');
     });
     const filter = byId('filter');
     for (const [id, name] of Object.entries(catalog.skills)) filter.append(new Option(name, id));
     restorePreferences();
+    initActionQueue(catalog);
     initIdleDurations();
     localizeControls();
     for (const input of document.querySelectorAll('[data-suggestions]')) initSuggestions(input);
@@ -680,6 +753,18 @@ async function init() {
     byId('options').addEventListener('submit', event => { event.preventDefault(); calculate(); });
     byId('options').addEventListener('change', calculate);
     byId('options').addEventListener('input', calculate);
+    byId('sacrificialAnvil').addEventListener('change', event => {
+      if (!profile || !canUseSacrificialAnvil(catalog, profile)) return;
+      characterEdits().sacrificialAnvil = profile.sacrificialAnvil = event.currentTarget.checked;
+      renderProfile(true);
+      queuePreferences();
+    });
+    byId('astralOfferings').addEventListener('change', event => {
+      if (!profile || !canUseAstralOfferings(catalog, profile)) return;
+      characterEdits().astralOfferings = profile.astralOfferings = event.currentTarget.checked;
+      renderProfile(true);
+      queuePreferences();
+    });
     for (const button of document.querySelectorAll('[data-hours]')) {
       button.addEventListener('click', () => applyIdleDuration(byId('hours'), Number(button.dataset.hours)));
     }
@@ -703,9 +788,9 @@ async function init() {
     renderRuntimeStatus();
     if (webMode) webMode.enableImport();
     else setInterval(() => loadProfile(true), 15000);
-  } catch (error) {
+  } catch {
     if (webMode) webMode.initFailed();
-    else byId('empty').textContent = t('初始化失败。请检查启动窗口。') + ' ' + t(error.message);
+    else byId('empty').textContent = t('初始化失败。请检查启动窗口。');
   }
 }
 

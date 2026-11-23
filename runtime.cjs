@@ -3,7 +3,7 @@ const path = require('node:path');
 const os = require('node:os');
 const https = require('node:https');
 
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
 const RELEASES_URL = 'https://github.com/m1NG-325/melvor-idle-2-calculator/releases';
 const LATEST_RELEASE = RELEASES_URL + '/latest';
 

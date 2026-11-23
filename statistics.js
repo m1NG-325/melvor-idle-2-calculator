@@ -160,9 +160,10 @@ function statisticKey(section, id) {
   return id.startsWith(prefix) ? id.slice(prefix.length) : id;
 }
 
-function statisticLabel(section, id) {
+function statisticLabel(section, id, index) {
   const words = STATISTIC_LABELS[statisticKey(section, id)];
-  return words ? localizedName({ zh: words[0], en: words[1] }) : id.replace(/([a-z\d])([A-Z])/g, '$1 $2');
+  return words ? localizedName({ zh: words[0], en: words[1] }) :
+    index == null ? t('未知统计项') : t('未识别统计项 {number}', { number: fullNumber(index) });
 }
 
 function statisticUnit(section, id) {
@@ -190,7 +191,7 @@ function statisticCategory(id) {
 function statisticSubject(section, kind, id) {
   const label = kind === 'currency' ? shopCurrencyName(id) : kind === 'item' ? gameName(catalog.items[id]) :
     gameName(catalog.statisticSubjects[id] ?? statisticsState.actions.get(section + ':' + id));
-  return typeof label === 'string' && label ? label : id;
+  return typeof label === 'string' && label ? label : t('未知名称');
 }
 
 function initStatistics() {
@@ -283,8 +284,10 @@ function renderStatisticsContent() {
   const matches = text => typeof text === 'string' && text.toLocaleLowerCase().includes(query);
   const categories = groups.flatMap(group => {
     const name = statisticCategory(group.id);
+    let unknown = 0;
     const entries = group.statistics.flatMap(stat => {
-      const label = statisticLabel(group.id, stat.id);
+      const known = Object.hasOwn(STATISTIC_LABELS, statisticKey(group.id, stat.id));
+      const label = statisticLabel(group.id, stat.id, known ? undefined : ++unknown);
       const full = !query || matches(name) || matches(group.id) || matches(label) || matches(stat.id);
       const rows = stat.rows?.filter(row => full || matches(row.id) || matches(statisticSubject(group.id, stat.kind, row.id)));
       return full || rows?.length ? [{ ...stat, label, rows, subjectMatch: !full }] : [];

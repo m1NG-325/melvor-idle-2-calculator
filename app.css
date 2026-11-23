@@ -385,8 +385,6 @@ summary.shop-row::marker { color: var(--aqua); }
   display: inline-block; margin: 0 0 0 8px; padding: 1px 7px; color: var(--accent-text);
   background: var(--aqua-tint); border-radius: 6px; font-weight: 650;
 }
-.xp-section-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem 1.5rem; }
-.xp-section-heading h2 { margin: 0; }
 .xp-section-switch { display: flex; flex-wrap: wrap; gap: 6px; }
 .xp-section-switch button[aria-pressed=true] {
   border-color: var(--aqua);
@@ -397,13 +395,13 @@ summary.shop-row::marker { color: var(--aqua); }
 .xp-combat-context { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 12px; }
 .xp-combat-context a { color: var(--aqua); }
 .xp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.8rem), 1fr)); gap: 8px; margin-top: 11px; }
-.xp-card { display: grid; grid-template-rows: minmax(1.3rem, auto) 1.2rem minmax(1.1rem, auto); align-content: start; gap: .2rem; min-width: 0; text-align: start; padding: .6rem .75rem; }
-.xp-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.xp-card { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(1.3rem, auto) minmax(1.2rem, auto) minmax(1.1rem, auto); align-content: start; gap: .2rem; min-width: 0; text-align: start; padding: .6rem .75rem; }
+.xp-card-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; }
 .xp-card-level { color: var(--muted); font-size: .78rem; white-space: nowrap; }
-.xp-card strong, .xp-card-action, .xp-rate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xp-card strong, .xp-card-action, .xp-rate { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .xp-risk { color: var(--warning); font-size: 11px; white-space: nowrap; }
 .xp-card[aria-pressed=true] { border-color: var(--accent-line); background: var(--aqua-tint); }
-.xp-rate { color: var(--aqua); font-variant-numeric: tabular-nums; }
+.xp-rate { color: var(--aqua); font-variant-numeric: tabular-nums; word-break: keep-all; }
 .xp-progress { display: grid; gap: .12rem; font-size: .85rem; }
 .xp-progress progress, .xp-goal progress { appearance: none; width: 100%; height: .34rem; accent-color: var(--aqua); border: 0; background: var(--line); border-radius: 1rem; }
 :is(.xp-progress, .xp-goal) progress::-webkit-progress-bar { background: var(--line); border-radius: 1rem; }
@@ -421,34 +419,6 @@ summary.shop-row::marker { color: var(--aqua); }
 }
 .xp-action-choice { min-width: min(100%, 12rem); max-width: 21rem; }
 .xp-estimate-action { background: var(--surface); }
-.combat-xp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: .55rem; margin-top: .75rem; }
-.combat-xp-card { min-width: 0; padding: .65rem .75rem; background: var(--surface); border: 1px solid var(--line); border-radius: .55rem; }
-.combat-xp-card h3 { margin: 0; font-size: 1rem; }
-.combat-xp-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin: .4rem 0 .55rem; }
-.combat-xp-metrics dt { color: var(--muted); font-size: .8rem; }
-.combat-xp-metrics dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
-.combat-xp-metrics > div:last-child dd { color: var(--aqua); }
-.combat-goal-slider { display: grid; gap: .15rem; min-width: 0; margin-bottom: .3rem; font-size: .8rem; }
-.combat-goal-heading, .combat-goal-stepper { display: flex; align-items: center; gap: .3rem; }
-.combat-goal-heading { justify-content: space-between; color: var(--muted); }
-.combat-goal-stepper button {
-  display: grid;
-  place-items: center;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  border-radius: 7px;
-}
-.combat-goal-stepper button::before {
-  content: "";
-  width: .52em;
-  height: .52em;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-}
-.combat-goal-decrease::before { transform: translateY(-1px) rotate(45deg); }
-.combat-goal-increase::before { transform: translateY(1px) rotate(225deg); }
-.combat-goal-stepper button:disabled { opacity: .45; cursor: default; }
 .combat-training {
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -517,7 +487,8 @@ summary.shop-row::marker { color: var(--aqua); }
 .xp-goal-metrics dt { color: var(--muted); font-size: .86rem; }
 .xp-goal-metrics dd { margin: .15rem 0 0; font-size: 1.2rem; font-weight: 650; font-variant-numeric: tabular-nums; }
 .xp-goal-metrics div:last-child dd, .xp-action-details summary { color: var(--aqua); }
-#xpGoalOverview > p { margin-top: .45rem; }
+:is(#xpGoalOverview, #combatGoalOverview) > p { margin-top: .45rem; }
+#combatXpTable { margin-top: .85rem; }
 .xp-action-details p { margin-top: .35rem; max-width: 34rem; }
 td .xp-progress { min-width: 10rem; }
 #xpRows td:last-child { min-width: 17rem; white-space: normal; }
@@ -603,16 +574,6 @@ td .xp-progress { min-width: 10rem; }
 .supply-picker-results { display: grid; gap: .3rem; max-height: min(50vh, 22rem); overflow: auto; }
 .supply-picker-results button { text-align: start; }
 .supply-picker-results button[aria-pressed=true] { border-color: var(--aqua); }
-.access-poll .poll-choices { display: grid; gap: .5rem; margin-block: .75rem; }
-.access-poll .check { align-items: start; gap: .6rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .65rem; }
-.access-poll .check strong { font-weight: 650; }
-.access-poll .check small { display: block; margin-top: .25rem; color: var(--muted); }
-.access-poll .check:has(:checked) { border-color: var(--aqua); background: var(--aqua-tint); color: inherit; }
-.access-poll input[type=radio] { flex: none; width: auto; margin: .24em 0 0; accent-color: var(--aqua); }
-.access-poll input[type=radio]:focus-visible { outline: none; }
-.access-poll .check:has(input:focus-visible) { outline: 2px solid var(--aqua); outline-offset: 2px; }
-.access-poll .inputs { margin-top: .8rem; }
-#accessPollStatus:empty { display: none; }
 #combatSupplies .supply-select { width: 100%; min-width: 11rem; text-align: start; }
 #combatSupplies .supply-rate small { margin-top: .25rem; }
 .combat-attributes { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; margin-top: 1rem; }
@@ -637,3 +598,51 @@ td .xp-progress { min-width: 10rem; }
 .production-compare-action + .production-compare-action { margin-inline-start: .4rem; }
 #productionTargetInput, #productionPlan { width: min(100%, 21rem); }
 #productionBank:empty { display: none; }
+.queue-restriction { display: block; margin-top: .25rem; }
+.queue-access { display: block; }
+.queue-access[data-access="unlocked"], .queue-restriction[data-access="unlocked"] { color: var(--muted); }
+.queue-access[data-access="locked"], .queue-restriction[data-access="locked"] { color: var(--warning); }
+.queue-access[data-access="unknown"], .queue-restriction[data-access="unknown"] { color: var(--muted); }
+#queueStepsWrap { overflow-x: auto; }
+.queue-duration input { width: 5.5rem; text-align: center; }
+.queue-edit-dialog form { display: grid; gap: .8rem; }
+.queue-edit-dialog :is(h2, p, input) { margin: 0; }
+.queue-goal-button {
+  padding: .3rem .5rem;
+  min-height: 0;
+  text-align: center;
+  color: var(--muted);
+  white-space: normal;
+}
+.queue-goal-button:disabled { opacity: 1; background: transparent; border-color: transparent; }
+.queue-row-controls button { margin: .15rem 0 .15rem .25rem; }
+.queue-row-controls .queue-handle, .queue-row-controls .queue-remove {
+  width: 2rem; padding-inline: 0; font-size: 1.2rem; background: transparent; border-color: transparent; box-shadow: none;
+}
+.queue-row-controls .queue-handle:not(:disabled):hover, .queue-row-controls .queue-remove:hover { color: var(--accent-text); }
+.queue-handle { cursor: grab; touch-action: none; }
+.queue-handle:active { cursor: grabbing; }
+.queue-drag-slot > td {
+  color: transparent;
+  background: var(--surface);
+  border-block: 1px dashed var(--accent-line);
+}
+.queue-drag-slot > td > * { visibility: hidden; }
+.queue-drag-slot > td:first-child { border-inline-start: 1px dashed var(--accent-line); }
+.queue-drag-slot > td:last-child { border-inline-end: 1px dashed var(--accent-line); }
+.queue-drag-preview {
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 30;
+  table-layout: fixed;
+  margin: 0;
+  pointer-events: none;
+  user-select: none;
+  background: var(--surface);
+  border-radius: .65rem;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--accent-line), 0 .65rem 1.5rem #0005;
+}
+.queue-drag-preview td { border-bottom: 0; }
+#queueAction { width: min(24rem, 100%); }
+

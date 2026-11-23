@@ -10,7 +10,166 @@ function combatOccupiedSlots(model, equipment) {
     .filter(occupied => occupied !== slot).map(occupied => [occupied, id])));
 }
 
-function combatAttributes(model, character, target, area, spells, foodRules = {}, { quick = false } = {}) {
+function combatAttackAverage(patterns, source, defender, defend) {
+  const normal = { damage: defend((source.min + source.max) / 2) * source.chance,
+    maxDamage: defend(source.max, true), hits: source.chance, delay: 0 };
+  let probability = 1;
+  const result = { damage: 0, maxDamage: 0, hits: 0, delay: 0, effects: [], partial: false };
+  for (const pattern of patterns ?? []) {
+    const weight = Math.min(probability, pattern.chance);
+    if (!(weight > 0)) continue;
+    probability -= weight;
+    const chance = pattern.avoidable === false ? 1 - source.immunity : source.chance;
+    let damage = 0, maxDamage = 0, hits = 0, delay = 0, supported = true;
+    for (const group of pattern.hits ?? []) {
+      let average = 0, maximum = 0;
+      for (const entry of group.damage ?? []) {
+        const avg = combatFormula(entry, source, defender);
+        const max = combatFormula(entry, source, defender, true);
+        if (!Number.isFinite(avg) || !Number.isFinite(max)) supported = false;
+        else { average += avg; maximum += max; }
+      }
+      const count = group.count ?? 1;
+      if (hits || count > 1) delay += (hits ? count : count - 1) * (group.interval ?? 0);
+      hits += count;
+      if (group.damage?.length) {
+        damage += count * defend(average);
+        maxDamage += count * defend(maximum, true);
+      }
+    }
+    result.partial ||= !supported || !!(pattern.damageType && pattern.damageType !== source.damageType);
+    result.damage += weight * (supported ? damage * chance : normal.damage);
+    result.maxDamage = Math.max(result.maxDamage, chance > 0 ? supported ? maxDamage : normal.maxDamage : 0);
+    result.hits += weight * (supported ? hits * chance : normal.hits);
+    result.delay += weight * delay;
+    for (const effect of pattern.before ?? []) result.effects.push({ effect, frequency: weight });
+    for (const effect of pattern.onHit ?? []) result.effects.push({ effect, frequency: weight * chance * hits });
+  }
+  result.damage += probability * normal.damage;
+  result.hits += probability * normal.hits;
+  if (probability > 0 && source.chance > 0) result.maxDamage = Math.max(result.maxDamage, normal.maxDamage);
+  return result;
+}
+
+function combatFormula(entry, source, defender, maximum = false) {
+  const target = ['Target', 'Defender'].includes(entry?.character) ? defender : source;
+  if (!Number.isFinite(entry?.factor)) return NaN;
+  const amount = {
+    NormalDamage: maximum ? target.max : (target.min + target.max) / 2,
+    MaxHit: target.max,
+    CurrentHitpoints: maximum ? target.hp : target.hp / 2,
+    MaximumHitpoints: target.hp
+  }[entry.type];
+  return amount * entry.factor;
+}
+
+function estimateCombatEffects(definitions, events, playerAttack, enemyAttack, player, enemy, playerInterval, enemyInterval, duration,
+  effectModifier = () => 0) {
+  const result = { modifiers: [], playerStun: 0, enemyStun: 0, playerDamagePerMs: 0, enemyDamagePerMs: 0,
+    playerHealingPerMs: 0, enemyHealingPerMs: 0, partial: false };
+  const sides = {
+    Player: { interval: playerInterval, stats: player, attack: playerAttack, key: 'player' },
+    Enemy: { interval: enemyInterval, stats: enemy, attack: enemyAttack, key: 'enemy' }
+  };
+  const other = side => side === 'Player' ? 'Enemy' : 'Player';
+  const candidates = [];
+  for (const { row, magnitude } of events) {
+    const side = row.Character?.Component;
+    const source = sides[side];
+    const opponent = sides[other(side)];
+    if (!source || !(magnitude > 0)) continue;
+    const { Effect, Trigger, AppliesTo } = row.Modifier ?? {};
+    const chance = combatProbability((row.Chance ?? 1) * magnitude);
+    if (row.Condition || row.Scaling) { result.partial = true; continue; }
+    const trigger = baseCombatId(Trigger?.Type);
+    const data = Trigger?.Data?.Type;
+    const attack = trigger === 'WhenAttacked' ? opponent : source;
+    const perHit = ['OnHit', 'WhenHit'].includes(data);
+    const cadence = Number.isFinite(attack.interval) ? 1 / Math.max(1, attack.interval) : 0;
+    const entry = ['AtStartOfFight', 'OnDeath'].includes(trigger) || data === 'OnFirstAttack';
+    if (!entry && !['OnAttack', 'WhenAttacked'].includes(trigger)) { result.partial = true; continue; }
+    if (trigger === 'OnDeath') result.partial = true;
+    const hitFactor = attack.attack?.hits ?? attack.stats.chance ?? 0;
+    const firstHit = ['OnFirstHit', 'WhenFirstHit'].includes(data);
+    if (firstHit && attack.attack) result.partial = true;
+    const frequency = entry ? 1 / Math.max(1, duration) : cadence *
+      (perHit ? hitFactor : firstHit ? combatProbability(hitFactor) :
+        data === 'WhenAttackEvaded' ? 1 - combatProbability(hitFactor) : 1);
+    candidates.push({ side, recipient: AppliesTo === 'Self' ? side : other(side), Effect, rate: chance * frequency, entry });
+  }
+  for (const [side, source] of Object.entries(sides)) {
+    if (!Number.isFinite(source.interval)) continue;
+    for (const { effect, frequency } of source.attack?.effects ?? []) {
+      candidates.push({ side, recipient: effect.AppliesTo === 'Self' ? side : other(side),
+        Effect: effect.Effect, rate: frequency * combatProbability(effect.Chance ?? 1) / source.interval });
+    }
+  }
+  for (const { side, recipient, Effect, rate: applicationRate, entry, depth = 0 } of candidates) {
+    const effectId = baseCombatId(Effect?.Data?.Effect);
+    const rate = applicationRate * (1 - combatProbability(effectModifier(recipient, 'AvoidanceChance', effectId)));
+    if (!(rate > 0)) continue;
+    const rule = definitions[effectId];
+    if (!rule) { result.partial = true; continue; }
+    const source = sides[side];
+    const destination = sides[recipient];
+    const config = Effect.Data.Configuration ?? {};
+    const sideInterval = destination.interval || 3000;
+    const span = Math.max(1, duration);
+    const turns = config.Turns ?? rule.DefaultTurns ?? rule.DefaultAttacks ?? 1;
+    const uptime = ms => Math.min(1, rate * Math.min(ms, span));
+    let weight = uptime(turns * sideInterval);
+    if (rule.type === 'Stacking') {
+      const added = config.StacksToAdd ?? rule.DefaultStacksToAdd ?? 1;
+      weight = Math.min(rule.MaxStacks ?? 1, added * rate * span / (entry ? 1 : 2));
+    } else if (rule.type === 'RandomMagnitude') {
+      weight *= ((config.MinStacks ?? rule.DefaultMinStacks ?? 1) + (config.MaxStacks ?? rule.DefaultMaxStacks ?? 1)) / 2;
+    } else if (rule.type === 'AttackCharging') {
+      weight = Math.min(1, rate * span / Math.max(1, rule.StacksRequired)) / Math.max(1, rule.StacksRequired);
+      result.partial = true;
+    } else if (rule.type === 'Stun') {
+      result[destination.key + 'Stun'] = combatProbability(result[destination.key + 'Stun'] + weight);
+    }
+    if (Array.isArray(rule.Modifiers) && weight > 0) {
+      const rows = rule.Modifiers.map(row => ({ ...row, LocalContext: { ...row.LocalContext,
+        Component: { Entity: 'MelvorBase:Combat', Component: recipient } } }));
+      result.modifiers.push({ rows, weight });
+    }
+    if (rule.type === 'DamageOverTime' || rule.type === 'Bleed') {
+      const entryDamage = rule.DamagePerProc;
+      const damage = rule.type === 'Bleed' ? ((source.stats.min + source.stats.max) / 2) * rule.PercentDamageDealtPerProc :
+        combatFormula({ character: entryDamage?.Character, type: baseCombatId(entryDamage?.Formula?.Type),
+          factor: entryDamage?.Formula?.Data?.Percent }, source.stats, destination.stats);
+      const tick = Math.max(1, rule.ProcInterval ?? 1);
+      const stacks = Math.min(rule.MaxStacks ?? 1, Math.max(0, rate * Math.min(Math.max(0, span - tick), tick * rule.ProcCount) *
+        (config.StacksToAdd ?? rule.DefaultStacksToAdd ?? 1)));
+      if (Number.isFinite(damage)) {
+        const amount = Math.max(0, damage) * stacks / tick;
+        result[destination.key + 'DamagePerMs'] += amount;
+        result[source.key + 'HealingPerMs'] += amount * combatProbability(effectModifier(side, 'EffectLifesteal', effectId));
+      }
+      else result.partial = true;
+    } else if (rule.type === 'EndOfTurnDamage' || rule.type === 'EndOfTurnHealing') {
+      const healing = rule.type === 'EndOfTurnHealing';
+      const entryDamage = healing ? rule.HealingPerTurn : rule.DamagePerTurn;
+      const damage = combatFormula({ character: entryDamage?.Character, type: baseCombatId(entryDamage?.Formula?.Type),
+        factor: entryDamage?.Formula?.Data?.Percent }, source.stats, destination.stats);
+      if (Number.isFinite(damage)) result[destination.key + (healing ? 'HealingPerMs' : 'DamagePerMs')] +=
+        Math.max(0, damage) * (entry ? uptime(span) : uptime(sideInterval)) *
+        Math.floor(span / sideInterval) / span;
+      else result.partial = true;
+    } else if (!['TurnCounting', 'Stun', 'Stacking', 'RandomMagnitude', 'AttackCharging', 'AttackCounting'].includes(rule.type)) {
+      result.partial = true;
+    }
+    if (rule.RemovalEffect && span > turns * sideInterval) {
+      if (depth >= 2) result.partial = true;
+      else candidates.push({ side, recipient, Effect: rule.RemovalEffect, rate: rate *
+        (span - turns * sideInterval) / span, entry, depth: depth + 1 });
+    }
+  }
+  return result;
+}
+
+function combatAttributes(model, character, target, area, spells, foodRules = {}, { quick = false, forecast } = {}) {
   const saved = character?.combat;
   if (!saved?.equipment) return null;
   const weapon = model.items[saved.equipment.find(row => row.slot === 'Weapon')?.id ?? 'DefaultWeapon']?.weapon;
@@ -27,8 +186,14 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   if (!saved.equipment.some(row => row.slot === 'Weapon')) equipment.push('DefaultWeapon');
   const gear = [...equipment, ...(saved.toolbelt ?? []).map(row => row.id)].map(id => model.items[id]).filter(Boolean);
   const mods = new Map();
+  const enemyMods = new Map();
+  const effectMods = new Map();
   const foodBonuses = [];
   const supplyBonuses = [];
+  const enemyStanceId = target?.stances[0]?.[0];
+  const enemyStance = model.stances[enemyStanceId];
+  const enemyStyle = enemyStance?.style;
+  const enemyElement = target?.element;
   function add(rows, count = 1) {
     for (const row of rows ?? []) {
       const c = row.LocalContext;
@@ -43,15 +208,26 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
       if (c?.Component?.Entity === 'MelvorBase:Combat' && c.Component.Component === 'Food') {
         foodBonuses.push({ row, count });
       }
-      if (c?.Component?.Entity !== 'MelvorBase:Combat' || !['Player', 'Action'].includes(c.Component.Component) ||
+      const enemySide = c?.Component?.Component === 'Enemy';
+      const matchup = ['AvoidanceChance', 'ImmunityFrom'].includes(row.Stat.Name);
+      if (c?.Component?.Entity === 'MelvorBase:Combat' && c.Effect &&
+          ['AvoidanceChance', 'EffectLifesteal'].includes(row.Stat.Name)) {
+        if (!row.Condition && !row.FromContext && !row.Scaling) {
+          const key = [c.Component.Component, row.Stat.Name, baseCombatId(c.Effect)].join(':');
+          effectMods.set(key, (effectMods.get(key) ?? 0) + row.Value * count);
+        }
+        continue;
+      }
+      if (c?.Component?.Entity !== 'MelvorBase:Combat' || !['Player', 'Action', 'Enemy'].includes(c.Component.Component) ||
           row.Condition || row.FromContext || c.Effect ||
-          (c.CombatStyle && baseCombatId(c.CombatStyle) !== stance.style) ||
-          (c.AttackStance && baseCombatId(c.AttackStance) !== stanceId) ||
-          (c.Element && baseCombatId(c.Element) !== element)) continue;
+          (c.CombatStyle && baseCombatId(c.CombatStyle) !== ((enemySide !== matchup) ? enemyStyle : stance.style)) ||
+          (c.AttackStance && baseCombatId(c.AttackStance) !== ((enemySide !== matchup) ? enemyStanceId : stanceId)) ||
+          (c.Element && baseCombatId(c.Element) !== ((enemySide !== matchup) ? enemyElement : element))) continue;
       if (row.Scaling && row.Scaling.Type !== 'MelvorBase:Level') continue;
       const scale = row.Scaling ? character.levels[baseCombatId(row.Scaling.Data?.Experience?.Entity)] ?? 0 : 1;
       const key = row.Stat.Name + ':' + (baseCombatId(c.CombatStat ?? c.CombatLevel ?? c.DamageType) ?? '');
-      mods.set(key, (mods.get(key) ?? 0) + row.Value * count * scale);
+      const table = enemySide ? enemyMods : mods;
+      table.set(key, (table.get(key) ?? 0) + row.Value * count * scale);
     }
   }
   for (const item of gear) add(item.bonuses);
@@ -72,9 +248,17 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   for (const [skill, ranks] of Object.entries(character.ranks ?? {})) {
     for (const id of ranks) add(model.savedBonuses.MasteryGuildBonus?.[id]);
   }
-  const enemyStyle = model.stances[target?.stances[0]?.[0]]?.style;
   for (const row of model.triangle) if (row.player === stance.style && row.enemy === enemyStyle) add(row.bonuses);
   const mod = (stat, key = '') => (mods.get(stat + ':') ?? 0) + (key ? mods.get(stat + ':' + key) ?? 0 : 0);
+  const enemyMod = (stat, key = '') => (enemyMods.get(stat + ':') ?? 0) + (key ? enemyMods.get(stat + ':' + key) ?? 0 : 0);
+  const combatEffects = [...(area?.effects ?? []), ...(target?.effects ?? [])];
+  const hasConditionalEffect = combatEffects.some(bundle => (bundle.modifiers.Component ?? []).some(row =>
+    row.Condition || row.FromContext ||
+    (row.LocalContext?.Effect && !['AvoidanceChance', 'EffectLifesteal'].includes(row.Stat.Name)) ||
+    (row.Scaling && row.Scaling.Type !== 'MelvorBase:Level')));
+  const areaMagnitude = bundle => bundle.magnitude * (bundle.area ? Math.max(0, 1 + mod('PercentAreaEffectMagnitude')) : 1);
+  for (const bundle of combatEffects) add(bundle.modifiers.Component, areaMagnitude(bundle));
+  for (const { rows, weight } of forecast?.modifiers ?? []) add(rows, weight);
   const levels = Object.fromEntries(['Attack', 'Strength', 'Defence', 'Hitpoints', 'Ranged', 'Magic'].map(id =>
     [id, Math.trunc((character.levels[id] ?? 1) + mod('FlatCombatLevel', id))]
   ));
@@ -109,20 +293,26 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
     const base = Math.floor((ratio(model.styles[row.style]?.EvasionLevels, levels) + 9) * (stat(row.evasion) + 64));
     return [id, Math.max(1, Math.trunc(Math.floor(base * (1 + mod('PercentEvasionRating')) + mod('FlatEvasionRating')) * visibility))];
   }));
-  const enemyStats = id => totals((target?.stats?.Stats ?? []).filter(row => baseCombatId(row.Stat) === id));
+  const enemyStats = id => (totals((target?.stats?.Stats ?? []).filter(row => baseCombatId(row.Stat) === id)) +
+    enemyMod('FlatCombatStatValue', id)) * (1 + enemyMod('PercentCombatStatValue', id));
   const enemyEvasion = Math.max(1, Math.floor((ratio(style.EvasionLevels, target?.levels ?? {}) + 9) *
-    (enemyStats(stance.evasion) + 64)));
+    (enemyStats(stance.evasion) + 64) * (1 + enemyMod('PercentEvasionRating')) + enemyMod('FlatEvasionRating')));
+  const enemyImmunity = enemyMod('ImmunityFrom', damageType) > 0 ? 1 : 0;
   const hitChance = target ? combatProbability((accuracy >= enemyEvasion ? 1 - enemyEvasion / (2 * accuracy) :
-    accuracy / (2 * enemyEvasion)) + mod('FlatHitChance')) : null;
-  const power = rating(damageType, 'PowerRatings');
+    accuracy / (2 * enemyEvasion)) + mod('FlatHitChance')) * (1 - enemyImmunity) *
+      (1 - combatProbability(enemyMod('AvoidanceChance', damageType))) : null;
+  const power = Math.max(0, (rating(damageType, 'PowerRatings') + mod('FlatPowerRating', damageType)) * (1 + mod('PercentPowerRating', damageType)));
   const protectionType = target?.damageType ?? damageType;
-  const protection = rating(protectionType, 'ProtectionRatings');
-  const interval = Math.max(250, Math.floor(stat(style.AttackIntervalStat) * (1 + mod('PercentAttackInterval')) + mod('FlatAttackInterval')));
+  const protection = Math.max(0, (rating(protectionType, 'ProtectionRatings') + mod('FlatProtectionRating', protectionType)) *
+    (1 + mod('PercentProtectionRating', protectionType)));
+  const interval = Math.max(250, Math.floor(stat(style.AttackIntervalStat) * (1 + mod('PercentAttackInterval')) + mod('FlatAttackInterval'))) /
+    Math.max(.1, 1 - (forecast?.playerStun ?? 0));
   const crit = combatProbability(mod('FlatCriticalHitChance'));
   const critMultiplier = Math.max(1, 1.5 + mod('FlatCriticalHitMultiplier'));
   const maxHp = Math.max(1, Math.floor((levels[baseCombatId(style.MaxHitpointsLevel)] ?? 1) * 10 *
     (1 + mod('PercentMaxHitpoints')) + mod('FlatMaxHitpoints')));
-  const enemyProtection = (target?.stats?.ProtectionRatings ?? []).find(row => baseCombatId(row.DamageType) === damageType)?.Value ?? 0;
+  const enemyProtection = Math.max(0, (((target?.stats?.ProtectionRatings ?? []).find(row => baseCombatId(row.DamageType) === damageType)?.Value ?? 0) +
+    enemyMod('FlatProtectionRating', damageType)) * (1 + enemyMod('PercentProtectionRating', damageType)));
   const resistance = Math.min(.7, enemyProtection / (power + enemyProtection || 1));
   const enemyHealth = (target?.levels?.Hitpoints ?? 0) * 10;
   const enemyHp = enemyHealth + Math.max(0, enemyStats('MaximumWard'));
@@ -149,22 +339,13 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
   }
   const affordable = entry => entry?.runes.every(row => (character.stock[row.id] ?? 0) >= row.quantity) ?? false;
   const usable = !style.UsesSpells || affordable(spellSupplies[saved.spell]);
-  const imbuementReady = affordable(spellSupplies[saved.imbuement]);
-  const damage = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageDealt')) * (1 - resistance) - enemyStats('Armour')));
+  const imbuementId = saved.imbuement ?? saved.activeImbuement;
+  const imbuementReady = affordable(spellSupplies[imbuementId]);
+  const damage = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageDealt')) * (1 - resistance) *
+    (1 + enemyMod('PercentDamageTaken') + enemyMod('PercentDamageTakenFromAttacks')) - enemyStats('Armour')));
   const respawn = Math.max(0, 3000 * (1 + mod('PercentSpawnInterval')) + mod('FlatSpawnInterval'));
   const averageDamage = quick && maxHit != null
     ? damage((minHit + maxHit) / 2) * (1 - crit) + damage(Math.trunc((minHit + maxHit) / 2 * critMultiplier)) * crit : 0;
-  const hits = target && maxHit != null && enemyHp > 0 && ammoReady && usable && hitChance > 0
-    ? quick ? Math.max(1, enemyHp / averageDamage) : expectedCombatHits(enemyHp, minHit, maxHit, damage, crit, critMultiplier) : 0;
-  const attacksPerKill = hits > 0 ? hits / hitChance : null;
-  const prayerCost = (saved.prayers ?? []).filter(prayer => prayer.state === 1)
-    .reduce((sum, prayer) => sum + (model.prayers[prayer.active]?.cost?.Quantity ?? 0), 0);
-  const prayerXpPerKill = hits && prayerCost > 0
-    ? quick ? Math.max(1, enemyHealth / averageDamage) * Math.sqrt(3 + .2 * Math.min(averageDamage, enemyHealth) * prayerCost) :
-      expectedCombatHits(enemyHealth, minHit, maxHit, damage, crit, critMultiplier,
-      healthDamage => Math.sqrt(3 + .2 * healthDamage * prayerCost)) : 0;
-  const enemyStanceId = target?.stances[0]?.[0];
-  const enemyStance = model.stances[enemyStanceId];
   const enemyCombatStyle = model.styles[enemyStance?.style];
   const enemyFormula = enemyCombatStyle?.MaxHitFormula?.Data;
   const enemyLevel = ratio(enemyFormula?.Levels, target?.levels ?? {});
@@ -175,31 +356,93 @@ function combatAttributes(model, character, target, area, spells, foodRules = {}
     enemyMaxHit = Math.floor(enemyStats(baseCombatId(enemyFormula.MaxHitStat)) *
       (1 + enemyStats(baseCombatId(enemyFormula.DamageBonusStat))) * (1 + (enemyLevel + 1) / 200));
   }
+  if (Number.isFinite(enemyMaxHit)) enemyMaxHit = Math.max(1, Math.floor(enemyMaxHit * (1 + enemyMod('PercentMaxHit')) + enemyMod('FlatMaxHit')));
+  const enemyMin = Math.min(enemyMaxHit ?? 1, Math.max(1, Math.floor(1 + enemyMod('FlatMinHit') + (enemyMaxHit ?? 1) * enemyMod('MinHitBasedOnMaxHit'))));
+  const targetCombat = { min: enemyMin, max: enemyMaxHit ?? 1, hp: enemyHealth };
+  const playerCombat = { min: minHit, max: maxHit, hp: maxHp, chance: hitChance, immunity: enemyImmunity, damageType };
+  const playerPatterns = gear.flatMap(item => item.attacks ?? []);
+  const playerAttack = playerPatterns.length && maxHit != null ? combatAttackAverage(playerPatterns, playerCombat, targetCombat,
+    (value, critical) => critical ? damage(Math.trunc(value * (crit > 0 ? critMultiplier : 1))) :
+      damage(value) * (1 - crit) + damage(Math.trunc(value * critMultiplier)) * crit) : null;
+  const canAttack = target && maxHit != null && enemyHp > 0 && ammoReady && usable && (hitChance > 0 || playerAttack?.damage > 0);
+  const normalHits = canAttack && hitChance > 0
+    ? quick ? Math.max(1, enemyHp / averageDamage) : expectedCombatHits(enemyHp, minHit, maxHit, damage, crit, critMultiplier) : 0;
+  const attackInterval = interval + (playerAttack?.delay ?? 0);
+  const playerDamagePerTurn = playerAttack?.damage ?? 0;
+  const encounterDamage = (playerAttack ? playerDamagePerTurn : (normalHits > 0 ? enemyHp * hitChance / normalHits : 0)) +
+    attackInterval * ((forecast?.enemyDamagePerMs ?? 0) - (forecast?.enemyHealingPerMs ?? 0));
+  const changesDamage = playerAttack || forecast?.enemyDamagePerMs || forecast?.enemyHealingPerMs;
+  const attacksPerKill = canAttack && encounterDamage > 0
+    ? changesDamage ? Math.max(1, enemyHp / encounterDamage) : normalHits / hitChance : null;
+  const hits = attacksPerKill ? playerAttack ? attacksPerKill * playerAttack.hits : attacksPerKill * hitChance : 0;
+  const prayerCost = (saved.prayers ?? []).filter(prayer => prayer.state === 1)
+    .reduce((sum, prayer) => sum + (model.prayers[prayer.active]?.cost?.Quantity ?? 0), 0);
+  const prayerXpPerKill = hits && prayerCost > 0
+    ? playerAttack ? hits * Math.sqrt(3 + .2 * Math.min(enemyHealth, playerDamagePerTurn / Math.max(.001, playerAttack.hits)) * prayerCost) :
+      quick ? Math.max(1, enemyHealth / averageDamage) * Math.sqrt(3 + .2 * Math.min(averageDamage, enemyHealth) * prayerCost) :
+      expectedCombatHits(enemyHealth, minHit, maxHit, damage, crit, critMultiplier,
+      healthDamage => Math.sqrt(3 + .2 * healthDamage * prayerCost)) : 0;
   let enemy;
+  let enemyAttack;
+  let enemyAttackInterval;
   if (enemyStance && attacksPerKill && enemyMaxHit > 0 && enemyStats('AttackInterval') > 0) {
-    const enemyPower = (target.stats?.PowerRatings ?? []).find(row => baseCombatId(row.DamageType) === protectionType)?.Value ?? 0;
-    const enemyInterval = Math.max(250, enemyStats('AttackInterval'));
+    const enemyPower = Math.max(0, (((target.stats?.PowerRatings ?? []).find(row => baseCombatId(row.DamageType) === protectionType)?.Value ?? 0) +
+      enemyMod('FlatPowerRating', protectionType)) * (1 + enemyMod('PercentPowerRating', protectionType)));
+    const enemyInterval = Math.max(250, enemyStats('AttackInterval') * (1 + enemyMod('PercentAttackInterval')) + enemyMod('FlatAttackInterval')) /
+      Math.max(.1, 1 - (forecast?.enemyStun ?? 0));
     const enemyAccuracy = Math.max(1, Math.floor((ratio(enemyCombatStyle.AccuracyRatingLevels, target.levels) + 9) *
-      (enemyStats(enemyStance.accuracy) + 64)));
+      (enemyStats(enemyStance.accuracy) + 64) * (1 + enemyMod('PercentAccuracyRating'))));
     const defence = evasion[enemyStanceId];
-    const chance = combatProbability(enemyAccuracy >= defence ? 1 - defence / (2 * enemyAccuracy) : enemyAccuracy / (2 * defence));
+    const immunity = mod('ImmunityFrom', protectionType) > 0 ? 1 : 0;
+    const chance = combatProbability(enemyAccuracy >= defence ? 1 - defence / (2 * enemyAccuracy) : enemyAccuracy / (2 * defence)) *
+      (1 - immunity) * (1 - combatProbability(mod('AvoidanceChance', protectionType)));
     const resist = Math.min(.7, protection / (enemyPower + protection || 1));
-    const hitAfterDefence = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageTaken')) * (1 - resist) - stat(style.ArmourStat)));
+    const hitAfterDefence = hit => Math.max(1, Math.trunc(hit * (1 + mod('PercentDamageTaken') + mod('PercentDamageTakenFromAttacks')) *
+      (1 - resist) - stat(style.ArmourStat)));
+    Object.assign(targetCombat, { min: enemyMin, max: enemyMaxHit, chance, immunity, damageType: protectionType });
     const rolls = Math.min(enemyMaxHit, quick ? 8 : 4096);
-    let total = 0;
-    for (let i = 1; i <= rolls; i++) total += hitAfterDefence(Math.ceil(i * enemyMaxHit / rolls));
-    const turns = quick ? Math.max(0, attacksPerKill * interval / enemyInterval - .5) :
-      expectedEnemyTurns({ health: enemyHp, minHit, maxHit, hitChance, interval, enemyInterval, damage, crit, critMultiplier,
+    const meanHit = () => {
+      let total = 0;
+      for (let i = 1; i <= rolls; i++) {
+        total += hitAfterDefence(enemyMin - 1 + Math.ceil(i * (enemyMaxHit - enemyMin + 1) / rolls));
+      }
+      return total / rolls;
+    };
+    const plain = meanHit(1) * chance;
+    enemyAttack = target.damagePatterns?.length ? combatAttackAverage(target.damagePatterns, targetCombat, playerCombat, hitAfterDefence) : null;
+    enemyAttackInterval = enemyInterval + (enemyAttack?.delay ?? 0);
+    const turns = quick || changesDamage || enemyAttack ? Math.max(0, attacksPerKill * attackInterval / enemyAttackInterval - .5) :
+      expectedEnemyTurns({ health: enemyHp, minHit, maxHit, hitChance, interval: attackInterval, enemyInterval, damage, crit, critMultiplier,
       attacksPerKill });
-    enemy = { turnsPerKill: turns, chance, maxHit: hitAfterDefence(enemyMaxHit), damagePerTurn: total / rolls * chance,
+    const extraDamage = ((forecast?.playerDamagePerMs ?? 0) - (forecast?.playerHealingPerMs ?? 0)) *
+      attacksPerKill * attackInterval + enemyHp * combatProbability(enemyMod('PercentAttackReflect'));
+    const damagePerTurn = Math.max(0, (enemyAttack?.damage ?? plain) + (turns > 0 ? extraDamage / turns : 0));
+    enemy = { turnsPerKill: turns, chance, maxHit: enemyAttack?.maxDamage ?? hitAfterDefence(enemyMaxHit), damagePerTurn,
+      passiveDamagePerKill: turns > 0 ? 0 : Math.max(0, extraDamage),
       wardFraction: combatProbability(Math.max(0, enemyStats('MaximumWard')) / enemyHp) };
   }
-  return { levels, stats, evasion, stanceId, style: stance.style, element, damageType, protectionType, light, darkness, interval,
+  const sourcesWithEffects = combatEffects.flatMap(bundle => (bundle.modifiers.CombatEffect ?? []).map(row =>
+    ({ row, magnitude: areaMagnitude(bundle) }))).concat(gear.flatMap(item => (item.effects ?? []).map(row => ({ row, magnitude: 1 }))));
+  if (imbuementReady) {
+    for (const row of spells[imbuementId]?.effects ?? []) sourcesWithEffects.push({ row, magnitude: 1 });
+  }
+  if (!forecast && target && model.effects && attacksPerKill && (sourcesWithEffects.length || playerAttack?.effects.length ||
+      enemyAttack?.effects.length || enemyMod('EffectLifesteal'))) {
+    const phase = estimateCombatEffects(model.effects, sourcesWithEffects, playerAttack, enemyAttack, playerCombat, targetCombat,
+      attackInterval, enemyAttackInterval, attacksPerKill * attackInterval,
+      (side, stat, id) => (effectMods.get([side, stat, id].join(':')) ?? 0) +
+        (stat === 'EffectLifesteal' ? Math.max(0, side === 'Enemy' ? enemyMod(stat) : mod(stat)) : 0));
+    return combatAttributes(model, character, target, area, spells, foodRules, { quick, forecast: phase });
+  }
+  return { levels, stats, evasion, stanceId, style: stance.style, element, damageType, protectionType, light, darkness, interval: attackInterval,
     combatLevel: Math.floor(ratio(style.CombatLevelRatios, levels)), maxHp, minHit, maxHit, accuracy, hitChance, power,
     currentHp: saved.hitpoints, protection, crit, critMultiplier, reflect: mod('PercentAttackReflect'), ammoReady, usable,
     attacksPerKill, hitsPerKill: hits, prayerXpPerKill, enemy, foodBonuses, lifesteal: Math.max(0, stat(style.LifestealStat)), enemyHp, respawn,
     ammoType: weapon.RequiredAmmoType, ammoPreservation, usesSpells: style.UsesSpells, spellSupplies, imbuementReady,
-    perHour: attacksPerKill > 0 ? 3600000 / (respawn + interval * attacksPerKill) : null };
+    effectsApplied: Boolean(combatEffects.length || playerAttack || enemyAttack || forecast),
+    effectsPartial: Boolean(playerAttack?.partial || enemyAttack?.partial || forecast?.partial || hasConditionalEffect),
+    immune: enemyImmunity === 1,
+    perHour: attacksPerKill > 0 ? 3600000 / (respawn + attackInterval * attacksPerKill) : null };
 }
 
 function expectedEnemyTurns({ health, minHit, maxHit, hitChance, interval, enemyInterval, damage, crit, critMultiplier, attacksPerKill }) {
@@ -254,7 +497,8 @@ function combatFoodProjection(rule, id, context) {
   const beforeFirstMeal = Math.max(0, initialHp - threshold);
   const healingPerKill = Math.min(attributes.enemyHp * attributes.lifesteal, attributes.maxHp) || 0;
   const effectiveKills = Math.min(killsPerHour, 3600000 / (attributes.interval * attributes.attacksPerKill));
-  const damagePerHour = Math.max(0, (attributes.enemy.turnsPerKill * attributes.enemy.damagePerTurn - healingPerKill) * effectiveKills);
+  const damagePerHour = Math.max(0, (attributes.enemy.turnsPerKill * attributes.enemy.damagePerTurn +
+    (attributes.enemy.passiveDamagePerKill ?? 0) - healingPerKill) * effectiveKills);
   const unitsPerMeal = batch * (1 - preserve);
   function neededAt(hours) {
     const loss = hours * damagePerHour;
@@ -386,10 +630,14 @@ function combatSupplyEstimate(rule, id, context) {
         .reduce((sum, row) => sum + row.quantity * (1 - spell.preserve), 0) : 0;
     };
     const required = attributes.usesSpells ? expectedRunes(combat.spell) : 0;
-    const optional = attributes.imbuementReady ? expectedRunes(combat.imbuement) : 0;
+    const optional = attributes.imbuementReady ? expectedRunes(combat.imbuement ?? combat.activeImbuement) : 0;
     if (!required && !optional) return 0;
     if (playerTurns == null) return null;
-    if (!required) return { neededAt: hours => hours * optional * playerTurns, hoursAtStock: () => Infinity };
+    if (!required) {
+      const rate = optional * playerTurns;
+      if (!(rate > 0)) return 0;
+      return { optional: true, neededAt: hours => hours * rate, hoursAtStock: stock => stock / rate };
+    }
     return (required + optional) * playerTurns;
   }
   if (rule.kind === 'prayer') {
@@ -435,4 +683,5 @@ function requiresSlayerTask(event) {
   return event?.Data?.Conditions?.some(condition => baseCombatId(condition.Type) === 'FightingSlayerTask');
 }
 
-if (typeof module !== 'undefined') module.exports = { combatAttributes, expectedCombatHits, combatSupplyEstimate, combatFoodProjection, expectedEnemyTurns };
+if (typeof module !== 'undefined') module.exports = { combatAttributes, expectedCombatHits, combatSupplyEstimate, combatFoodProjection,
+  expectedEnemyTurns, combatAttackAverage, estimateCombatEffects };

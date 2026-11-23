@@ -536,6 +536,16 @@ function readGrainMill(reader, inventory) {
   return { active, first, recipe, stock };
 }
 
+function readBonfire(reader) {
+  if (!reader) return;
+  reader.int(); // Maximum ticks
+  const ticks = reader.int();
+  const paused = reader.byte();
+  const id = reader.byte() ? localId(reader.string()) : null;
+  const active = reader.byte();
+  return id && active && !paused && ticks > 0 ? { id, seconds: ticks / 60 } : undefined;
+}
+
 function parseProfile(data, date, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}, items = {}) {
   const { reader, ...header } = parseHeader(data);
   const entities = reader.regions();
@@ -617,6 +627,12 @@ function parseProfile(data, date, skills, shopSkills = [], mastery = {}, constel
   } catch {
     onWarning('Quests', 'Quests');
   }
+  let bonfire;
+  try {
+    bonfire = readBonfire(componentsFor('Firemaking')?.get('Bonfire'));
+  } catch {
+    onWarning('Bonfire', 'Firemaking');
+  }
   const xpSkillState = {};
   for (const [skill, component, read] of [
     ['Agility', 'Techniques', techniques => techniques &&
@@ -643,7 +659,7 @@ function parseProfile(data, date, skills, shopSkills = [], mastery = {}, constel
   return {
     ...header, levels, skillXp, equipped, skillToolbelt, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
     dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, fishingPriorities, recipeStatistics, unlockedPets, ranks, combat,
-    questProgress,
+    questProgress, bonfire,
     xpSkillState,
     currencies: readCurrencies(bankComponents.get('Wallet'), header.currencies),
     date

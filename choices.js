@@ -1,5 +1,27 @@
 const normalizedSuggestion = value => value.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}]+/gu, '');
 
+function localizedSuggestions(entries) {
+  const counts = new Map();
+  return entries.map(({ key, name, aliases }) => {
+    const count = (counts.get(name) ?? 0) + 1;
+    counts.set(name, count);
+    const label = count === 1 ? name : name + ' (' + fullNumber(count) + ')';
+    const option = new Option('', label);
+    option.dataset.key = key;
+    option.dataset.searchAliases = [label, name, key, ...aliases].filter(Boolean).join('\n');
+    return option;
+  });
+}
+
+function suggestionKey(options, text) {
+  const query = text.trim();
+  if (!query) return;
+  const matches = [...options].filter(option => option.value === query || option.dataset.key === query);
+  if (matches.length === 1) return matches[0].dataset.key;
+  const aliases = [...options].filter(option => option.dataset.searchAliases?.split('\n').some(alias => alias === query));
+  if (aliases.length === 1) return aliases[0].dataset.key;
+}
+
 function suggestionMatches(options, query, limit = 40) {
   const search = query.trim().toLocaleLowerCase();
   const normalized = normalizedSuggestion(search);
@@ -103,6 +125,11 @@ function initSuggestions(input) {
     panel.setAttribute('aria-label', input.placeholder);
     panel.replaceChildren(...matches.map((match, index) => {
       const option = create('button', match.label || match.value);
+      if (match.dataset.suggestionHint) {
+        const hint = create('small', match.dataset.suggestionHint, 'queue-access');
+        hint.dataset.access = match.dataset.access;
+        option.append(hint);
+      }
       option.type = 'button';
       option.id = panel.id + '-' + index;
       option.tabIndex = -1;

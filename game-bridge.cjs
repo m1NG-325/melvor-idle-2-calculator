@@ -1,0 +1,184 @@
+const fs = require('node:fs/promises');
+const { createReadStream, existsSync } = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawn, execFile } = require('node:child_process');
+const { createHash, randomUUID } = require('node:crypto');
+const { promisify } = require('node:util');
+const { setTimeout: delay } = require('node:timers/promises');
+
+const bridgeAssembly = 'CalculatorQueueBridge';
+const localBridge = path.join(__dirname, bridgeAssembly + '.dll');
+const packagedBridge = path.join(__dirname, 'vendor', 'calculator-queue-bridge.json');
+const hasBridgeAssembly = () => existsSync(localBridge) || existsSync(packagedBridge);
+const gameAssembly = 'GamesByMalcs.Melvor2';
+const runtimeFolder = assembly => 'data_' + assembly + '_windows_x86_64';
+const directQueueSkills = ['Woodcutting', 'Mining', 'Fishing', 'Cooking', 'Smithing', 'Crafting',
+  'Fletching', 'Runecrafting', 'Beastcrafting', 'Firemaking'];
+const bridgeBuild = '26724394';
+const supportedGameRuntime = '0a5a9fff320aaaff781816dee0eee938d61d14982ba7f4523dd8ca31d95f27a9';
+async function verifyBridgeRuntime(file, signal) {
+  if ((await fs.stat(file)).size !== 11732368) throw new Error('bridge-build');
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file, { highWaterMark: 256 * 1024, signal })) hash.update(chunk);
+  if (hash.digest('hex') !== supportedGameRuntime) throw new Error('bridge-build');
+}
+
+async function stageGameBridge(game, directory, assemblyFile, stageFile = fs.link) {
+  const source = path.join(game, runtimeFolder(gameAssembly));
+  const destination = path.join(directory, runtimeFolder(bridgeAssembly));
+  await fs.mkdir(destination, { recursive: true });
+  const executable = path.join(directory, 'Melvor2.exe');
+  await stageFile(path.join(game, 'Melvor2.exe'), executable);
+  const entries = await fs.readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isFile()) await stageFile(path.join(source, entry.name), path.join(destination, entry.name));
+  }
+  const bridgeFile = path.join(destination, bridgeAssembly + '.dll');
+  if (assemblyFile || existsSync(localBridge)) await fs.copyFile(assemblyFile ?? localBridge, bridgeFile);
+  else {
+    // Older updaters admit vendor JSON. Only the small bridge assembly is unpacked here.
+    const { data, sha256 } = JSON.parse(await fs.readFile(packagedBridge, 'utf8'));
+    if (typeof data !== 'string' || data.length > 175000) throw new Error('bridge-build');
+    const bytes = Buffer.from(data, 'base64');
+    if (bytes.subarray(0, 2).toString() !== 'MZ' || createHash('sha256').update(bytes).digest('hex') !== sha256) {
+      throw new Error('bridge-build');
+    }
+    await fs.writeFile(bridgeFile, bytes, { flag: 'wx' });
+  }
+  await fs.copyFile(path.join(source, gameAssembly + '.runtimeconfig.json'),
+    path.join(destination, bridgeAssembly + '.runtimeconfig.json'));
+  const metadata = JSON.parse(await fs.readFile(path.join(source, gameAssembly + '.deps.json'), 'utf8'));
+  const library = bridgeAssembly + '/1.0.0';
+  metadata.targets[metadata.runtimeTarget.name][library] = {
+    dependencies: { [gameAssembly]: '1.0.0' }, runtime: { [bridgeAssembly + '.dll']: {} }
+  };
+  metadata.libraries[library] = { type: 'project', serviceable: false, sha512: '' };
+  await fs.writeFile(path.join(destination, bridgeAssembly + '.deps.json'), JSON.stringify(metadata));
+  await fs.writeFile(path.join(directory, 'override.cfg'), '[dotnet]\nproject/assembly_name="' + bridgeAssembly + '"\n');
+  return executable;
+}
+
+function removeTemporaryBridgeDirectory(root, directory) {
+  const relative = path.relative(path.resolve(root), path.resolve(directory));
+  if (/^melvor-queue-(?:session|direct)-[A-Za-z0-9]{6}$/.test(relative)) {
+    return fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function prepareLinkedGame(game, { signal, assemblyFile, link = fs.link, root: stagingRoot } = {}) {
+  const installation = await fs.realpath(game);
+  const root = stagingRoot ?? path.dirname(installation);
+  signal?.throwIfAborted();
+  const directory = await fs.mkdtemp(path.join(root, 'melvor-queue-direct-'));
+  try {
+    const executable = await stageGameBridge(installation, directory, assemblyFile, async (from, to) => {
+      signal?.throwIfAborted();
+      await link(from, to);
+    });
+    return { directory, executable, cleanup: () => removeTemporaryBridgeDirectory(root, directory) };
+  } catch (error) {
+    await removeTemporaryBridgeDirectory(root, directory);
+    throw error;
+  }
+}
+
+const linkFallbackErrors = new Set(['EPERM', 'EACCES', 'EROFS', 'ENOTSUP', 'EINVAL', 'EXDEV', 'EMLINK']);
+
+function createGameBridge(game, build) {
+  let session;
+  let buildVerified = build === bridgeBuild;
+  async function connect(signal) {
+    if (session && session.child.exitCode === null && session.child.signalCode === null) {
+      if (!session.ready) session.ready = await send('hello', {}, signal, 40000) === 'connected';
+      if (!session.ready) throw new Error('bridge-unavailable');
+      return session;
+    }
+    const { stdout } = await promisify(execFile)('tasklist.exe', [
+      '/FI', 'IMAGENAME eq Melvor2.exe', '/FO', 'CSV', '/NH'
+    ], { windowsHide: true, signal, timeout: 5000 });
+    if (/^"Melvor2\.exe"/im.test(stdout)) throw new Error('game-already-open');
+    const localRoot = os.tmpdir();
+    let stage;
+    try {
+      if (!buildVerified) {
+        const assembly = path.join(game, runtimeFolder(gameAssembly), gameAssembly + '.dll');
+        await verifyBridgeRuntime(assembly, signal);
+        buildVerified = true;
+      }
+      try {
+        stage = await prepareLinkedGame(game, { signal });
+      } catch (error) {
+        if (signal.aborted || !linkFallbackErrors.has(error.code)) throw error;
+        stage = await prepareLinkedGame(game, { signal, root: localRoot,
+          link: (from, to) => fs.symlink(from, to, 'file') });
+      }
+      await verifyBridgeRuntime(path.join(stage.directory, runtimeFolder(bridgeAssembly), gameAssembly + '.dll'), signal);
+    } catch (error) {
+      await stage?.cleanup?.();
+      if (signal.aborted || error.message === 'bridge-build') throw error;
+      throw new Error('direct-link-failed');
+    }
+    let directory;
+    let child;
+    try {
+      signal.throwIfAborted();
+      directory = await fs.mkdtemp(path.join(localRoot, 'melvor-queue-session-'));
+      signal.throwIfAborted();
+      child = spawn(stage.executable, [], {
+        cwd: stage.directory, stdio: 'ignore', detached: true,
+        env: { ...process.env, SteamAppId: '3218350', MELVOR_CALCULATOR_BRIDGE_DIR: directory }
+      });
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+    } catch (error) {
+      if (directory) await removeTemporaryBridgeDirectory(localRoot, directory);
+      await stage.cleanup?.();
+      throw error;
+    }
+    child.unref();
+    session = { child, directory };
+    child.once('exit', () => {
+      if (session?.child === child) session = undefined;
+      void removeTemporaryBridgeDirectory(localRoot, directory);
+      void stage.cleanup?.();
+    });
+    session.ready = await send('hello', {}, signal, 40000) === 'connected';
+    if (!session.ready) throw new Error('bridge-unavailable');
+    return session;
+  }
+
+  async function send(operation, params, signal, timeout = 12000) {
+    const { directory, child } = session;
+    const id = randomUUID();
+    const request = path.join(directory, 'request.json');
+    const response = path.join(directory, 'response.json');
+    const pending = request + '.' + id;
+    const deadline = Date.now() + timeout;
+    signal.throwIfAborted();
+    await fs.writeFile(pending, JSON.stringify({ id, operation, ...params }), { flag: 'wx' });
+    try {
+      signal.throwIfAborted();
+      await fs.rename(pending, request);
+      while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
+        const raw = await fs.readFile(response, 'utf8').catch(error => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        if (raw) {
+          const reply = JSON.parse(raw);
+          if (reply.id === id) return reply.state;
+        }
+        await delay(150, undefined, { signal });
+      }
+      throw new Error('bridge-unavailable');
+    } finally {
+      await fs.rm(pending, { force: true }).catch(() => {});
+      await fs.rm(request, { force: true }).catch(() => {});
+    }
+  }
+  return { connect, send };
+}
+
+module.exports = { bridgeBuild, directQueueSkills, createGameBridge, prepareLinkedGame, hasBridgeAssembly };

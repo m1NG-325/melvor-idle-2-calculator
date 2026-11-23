@@ -98,7 +98,7 @@ let shopView;
 function shopCurrencyName(id) {
   const shop = shopView?.shop;
   return localizedName(shop?.currencyLabels?.[id], shop?.currencies?.[id]) ??
-    (id === 'GoldPieces' ? t('金币') : id);
+    (id === 'GoldPieces' ? t('金币') : t('未知货币'));
 }
 
 function localizeShop() {
@@ -216,7 +216,7 @@ function renderShop() {
 }
 
 function describeShopGate(requirement, shop) {
-  const target = gameName(requirement) ?? requirement.id;
+  const target = gameName(requirement) ?? t('未知名称');
   switch (requirement.type) {
     case 'Level':
       return t('{skill} {level} 级', { skill: skillName(requirement.skill, shop.skillNames), level: requirement.level });
@@ -234,7 +234,7 @@ function describeShopGate(requirement, shop) {
 }
 
 function renderShopResource(resource, expanded, showPurchased, showPending) {
-  const { shop, categoryNames } = shopView;
+  const { shop, categoryNames, items } = shopView;
   const detail = create('details');
   detail.dataset.resource = resource.type + ':' + resource.id;
   detail.open = expanded.has(detail.dataset.resource);
@@ -242,7 +242,8 @@ function renderShopResource(resource, expanded, showPurchased, showPending) {
   const columns = create('div', undefined, 'shop-row shop-row-content');
   const value = number => number === null ? '—' : fullNumber(number);
   columns.append(
-    create('span', resource.name + ' · ' + t('{count} 项', { count: resource.uses.length }), 'resource-name'),
+    create('span', (resource.type === 'currency' ? shopCurrencyName(resource.id) :
+      gameName(items[resource.id]) ?? t('未知物品')) + ' · ' + t('{count} 项', { count: resource.uses.length }), 'resource-name'),
     create('span', value(resource.spent), 'number spent-col'),
     create('span', value(resource.total), 'number pending-col'),
     create('span', value(resource.available), 'number'),

@@ -50,13 +50,15 @@ function formatXpDuration(hours) {
   if (!Number.isFinite(hours) || hours < 0) return t('暂无升级时间');
   const exactSeconds = hours * 3600;
   const seconds = Math.ceil(exactSeconds - exactSeconds * Number.EPSILON);
-  if (seconds >= 3600) return formatDuration(hours, true);
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  const parts = [];
-  if (minutes) parts.push(t('{value} 分钟', { value: fullNumber(minutes) }));
-  if (remainder || !minutes) parts.push(t('{value} 秒', { value: fullNumber(remainder) }));
-  return parts.join(' ');
+  const units = [
+    [Math.floor(seconds / 86400), '{value} 天'],
+    [Math.floor(seconds / 3600) % 24, '{value} 小时'],
+    [Math.floor(seconds / 60) % 60, '{value} 分钟'],
+    [seconds % 60, '{value} 秒']
+  ];
+  const parts = units.filter(([amount]) => amount > 0);
+  return (parts.length ? parts : [units.at(-1)])
+    .map(([amount, unit]) => t(unit, { value: fullNumber(amount) }).replace(/ /g, '\u00a0')).join(' ');
 }
 function renderXpProgress(character, skill, goal, timeForGoal, limitLabel, plannedHours) {
   const view = create('div', undefined, 'xp-progress');
