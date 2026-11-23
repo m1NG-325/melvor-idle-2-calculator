@@ -394,7 +394,18 @@ summary.shop-row::marker { color: var(--aqua); }
 }
 .xp-combat-context { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 12px; }
 .xp-combat-context a { color: var(--aqua); }
+.xp-overview-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .4rem 1rem; }
+.xp-overview-heading h2, #xpStatus { margin: 0; }
+.xp-overview-heading .check { min-height: 2rem; }
 .xp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.8rem), 1fr)); gap: 8px; margin-top: 11px; }
+#xpBest {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, max(8.4rem, calc((100% - 40px) / 6))), 1fr));
+}
+#xpBest .xp-card {
+  grid-template-rows: auto 1fr auto;
+  padding: .55rem .65rem;
+}
+#xpBest .xp-rate { font-weight: 650; }
 .xp-card { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(1.3rem, auto) minmax(1.2rem, auto) minmax(1.1rem, auto); align-content: start; gap: .2rem; min-width: 0; text-align: start; padding: .6rem .75rem; }
 .xp-card-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; }
 .xp-card-level { color: var(--muted); font-size: .78rem; white-space: nowrap; }
@@ -464,6 +475,24 @@ summary.shop-row::marker { color: var(--aqua); }
 }
 .skill-training { margin-block: 12px; }
 .skill-training > h3 { margin: 0; font-size: 1rem; }
+#skillTraining .combat-training-plan { margin-top: .6rem; padding-top: .5rem; }
+#skillTraining .combat-training-plan > h3 { margin: 0 0 .4rem; }
+#skillTraining .combat-training-plan p { margin: .4rem 0 0; }
+#skillTraining .combat-training-gear { margin-block: .6rem; }
+.skill-training-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .35rem 1rem;
+  padding: .45rem .65rem;
+  background: var(--surface);
+  border-radius: .5rem;
+}
+.skill-training-action { min-width: 0; overflow-wrap: anywhere; }
+.skill-training-summary .metrics { gap: .35rem 1rem; color: var(--muted); font-size: .8rem; }
+.skill-training-summary .metrics > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .4rem; }
+.skill-training-summary .metrics strong { font-size: 1rem; font-variant-numeric: tabular-nums; }
 .combat-training .metrics { gap: .5rem 1.25rem; }
 .combat-training .metrics strong { font-size: 1.1rem; }
 .combat-training-plan { border-top: 1px solid var(--line); margin-top: .75rem; padding-top: .35rem; }
@@ -489,6 +518,9 @@ summary.shop-row::marker { color: var(--aqua); }
 .xp-goal-metrics div:last-child dd, .xp-action-details summary { color: var(--aqua); }
 :is(#xpGoalOverview, #combatGoalOverview) > p { margin-top: .45rem; }
 #combatXpTable { margin-top: .85rem; }
+#xpTable { max-block-size: 22rem; }
+#xpTable table { margin-top: 0; }
+#xpTable th { position: sticky; top: 0; z-index: 1; background: var(--panel); box-shadow: 0 1px var(--line); }
 .xp-action-details p { margin-top: .35rem; max-width: 34rem; }
 td .xp-progress { min-width: 10rem; }
 #xpRows td:last-child { min-width: 17rem; white-space: normal; }
@@ -524,7 +556,9 @@ td .xp-progress { min-width: 10rem; }
 #combatLoadoutRows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: .4rem 1rem; margin: .75rem 0 0; padding: 0; list-style: none; }
 #combatLoadoutRows li { padding: .35rem .6rem; background: var(--surface); border-radius: .45rem; overflow-wrap: anywhere; }
 .theme-control { position: relative; }
-.theme-control > summary { display: flex; align-items: center; gap: .45rem; padding: .45rem .65rem; border: 1px solid var(--line); border-radius: .55rem; color: var(--aqua); }
+.theme-control > summary, .repository-link { display: flex; align-items: center; gap: .45rem; padding: .45rem .65rem; border: 1px solid var(--line); border-radius: .55rem; color: var(--aqua); }
+.repository-link { margin-inline-start: auto; text-decoration: none; }
+.repository-link:hover { background: var(--aqua-tint); }
 .theme-control > summary::-webkit-details-marker { display: none; }
 .theme-popover { position: absolute; z-index: 10; inset-inline-end: 0; top: calc(100% + .5rem); width: min(17rem, 83vw); padding: .8rem; }
 .theme-heading { display: flex; align-items: center; justify-content: space-between; gap: .65rem; }

@@ -50,9 +50,12 @@ function productionFamily(index, target) {
 }
 
 function planProduction(catalog, profile, index, target, hours, useStock, evaluateCycle,
-  { preview = false, items, sellByproducts = false, keptItems = new Set() } = {}) {
-  if (!Number.isFinite(hours) || hours <= 0 || (target && !index.producers.has(target))) return [];
-  const budget = hours * 3600;
+  { preview = false, items, sellByproducts = false, keptItems = new Set(), targetQuantity, reservePercent = 0 } = {}) {
+  const byQuantity = targetQuantity != null;
+  if (target && !index.producers.has(target)) return [];
+  if (byQuantity ? !Number.isSafeInteger(targetQuantity) || targetQuantity < 1 || (!target && !items) :
+    !Number.isFinite(hours) || hours <= 0) return [];
+  const budget = byQuantity ? Infinity : hours * 3600;
   const models = new Map();
   const modelFor = action => {
     if (!models.has(action.id)) {
@@ -63,7 +66,10 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
         for (const drop of row.drops) {
           output.set(drop.id, (output.get(drop.id) ?? 0) + drop.quantity);
         }
-        models.set(action.id, { action, output, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
+        const randomOutput = row.drops.some(drop => !Number.isInteger(drop.quantity)) ||
+          row.doubleOutput > 0 && row.doubleOutput < 1 || row.cooking?.success < 1 ||
+          ['Fishing', 'Hunting', 'Mining', 'Woodcutting'].includes(action.kind);
+        models.set(action.id, { action, output, randomOutput, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
           inputs: row.inputs, restrictions: row.restrictions ?? [], sacrifice: row.sacrifice });
       }
     }
@@ -97,26 +103,60 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     const needed = inventory(state, id) + missing;
     let best;
     let bestScore = Infinity;
+    let bestCost = Infinity;
     const sources = [];
     function consider(candidate) {
       if (!enough(inventory(candidate, id), needed)) return;
-      const score = strategy.rate == null ? candidate.seconds : candidate.seconds * strategy.rate +
-        candidate.bankCost + candidate.goldCost + candidate.externalCost - candidate.direct -
+      const cost = candidate.bankCost + candidate.goldCost + candidate.externalCost - candidate.direct -
         (sellByproducts ? saleValue(candidate, id) : 0);
-      if (!best || score < bestScore || (score === bestScore && candidate.seconds < best.seconds)) {
+      const score = strategy.rate == null ? candidate.seconds : candidate.seconds * strategy.rate + cost;
+      const winsTie = strategy.quantityMix ? cost < bestCost : candidate.seconds < best?.seconds;
+      if (!best || score < bestScore || (score === bestScore && winsTie)) {
         best = candidate;
         bestScore = score;
+        bestCost = cost;
       }
     }
     for (const action of index.producers.get(id) ?? []) {
       const model = modelFor(action);
-      const amount = model?.output.get(id);
+      const quantity = model?.output.get(id);
+      const amount = strategy.quantityMix && model?.randomOutput ? quantity / (1 + reservePercent / 100) : quantity;
       if (!(amount > 0)) continue;
       sources.push({ model, amount });
       const cycles = Math.max(1, roundUp(missing / amount));
+      if (!Number.isSafeInteger(cycles)) continue;
       if (strategy.rate == null && best && state.seconds + model.duration(cycles) > best.seconds) continue;
       const candidate = copy(state);
       if (run(candidate, model, cycles, nextTrail, timeLimit, strategy)) consider(candidate);
+    }
+    if (strategy.quantityMix && sources.length > 1) {
+      const sorted = sources.sort((a, b) => a.model.seconds / a.amount - b.model.seconds / b.amount);
+      for (const first of sorted) {
+        const candidate = copy(state);
+        let outstanding = missing;
+        for (const { model, amount } of [first, ...sorted.filter(source => source !== first)]) {
+          const max = roundUp(outstanding / amount);
+          if (!Number.isSafeInteger(max) || max <= 0) break;
+          let low = 1;
+          let high = max;
+          let partial;
+          let cycles = 0;
+          while (low <= high) {
+            const count = low === 1 && high === max ? max : Math.floor((low + high) / 2);
+            const probe = copy(candidate);
+            if (run(probe, model, count, nextTrail, timeLimit, strategy)) {
+              partial = probe;
+              cycles = count;
+              low = count + 1;
+            } else high = count - 1;
+          }
+          if (partial) {
+            Object.assign(candidate, partial);
+            outstanding -= cycles * amount;
+          }
+        }
+        if (enough(missing - outstanding, missing)) consider(candidate);
+      }
     }
     strategy.alternatives ||= sources.length > 1;
     if (strategy.mix && sources.length > 1) {
@@ -148,7 +188,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
   };
   function run(state, model, cycles, trail, timeLimit, strategy) {
     const seconds = model.duration(cycles);
-    if (state.seconds + seconds > timeLimit && !enough(timeLimit, state.seconds + seconds)) return false;
+    if (!Number.isFinite(seconds) || state.seconds + seconds > timeLimit && !enough(timeLimit, state.seconds + seconds)) return false;
     const used = [];
     const held = [];
     const restrictions = [...model.restrictions];
@@ -223,14 +263,15 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     state.direct += direct;
     state.wallet.set('GoldPieces', (state.wallet.get('GoldPieces') ?? 0) + direct);
     state.seconds += seconds;
-    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions,
+    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions, randomOutput: model.randomOutput,
       sacrificeGp: (model.sacrifice?.gp ?? 0) * cycles });
     return true;
   }
   function solve(item, action) {
-    const model = modelFor(action);
+    const model = action && modelFor(action);
     const sacrificed = model?.sacrifice?.items.find(row => row.id === item);
-    if (!sacrificed && !(model?.output.get(item) > 0)) return null;
+    const output = model?.output.get(item);
+    if (!byQuantity && !(output > 0) && !sacrificed) return null;
     let result;
     let bestNet = -Infinity;
     let bestCycles;
@@ -284,20 +325,24 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
         for (let offset = -8; center != null && offset <= 8; offset++) assess(center + offset);
       }
     }
-    search(fastest);
-    if (fastest.alternatives) {
-      search({ rate: 0, unbounded: true });
-      const grossPerSecond = (sacrificed ? model.sacrifice.gp : model.output.get(item) * price(item)) / model.seconds;
-      if (Number.isFinite(grossPerSecond) && grossPerSecond > 0) search({ rate: grossPerSecond / 4 });
-      search({ rate: 0, mix: true });
+    if (byQuantity) {
+      result = bestSource(newState(), item, targetQuantity, new Set(), budget, { ...fastest, quantityMix: true });
+    } else {
+      search(fastest);
+      if (fastest.alternatives) {
+        search({ rate: 0, unbounded: true });
+        const grossPerSecond = (sacrificed ? model.sacrifice.gp : output * price(item)) / model.seconds;
+        if (Number.isFinite(grossPerSecond) && grossPerSecond > 0) search({ rate: grossPerSecond / 4 });
+        search({ rate: 0, mix: true });
+      }
     }
-    if (!result && preview) {
+    if (!result && preview && !byQuantity) {
       const oneBatch = newState();
       if (run(oneBatch, model, 1, new Set([item]), Infinity, fastest)) result = oneBatch;
     }
     if (!result) return null;
     const finalStep = result.steps.at(-1);
-    const sacrifice = sacrificed && { quantity: sacrificed.quantity * finalStep.cycles, gp: finalStep.sacrificeGp };
+    const sacrifice = !byQuantity && sacrificed && { quantity: sacrificed.quantity * finalStep.cycles, gp: finalStep.sacrificeGp };
     const quantity = sacrifice?.quantity ?? (result.made.get(item) ?? 0);
     const sales = sacrifice ? 0 : quantity * price(item);
     const materials = result.bankCost;
@@ -312,16 +357,17 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
         if (elapsed > budget && !enough(budget, elapsed)) step.restrictions.push({ type: 'time' });
       }
     }
+    const elapsedHours = byQuantity ? result.seconds / 3600 : Math.max(hours, result.seconds / 3600);
     return { item, quantity, sales, byproducts, byproductSales, materials, net, sacrifice,
-      netPerHour: net / Math.max(hours, result.seconds / 3600), seconds: result.seconds,
+      netPerHour: elapsedHours > 0 ? net / elapsedHours : null, seconds: result.seconds,
       direct: result.direct, goldCost: result.goldCost, steps: result.steps, bankUsed: result.bankUsed, externalCost: result.externalCost, preview };
   }
-  const targets = items ?? (target ? (preview ? [target] : productionFamily(index, target)) : [...index.producers]
+  const targets = items ?? (target ? (preview || byQuantity ? [target] : productionFamily(index, target)) : [...index.producers]
     .filter(([, actions]) => actions.some(action => action.costs.length)).map(([id]) => id));
   const results = [];
   for (const item of targets) {
-    let best;
-    for (const action of index.producers.get(item) ?? []) {
+    let best = byQuantity ? solve(item) : null;
+    for (const action of byQuantity ? [] : index.producers.get(item) ?? []) {
       const plan = solve(item, action);
       if (plan && (!best || plan.net > best.net || (plan.net === best.net && plan.seconds < best.seconds))) best = plan;
     }
@@ -342,7 +388,8 @@ function compareProduction(catalog, profile, index, items, hours, useStock, eval
   for (const plan of previews) if (plan.steps) plans.set(plan.item, plan);
   const status = plan => !plan.steps ? 2 : plan.preview ? 1 : 0;
   return unique.map(item => plans.get(item) ?? { item }).sort((a, b) =>
-    status(a) - status(b) || (b.net ?? -Infinity) - (a.net ?? -Infinity));
+    status(a) - status(b) || (saleOptions.targetQuantity != null ? (a.seconds ?? Infinity) - (b.seconds ?? Infinity) : 0) ||
+    (b.net ?? -Infinity) - (a.net ?? -Infinity));
 }
 
 if (typeof module !== 'undefined') module.exports = { indexProduction, planProduction, compareProduction };
@@ -370,7 +417,8 @@ function initProduction(catalog) {
   });
   input.addEventListener('blur', () => syncProductionTarget(target.value));
   byId('productionOptions').addEventListener('submit', event => event.preventDefault());
-  for (const id of ['productionHours', 'productionStock', 'productionSellByproducts']) byId(id).addEventListener('input', () => {
+  for (const id of ['productionMode', 'productionHours', 'productionQuantity', 'productionReserve',
+    'productionStock', 'productionSellByproducts']) byId(id).addEventListener('input', () => {
     productionView.detail = undefined;
     renderProduction();
   });
@@ -428,24 +476,42 @@ function renderProduction() {
   const status = byId('productionStatus');
   const results = byId('productionResults');
   const hours = byId('productionHours');
+  const quantity = byId('productionQuantity');
+  const reserve = byId('productionReserve');
+  const byQuantity = byId('productionMode').value === 'quantity';
+  byId('productionHoursField').hidden = hours.disabled = byQuantity;
+  byId('productionQuantityField').hidden = quantity.disabled = !byQuantity;
+  byId('productionReserveField').hidden = reserve.disabled = !byQuantity;
   const detail = byId('productionDetail');
   const target = byId('productionTarget').value;
   const comparisonItems = productionComparisonItems();
   byId('addProductionComparison').disabled = !target || comparisonItems.includes(target);
   const comparison = byId('productionComparison');
   comparison.hidden = !comparisonItems.length;
-  if (!profile?.characterId || !hours.checkValidity()) {
-    status.textContent = t(!profile?.characterId ? '选择角色存档后可估算连锁产线。' : '请输入有效的挂机时长。');
+  byId('productionComparisonBasis').textContent = t(byQuantity ? '各方案按同一目标数量计算，分别使用相同的起始库存。' :
+    '各方案使用同一挂机时长，并分别从相同的起始库存计算。');
+  if (!profile?.characterId || !(byQuantity ? quantity : hours).checkValidity() || !reserve.checkValidity()) {
+    status.textContent = t(!profile?.characterId ? '选择角色存档后可估算连锁产线。' :
+      !reserve.checkValidity() ? '请输入 0 到 100 的备料余量。' :
+        byQuantity ? '请输入有效的目标数量。' : '请输入有效的挂机时长。');
     status.hidden = false;
     results.hidden = detail.hidden = true;
-    renderProductionComparison(comparisonItems.map(item => ({ item })), false);
+    renderProductionComparison(comparisonItems.map(item => ({ item })), false, byQuantity);
     return;
   }
   const { catalog, index } = productionView;
   const useStock = byId('productionStock').checked;
-  const saleOptions = { sellByproducts: byId('productionSellByproducts').checked, keptItems: keptDrops };
-  const plans = planProduction(catalog, profile, index, target, hours.valueAsNumber, useStock, productionCycle, saleOptions)
-    .filter(plan => plan.steps);
+  const saleOptions = { sellByproducts: byId('productionSellByproducts').checked, keptItems: keptDrops,
+    targetQuantity: byQuantity ? quantity.valueAsNumber : undefined, reservePercent: byQuantity ? reserve.valueAsNumber : 0 };
+  const { date, name, combat, ...planningProfile } = profile;
+  const autoKey = !target && !byQuantity ? JSON.stringify([
+    planningProfile, hours.valueAsNumber, useStock, saleOptions.sellByproducts, [...keptDrops].sort()
+  ]) : null;
+  const matches = autoKey && productionView.auto?.key === autoKey;
+  const plans = matches ? productionView.auto.plans :
+    planProduction(catalog, profile, index, target, hours.valueAsNumber, useStock, productionCycle, saleOptions)
+      .filter(plan => plan.steps);
+  if (autoKey && !matches) productionView.auto = { key: autoKey, plans };
   let selected = target ? plans.find(plan => plan.item === target) : plans[0];
   if (target && !selected) {
     selected = planProduction(catalog, profile, index, target, hours.valueAsNumber, useStock, productionCycle,
@@ -457,14 +523,15 @@ function renderProduction() {
   const detailPlans = [...new Map([...compared.filter(plan => plan.steps), ...plans].map(plan => [plan.item, plan])).values()];
   productionView.plans = detailPlans;
   const active = detailPlans.find(plan => plan.item === productionView.detail) ?? selected;
-  status.textContent = !selected ? t(target ? '当前无法估算所选物品的完整产线。' : '在所选时长和库存下暂无可行产线。') : '';
+  status.textContent = !selected ? t(target ? '当前无法估算所选物品的完整产线。' :
+    byQuantity ? '请选择要生产的目标物品。' : '在所选时长和库存下暂无可行产线。') : '';
   status.hidden = !status.textContent;
   results.hidden = !selected;
   if (selected) {
     byId('productionHeading').textContent = t(selected.preview ? '目标产线 · 条件预估' : target ? '目标物品产线' : '已比较产线中的最高收益');
     byId('productionWinner').textContent = gameName(catalog.items[selected.item]);
     byId('productionMetrics').replaceChildren(...[
-      ['预计净收益', formatGp(selected.net)], ['净 GP/小时', fullNumber(selected.netPerHour)],
+      ['预计净收益', formatGp(selected.net)], ['净 GP/小时', selected.netPerHour == null ? '—' : fullNumber(selected.netPerHour)],
       [selected.sacrifice ? '预计献祭数量' : '预计数量', decimals.format(selected.quantity)],
       ['产线耗时', formatDuration(selected.seconds / 3600)]
     ].map(([label, value]) => {
@@ -478,11 +545,11 @@ function renderProduction() {
     [gameName(catalog.items[item]), formatGp(net), preview && t('条件预估')].filter(Boolean).join(' · '), item)));
   options.value = active?.item ?? '';
   byId('productionAlternatives').hidden = detailPlans.length < 2 && (Boolean(selected) || !detailPlans.length);
-  renderProductionComparison(compared, true);
+  renderProductionComparison(compared, true, byQuantity);
   renderProductionDetail(active);
 }
 
-function renderProductionComparison(plans, canCalculate) {
+function renderProductionComparison(plans, canCalculate, byQuantity) {
   const hint = byId('productionComparisonHint');
   hint.hidden = plans.length >= 2;
   const best = plans.length >= 2 ? plans.find(plan => plan.steps && !plan.preview) : undefined;
@@ -491,13 +558,13 @@ function renderProductionComparison(plans, canCalculate) {
     const name = productionTargetName(plan.item);
     const item = create('th', name);
     item.scope = 'row';
-    if (plan === best) item.append(create('small', t('可执行方案中收益最高'), 'production-compare-best'));
+    if (plan === best) item.append(create('small', t(byQuantity ? '可执行方案中耗时最短' : '可执行方案中收益最高'), 'production-compare-best'));
     const hasPlan = Boolean(plan.steps);
     const state = hasPlan ? (plan.preview ? '条件预估' : '当前可执行') : (canCalculate ? '暂无完整预估' : '待计算');
     row.append(item, create('td', [t(state), plan.sacrifice && t('献祭砧台')].filter(Boolean).join(' · '),
       plan.preview ? 'production-restriction' : undefined),
       ...[hasPlan ? decimals.format(plan.quantity) : '—', hasPlan ? formatDuration(plan.seconds / 3600) : '—',
-        hasPlan ? fullNumber(plan.netPerHour) : '—', hasPlan ? formatGp(plan.net) : '—']
+        hasPlan && plan.netPerHour != null ? fullNumber(plan.netPerHour) : '—', hasPlan ? formatGp(plan.net) : '—']
         .map(value => create('td', value)));
     const actions = create('td');
     if (hasPlan) {
@@ -578,6 +645,8 @@ function renderProductionDetail(plan) {
   const external = plan.steps.some(step => step.restrictions.some(r => r.type === 'external'));
   const overTime = plan.steps.some(step => step.restrictions.some(r => r.type === 'time'));
   notice.hidden = !plan.preview;
+  byId('productionRandomNotice').hidden = !plan.steps.some(step => step.randomOutput);
+  byId('productionRandomNotice').textContent = t('随机步骤按平均产量和耗时估算，实际结果会波动。');
   notice.textContent = [
     t('以下收益以解除标注限制为前提。'),
     external && t('另行取得的材料按游戏售价扣除，取得时间未计入。'),

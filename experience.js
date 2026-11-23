@@ -1,11 +1,18 @@
 const experienceCandidateHours = 24;
 
-function compareExperience(catalog, character, targets) {
+const experienceHourlyRate = row => row.passive ? row.xpPerHour : row.activeXpPerHour;
+
+function compareExperience(catalog, character, targets, ignoreStock) {
   const groups = Object.fromEntries(Object.keys(catalog.xpSkills)
     .filter(skill => !COMBAT_XP_SKILLS.includes(skill)).map(skill => [skill, []]));
-  const rows = rank(catalog, character, { hours: experienceCandidateHours, offlineCap: 24, sell: false, metric: 'xp' });
+  const rows = rank(catalog, character, { hours: experienceCandidateHours, offlineCap: 24, sell: false, metric: 'xp', ignoreStock });
   for (const row of rows) groups[row.action.skill]?.push(row);
   for (const [skill, actions] of Object.entries(groups)) {
+    if (ignoreStock) {
+      groups[skill] = actions.filter(row => experienceHourlyRate(row) > 0)
+        .sort((a, b) => experienceHourlyRate(b) - experienceHourlyRate(a));
+      continue;
+    }
     const remaining = targets[skill]?.remaining;
     if (!(remaining > 0)) continue;
     for (const row of actions) row.targetPlan = row.planXp(remaining);
@@ -40,6 +47,10 @@ function initExperience(catalog) {
     Object.keys(catalog.xpSkills).find(id => !COMBAT_XP_SKILLS.includes(id));
   xpView = { catalog, character: null, bonusesByCharacter: new Map(), goalsByCharacter: new Map(),
     actionsByCharacter: new Map(), skill };
+  byId('xpIgnoreStock').addEventListener('change', () => {
+    renderExperience();
+    queuePreferences();
+  });
   byId('xpBonus').addEventListener('input', () => {
     const input = byId('xpBonus');
     if (!input.value || !input.checkValidity()) return;
@@ -138,12 +149,12 @@ function experienceActionChoices(character = xpView.character) {
   return xpView.actionsByCharacter.get(key);
 }
 
-function selectExperienceAction(rows, target) {
+function selectExperienceAction(rows, target, ignoreStock) {
   const input = byId('xpActionChoice');
   const saved = experienceActionChoices()[xpView.skill];
   const best = rows[0];
   const selected = rows.find(row => row.action.id === saved);
-  const label = target?.remaining === 0 ? '已达到目标' :
+  const label = ignoreStock ? '经验速率最高 · {action}' : target?.remaining === 0 ? '已达到目标' :
     best?.targetPlan?.reaches ? '最快升级 · {action}' : '当前库存经验最多 · {action}';
   const options = [new Option(best ? t(label, { action: gameName(best.action) }) : t('暂无可用行动'), '')];
   for (const row of rows) options.push(new Option(gameName(row.action), row.action.id));
@@ -208,7 +219,7 @@ function renderExperienceGoal(goal, row, unavailable) {
     ['剩余 XP', fullNumber(Math.ceil(goal.remaining))],
     ['预计剩余时间', timing]
   ];
-  if (blocked) labels.push([plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 XP' : '库存可获 XP', fullNumber(plan.xp)]);
+  if (blocked) labels.push([plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 XP' : '库存可获 XP', formatXp(plan.xp)]);
   const note = [
     row && goal.remaining > 0 && t('按「{action}」的经验收益估算', { action: gameName(row.action) }),
     unavailable && t('所选行动暂不可用，当前按推荐行动估算'),
@@ -243,13 +254,18 @@ function renderExperience() {
   if (!xpView?.character) return;
   const { catalog, character } = xpView;
   const selected = xpView.skill;
+  const ignoreStock = byId('xpIgnoreStock').checked;
+  for (const id of ['xpGoalLevelField', 'xpGoalSliderField', 'xpNextLevel', 'xpResetGoals', 'xpGoalOverview',
+    'xpAmountHeader', 'xpEtaHeader']) byId(id).hidden = ignoreStock;
+  byId('xpRateHeader').textContent = t(ignoreStock ? 'XP／小时' : '行动中 XP／小时');
   const goalForSkill = skill => {
     const goal = selectedExperienceGoal(character, skill);
     return xpGoalProgress(character.levels[skill], character.skillXp?.[skill], goal.level, null, goal.startingXp);
   };
   const targets = Object.fromEntries(Object.keys(catalog.xpSkills).map(skill => [skill, goalForSkill(skill)]));
-  const groups = compareExperience(catalog, { ...character, xpBonuses: experienceBonuses() }, targets);
-  byId('xpStatus').textContent = t('按达到各技能目标等级的时间排序，默认目标为下一级。');
+  const groups = compareExperience(catalog, { ...character, xpBonuses: experienceBonuses() }, targets, ignoreStock);
+  byId('xpStatus').textContent = t(ignoreStock ? '按经验／小时排序，假设行动材料充足。仍按当前解锁、配装、成功率和限时加成计算。' :
+    '按达到各技能目标等级的时间排序，默认目标为下一级。');
   const supportedSkills = new Set(catalog.xpActions.map(action => action.skill));
   const grid = byId('xpBest');
   const focusedSkill = grid.contains(document.activeElement) ? document.activeElement.dataset.skill : null;
@@ -258,10 +274,11 @@ function renderExperience() {
     const top = rows[0];
     const actionName = gameName(top?.action) ?? t(supportedSkills.has(skill) ? '暂无可用行动' : '暂未支持');
     const plan = top?.targetPlan;
-    const summary = targets[skill]?.remaining === 0 ? t('已达到目标') :
+    const summary = ignoreStock ? top ? t('{xp} XP／小时', { xp: formatXp(experienceHourlyRate(top)) }) : '' :
+      targets[skill]?.remaining === 0 ? t('已达到目标') :
       plan?.reaches ? t('到目标约 {time}', { time: formatXpDuration(plan.hours) }) :
         plan ? t(plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 {xp} XP' : '库存可获 {xp} XP',
-          { xp: fullNumber(plan.xp) }) : '';
+          { xp: formatXp(plan.xp) }) : '';
     return experienceCard(grid, skill, selected, skillName(skill, catalog.xpSkills), character.levels[skill], actionName, summary, () => {
       xpView.skill = skill;
       syncExperienceInputs();
@@ -272,20 +289,22 @@ function renderExperience() {
 
   const rows = groups[selected];
   const goal = targets[selected];
-  const choice = selectExperienceAction(rows, goal);
-  renderExperienceGoal(goal, choice.row, choice.unavailable);
+  const choice = selectExperienceAction(rows, goal, ignoreStock);
+  if (!ignoreStock) renderExperienceGoal(goal, choice.row, choice.unavailable);
   updateSkillTraining({ ...character, xpBonuses: experienceBonuses() }, {
-    skill: selected, hours: experienceCandidateHours, goal, actionId: choice.unavailable ? '' : experienceActionChoices()[selected]
+    skill: selected, hours: experienceCandidateHours, goal: ignoreStock ? null : goal, ignoreStock,
+    actionId: choice.unavailable ? '' : experienceActionChoices()[selected]
   });
   byId('xpTable').hidden = !rows.length;
   byId('xpEmpty').hidden = !!rows.length;
   const noAction = {
     Farming: '没有可用地块或符合条件的作物。请读取农务存档。',
     Ranching: '没有正在生产的畜群。请先在游戏内饲养动物。',
-    Hunting: '没有可用的狩猎方案。请检查等级、陷阱库存和存档中的选择。'
+    Hunting: ignoreStock ? '没有符合当前解锁条件和配置的行动。' : '没有可用的狩猎方案。请检查等级、陷阱库存和存档中的选择。'
   };
   byId('xpEmpty').textContent = t(supportedSkills.has(selected) ?
-    noAction[selected] ?? '没有同时满足等级、解锁条件和库存的行动。' : '这项技能暂未支持经验排行。');
+    noAction[selected] ?? (ignoreStock ? '没有符合当前解锁条件和配置的行动。' :
+      '没有同时满足等级、解锁条件和库存的行动。') : '这项技能暂未支持经验排行。');
   const displayed = rows.slice(0, 20);
   if (choice.row && !displayed.includes(choice.row)) displayed.push(choice.row);
   byId('xpRows').replaceChildren(...displayed.map(row => {
@@ -304,14 +323,19 @@ function renderExperience() {
     if (row.hunting) {
       note.push(t('平均捕获几率 {value} · 已计调查和追踪', { value: percent(row.hunting.success) }));
       if (row.hunting.trap) note.push(t('使用陷阱 {item}', { item: gameName(catalog.items[row.hunting.trap]) }));
-      if (row.hunting.bait) note.push(t('使用诱饵 {item}，耗尽后按无诱饵计算', { item: gameName(catalog.items[row.hunting.bait]) }));
+      if (row.hunting.bait) note.push(t(ignoreStock ? '使用诱饵 {item}' : '使用诱饵 {item}，耗尽后按无诱饵计算', {
+        item: gameName(catalog.items[row.hunting.bait])
+      }));
       if (row.hunting.firstExtra) note.push(t('已计首次发现的额外追踪时间'));
     }
     if (row.action.kind === 'Farming') {
       note.push(t('可用地块 {count}', { count: fullNumber(row.passive.plots) }),
-        t('按手动种植和及时收获估算，最多预测 7 天。'));
+        t(ignoreStock ? '按 24 小时内手动种植和及时收获的产量估算。' : '按手动种植和及时收获估算，最多预测 7 天。'));
+      if (row.passive.switchWait > 0) note.push(t('换种前，现有作物最晚还需 {time} 收获。', {
+        time: formatXpDuration(row.passive.switchWait / 3600)
+      }));
     }
-    if (row.passive?.mill) note.push(t('按磨坊和仓库中可用的原料估算，最多预测 7 天。'));
+    if (row.passive?.mill && !ignoreStock) note.push(t('按磨坊和仓库中可用的原料估算，最多预测 7 天。'));
     if (row.action.kind === 'Ranching') note.push(t('当前饲养 {count} 只 · 按生产周期、年龄、饲料及状态估算接下来 24 小时。', {
       count: fullNumber(row.passive.animals)
     }));
@@ -364,7 +388,7 @@ function renderExperience() {
     }
     if (!row.wood && !row.passive && !row.agility) note.push(t('平均每次 {value} 秒', { value: decimals.format(row.seconds) }),
       t('固定经验 {value}', { value: decimals.format(row.flatXp) }));
-    const plan = row.targetPlan ?? row.planXp(goal?.remaining);
+    const plan = ignoreStock ? null : row.targetPlan ?? row.planXp(goal?.remaining);
     if (plan && !plan.reaches && row.stockLimit) note.push(t('{time}后缺{item}', {
       time: formatDuration(plan.hours, true), item: limitName({ limit: row.stockLimit })
     }));
@@ -373,7 +397,7 @@ function renderExperience() {
       t(plan.reason ?? '当前库存不足') : formatXpDuration(plan?.hours));
     const passiveLimit = plan?.limit;
     if (passiveLimit) note.push(t('缺少 {item}', { item: gameName(catalog.items[passiveLimit]) ?? shopCurrencyName(passiveLimit) }));
-    if (row.risky) eta.append(create('small', t('受伤风险'), 'xp-risk'));
+    if (row.risky && !ignoreStock) eta.append(create('small', t('受伤风险'), 'xp-risk'));
     const details = create('details', undefined, 'xp-action-details');
     details.dataset.action = row.action.id;
     details.open = expanded.has(row.action.id);
@@ -381,10 +405,13 @@ function renderExperience() {
     const data = create('td');
     data.append(details);
     const amount = plan?.xp;
-    const activeRate = plan?.rate;
-    const active = create('td', activeRate == null ? '—' : fullNumber(activeRate), 'number gold');
-    item.append(create('td', gameName(row.action)), create('td', amount == null ? '—' : fullNumber(amount), 'number'),
-      active, eta, data);
+    const activeRate = ignoreStock ? experienceHourlyRate(row) : plan?.rate;
+    const active = create('td', activeRate == null ? '—' : formatXp(activeRate), 'number gold');
+    item.append(create('td', gameName(row.action)));
+    if (!ignoreStock) item.append(create('td', amount == null ? '—' : formatXp(amount), 'number'));
+    item.append(active);
+    if (!ignoreStock) item.append(eta);
+    item.append(data);
     return item;
   }));
 }

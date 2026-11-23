@@ -201,18 +201,21 @@ function agilityPlan(action, profile, catalog) {
     preservation: probability(stats('EntryCostPreservationChance')) };
 }
 
-function huntingPlan(action, profile, catalog) {
+function huntingPlan(action, profile, catalog, ignoreStock) {
   const { hunt } = action;
   const state = profile.xpSkillState?.Hunting;
   const saved = state?.entries?.[action.animal];
   const trapless = hunt.allowTrapless && (!saved || saved.trapless) &&
     meetsRequirements(hunt.traplessRequirements, profile);
   const available = id => !profile.keep?.includes(id) && profile.stock[id] > 0;
-  const eligible = id => catalog.items[id]?.huntingTrap?.type === action.trapType && available(id);
+  const matches = id => catalog.items[id]?.huntingTrap?.type === action.trapType;
+  const eligible = id => matches(id) && available(id);
   const trap = trapless || !action.trapType ? null : eligible(saved?.trap) ? saved.trap :
-    (!saved?.trap || state?.autoSwap) ? Object.keys(profile.stock).find(eligible) : null;
+    ignoreStock && matches(saved?.trap) ? saved.trap :
+      (!saved?.trap || state?.autoSwap) ? Object.keys(profile.stock).find(eligible) ??
+        (ignoreStock ? Object.keys(catalog.items).find(matches) : undefined) : null;
   if (action.trapType && !trap && !trapless) return;
-  const bait = saved?.bait && hunt.bait && available(hunt.bait) ? hunt.bait : null;
+  const bait = saved?.bait && hunt.bait && (ignoreStock || available(hunt.bait)) ? hunt.bait : null;
   const journalLevel = secondarySkillLevel(saved?.xp ?? 0, 99, 100, 3.5, 7, 12);
   const bonuses = [
     ...catalog.xpSkillData.huntingJournal.filter(row => row.level <= journalLevel).flatMap(row => row.bonuses),
@@ -254,11 +257,11 @@ function huntingPlan(action, profile, catalog) {
   const seconds = perCatch / attempts;
   return { seconds, baitSeconds: Math.max(0.001, seconds +
     (meanInterval(hunt.trappingInterval, 'Trapping', baitStat) - trapping) / 1000),
-    baitAttempts: bait ? Math.floor(profile.stock[bait] * attempts) : 0,
+    baitAttempts: bait ? ignoreStock ? Infinity : Math.floor(profile.stock[bait] * attempts) : 0,
     firstExtra: extra, success: 1 / attempts, trap, bait, stat, trapless };
 }
 
-function passiveStock(profile) {
+function passiveStock(profile, ignoreStock) {
   const items = { ...profile.stock };
   for (const id of profile.keep ?? []) items[id] = 0;
   const currencies = { ...profile.currencies };
@@ -276,18 +279,20 @@ function passiveStock(profile) {
     };
     for (const cost of costs) add(cost, consumption);
     for (const cost of fixedCosts) add(cost, 1);
-    for (const { stock, id, required } of batches.values()) {
-      if ((stock[id] ?? 0) + Number.EPSILON * required < required) return id;
-    }
-    for (const { stock, id, consumed } of batches.values()) {
-      stock[id] = Math.max(0, (stock[id] ?? 0) - consumed);
+    if (!ignoreStock) {
+      for (const { stock, id, required } of batches.values()) {
+        if ((stock[id] ?? 0) + Number.EPSILON * required < required) return id;
+      }
+      for (const { stock, id, consumed } of batches.values()) {
+        stock[id] = Math.max(0, (stock[id] ?? 0) - consumed);
+      }
     }
     if (record) for (const { id, currency, consumed } of batches.values()) record(id, currency, consumed);
     return null;
   };
 }
 
-function simulateFarming(profile, catalog, stop, manualAction) {
+function simulateFarming(profile, catalog, stop, manualAction, ignoreStock) {
   const results = new Map();
   const plots = profile.xpSkillState?.Farming;
   if (!plots?.length) return results;
@@ -295,7 +300,7 @@ function simulateFarming(profile, catalog, stop, manualAction) {
     .map(action => [action.recipe, action]));
   const xpBonus = (profile.xpBonuses?.Farming ?? 0) / 100;
   const intervalBonus = 1 + (profile.bonuses?.Farming?.interval ?? 0) / 100;
-  const spend = passiveStock(profile);
+  const spend = passiveStock(profile, ignoreStock);
   const queue = [];
   function plan(action, plot) {
     const { farm } = action;
@@ -340,6 +345,15 @@ function simulateFarming(profile, catalog, stop, manualAction) {
   }
   for (const plot of plots) {
     const category = catalog.xpSkillData.farmingPlots[plot.id];
+    if (ignoreStock && manualAction?.category === category && (plot.crop || plot.state === 1)) {
+      const candidate = plan(manualAction, plot);
+      candidate.result.plots++;
+      if (plot.crop && plot.crop !== manualAction.recipe && Number.isFinite(plot.seconds)) {
+        candidate.result.switchWait = Math.max(candidate.result.switchWait ?? 0, plot.seconds);
+      }
+      plant(plot, candidate, 0, candidate);
+      continue;
+    }
     const current = crops.get(plot.crop);
     const selected = !plot.crop && plot.state === 1 && manualAction?.category === category
       ? manualAction : crops.get(plot.selected);
@@ -371,6 +385,7 @@ function simulateFarming(profile, catalog, stop, manualAction) {
 }
 
 function farmExperience(action, profile, catalog, settings, manual) {
+  if (settings.ignoreStock) return simulateFarming(profile, catalog, settings.seconds, action, true).get(action.recipe);
   if (manual) {
     return simulateFarming(profile, catalog, 7 * 86400, action).get(action.recipe);
   }
@@ -389,7 +404,7 @@ function ranchExperience(action, profile, catalog, stop, settings) {
   if (settings.experience && !action.land && state.lands.filter(land => land.animals.length).length < 2) return;
   const { ranchAnimals, ranchVariants, ranchUpgrades } = catalog.xpSkillData;
   const xpBonus = (profile.xpBonuses?.Ranching ?? 0) / 100;
-  const spend = passiveStock(profile);
+  const spend = passiveStock(profile, settings.ignoreStock);
   const animals = state.lands.flatMap(land => land.animals.flatMap(saved => {
     const animal = ranchAnimals[saved.type];
     if (!animal) return [];
@@ -470,8 +485,8 @@ function millExperience(action, profile, catalog, settings, manual) {
     if (!profile.keep?.includes(id)) stock[id] = (stock[id] ?? 0) + (profile.stock[id] ?? 0);
   }
   if (!manual && !state.active && costs.every(([id]) => !(stock[id] > 0) && !(profile.stock[id] > 0))) return;
-  const stop = manual ? 7 * 86400 : settings.seconds;
-  const spend = passiveStock({ stock });
+  const stop = manual && !settings.ignoreStock ? 7 * 86400 : settings.seconds;
+  const spend = passiveStock({ stock }, settings.ignoreStock);
   const events = [];
   const spent = new Map();
   const products = passiveProducts(action, stat);
@@ -506,7 +521,7 @@ function evaluatePassiveExperience(action, profile, catalog, settings) {
   const ranch = action.kind === 'Ranching';
   const farm = action.kind === 'GrainMill' ? millExperience : farmExperience;
   const result = ranch ? ranchExperience(action, profile, catalog, settings.experience ? 86400 : settings.seconds, settings) :
-    farm(action, profile, catalog, settings, false);
+    farm(action, profile, catalog, settings, settings.ignoreStock === true);
   if (!result) return;
   const events = result.events.filter(event => event.at <= settings.seconds);
   const xp = events.reduce((sum, event) => sum + event.xp, 0);
@@ -675,7 +690,8 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
         }
         const available = inventory.get(key);
         const batch = input.qty / (row.agility?.entries ?? 1);
-        const usable = available < batch ? 0 : input.quantity > 0 ? 1 + (available - batch) / input.quantity : Infinity;
+        const usable = settings.ignoreStock ? Infinity :
+          available < batch ? 0 : input.quantity > 0 ? 1 + (available - batch) / input.quantity : Infinity;
         if (usable < count) {
           count = usable;
           limit = input.id;
@@ -800,7 +816,7 @@ function evaluateAction(action, profile, catalog, settings) {
   }
   const level = levels[action.skill];
   const agility = action.kind === 'Agility' ? agilityPlan(action, profile, catalog) : null;
-  const hunting = action.kind === 'Hunting' ? huntingPlan(action, profile, catalog) : null;
+  const hunting = action.kind === 'Hunting' ? huntingPlan(action, profile, catalog, settings.ignoreStock) : null;
   if ((action.kind === 'Agility' && !agility) || (action.kind === 'Hunting' && !hunting)) return;
 
   const bonus = bonuses?.[action.skill] ?? {};
@@ -1062,7 +1078,7 @@ function evaluateAction(action, profile, catalog, settings) {
   };
   for (const [id, qty] of ingredients) {
     const available = profile.keep?.includes(id) ? 0 : stock[id] ?? 0;
-    const possible = possibleCycles(available, qty);
+    const possible = settings.ignoreStock ? Infinity : possibleCycles(available, qty);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
@@ -1070,7 +1086,7 @@ function evaluateAction(action, profile, catalog, settings) {
   }
   for (const [id, qty] of currencyIngredients) {
     const available = currencies[id] ?? 0;
-    const possible = possibleCycles(available, qty);
+    const possible = settings.ignoreStock ? Infinity : possibleCycles(available, qty);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
@@ -1108,7 +1124,7 @@ function evaluateAction(action, profile, catalog, settings) {
   }
   if (!settings.production && hunting?.baitAttempts > 0) {
     const id = hunting.bait;
-    const quantity = Math.min(stock[id], Math.min(cycles, hunting.baitAttempts) * hunting.success);
+    const quantity = Math.min(settings.ignoreStock ? Infinity : stock[id], Math.min(cycles, hunting.baitAttempts) * hunting.success);
     const unitPrice = catalog.items[id]?.price ?? 0;
     inputs.push({ id, quantity, unitPrice, value: quantity * unitPrice });
   }
@@ -1196,7 +1212,8 @@ function rank(catalog, profile, options) {
   const seconds = Math.min(hours, offlineCap || Infinity) * 3600;
   const results = [];
   const experience = metric === 'xp';
-  const settings = { seconds, sell, sellSpecial, hours, experience, keptDrops, includeRisky };
+  const settings = { seconds, sell, sellSpecial, hours, experience, keptDrops, includeRisky,
+    ignoreStock: experience && options.ignoreStock === true };
   for (const action of experience ? catalog.xpActions : catalog.actions) {
     const result = evaluate(action, profile, catalog, settings);
     if (result && (result[metric] > 0 || (experience && result.passive))) results.push(result);

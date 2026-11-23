@@ -2,8 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { randomBytes } = require('node:crypto');
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { Script } = require('node:vm');
+const { promisify } = require('node:util');
 const { findSteamGame, getBuild, readPackage } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
@@ -14,6 +15,45 @@ const { installUpdate, installedUpdates } = require('./updater.cjs');
 const { createActionRunner } = require('./action-runner.cjs');
 const { bridgeBuild, createGameBridge, directQueueSkills, hasBridgeAssembly } = require('./game-bridge.cjs');
 const preferencesLimit = 512 * 1024;
+const invalidSelectedSave = '无法读取选中的存档。请选择有效的 Melvor Idle 2 存档。';
+
+async function chooseSaveFile() {
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+    Add-Type -AssemblyName System.Windows.Forms
+    $owner = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    try {
+      $dialog.Filter = 'Melvor Idle 2 (*.sav)|*.sav'
+      $dialog.CheckFileExists = $true
+      $dialog.RestoreDirectory = $true
+      if ($dialog.ShowDialog($owner) -eq [Windows.Forms.DialogResult]::OK) {
+        [Console]::WriteLine($dialog.FileName)
+      }
+    } finally {
+      $dialog.Dispose()
+      $owner.Dispose()
+    }
+  `;
+  const executable = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32',
+    'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const { stdout } = await promisify(execFile)(executable,
+    ['-NoLogo', '-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { windowsHide: true, maxBuffer: 128 * 1024 });
+  return stdout.trim();
+}
+
+function writeLocalJson(file, data) {
+  const temporary = file + '.' + randomBytes(8).toString('hex') + '.tmp';
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(data), { flag: 'wx' });
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
 
 function readPreferences(preferencesFile) {
   try {
@@ -37,13 +77,7 @@ async function writePreferences(request, response, json, preferencesFile, log) {
     }
     const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (data?.version !== 1) return json(response, {}, 400);
-    const temporary = preferencesFile + '.' + randomBytes(8).toString('hex') + '.tmp';
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(data), { flag: 'wx' });
-      fs.renameSync(temporary, preferencesFile);
-    } finally {
-      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
-    }
+    writeLocalJson(preferencesFile, data);
     response.writeHead(204).end();
   } catch {
     log.record('settings_write_failed');
@@ -51,9 +85,16 @@ async function writePreferences(request, response, json, preferencesFile, log) {
   }
 }
 
-async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice } = {}) {
+async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice, pickSave = chooseSaveFile } = {}) {
   const log = createLog(root);
   const preferencesFile = path.join(root, 'calculator-settings.json');
+  const selectedSaveFile = path.join(root, 'calculator-selected-save.json');
+  let selectedSave;
+  try {
+    const record = JSON.parse(fs.readFileSync(selectedSaveFile, 'utf8'));
+    if (typeof record.file === 'string' && path.isAbsolute(record.file) && /\.sav$/i.test(record.file) &&
+        typeof record.name === 'string' && /^[a-f0-9]{32}$/.test(record.characterId)) selectedSave = record;
+  } catch { /* The user has not saved a file selection. */ }
   log.record('startup', { node: process.versions.node, platform: process.platform });
   const source = path.resolve(args.find(arg => !arg.startsWith('--')) ?? findSteamGame());
   const standalone = fs.statSync(source).isFile();
@@ -84,6 +125,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   catalog.checksumMismatch = checksumMismatch;
   addGameLabels(game, catalog.build, catalog, shop, !standalone, standalone ? source : path.join(game, 'Melvor2.exe'));
   const constellations = catalog.xpActions.filter(action => action.kind === 'Astrology');
+  const loadSaveProfile = file => readProfile(file, catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
+    (component, skill) => log.record('save_component_unreadable', { component, skill }), catalog.items);
   log.record('game_data_loaded', { build: /^\d+$/.test(catalog.build) ? catalog.build : 'unknown',
     gpActions: catalog.actions.length, xpActions: catalog.xpActions.length, source: catalog.dataSource, checksumMismatch });
   const assets = {
@@ -153,6 +196,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   }
   let saves = [];
   let savesByCharacter = new Map();
+  let savePickerOpen = false;
   const server = http.createServer((request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -199,6 +243,48 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       return;
     }
     if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json, preferencesFile, log);
+    if (route === 'saves/choose' || route === 'saves/forget') {
+      if (request.method !== 'POST' || request.headers.origin !== 'http://' + host ||
+          request.headers['x-calculator-save-picker'] !== '1') return json(response, {}, 403);
+      if (savePickerOpen) return json(response, { error: '存档选择窗口已打开。' }, 409);
+      if (route === 'saves/forget') {
+        try {
+          fs.rmSync(selectedSaveFile, { force: true });
+          if (selectedSave) savesByCharacter.delete(selectedSave.characterId);
+          selectedSave = undefined;
+          return json(response, {});
+        } catch {
+          return json(response, { error: '无法保存手动存档设置。' }, 422);
+        }
+      }
+      savePickerOpen = true;
+      void (async () => {
+        try {
+          const file = await pickSave();
+          if (!file) return json(response, {});
+          let profile;
+          try {
+            if (!path.isAbsolute(file) || !/\.sav$/i.test(file) || !fs.statSync(file).isFile()) throw Error();
+            profile = loadSaveProfile(file);
+          } catch {
+            return json(response, { error: invalidSelectedSave }, 422);
+          }
+          const { name, characterId } = profile;
+          try {
+            writeLocalJson(selectedSaveFile, { file, name, characterId });
+          } catch {
+            return json(response, { error: '无法保存手动存档设置。' }, 422);
+          }
+          selectedSave = { file, name, characterId };
+          return json(response, { characterId });
+        } catch {
+          return json(response, { error: '无法打开存档选择窗口。' }, 422);
+        } finally {
+          savePickerOpen = false;
+        }
+      })();
+      return;
+    }
     if (route === 'update/install' && request.method === 'POST') {
       if (request.headers.origin !== 'http://' + host || request.headers['x-calculator-update'] !== 'install') {
         return json(response, {}, 403);
@@ -237,10 +323,17 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       if (route === 'catalog') return json(response, catalog);
       if (route === 'shop') return json(response, shop);
       if (route === 'saves') {
-        saves = findSaves();
+        try {
+          saves = findSaves();
+        } catch (error) {
+          if (!selectedSave) throw error;
+          saves = [];
+          log.record('save_scan_failed');
+        }
         savesByCharacter = new Map();
+        if (selectedSave) savesByCharacter.set(selectedSave.characterId, selectedSave.file);
         log.record('saves_scanned', { count: saves.length });
-        return json(response, saves.map((file, index) => {
+        const discovered = saves.map((file, index) => {
           try {
             const { name, characterId } = readHeader(fs.readFileSync(file));
             if (savesByCharacter.has(characterId)) return null;
@@ -250,7 +343,12 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
             log.record('save_header_unreadable');
             return { index, unknown: true };
           }
-        }).filter(Boolean));
+        }).filter(Boolean);
+        if (selectedSave) {
+          const { name, characterId } = selectedSave;
+          discovered.unshift({ name, characterId, manuallySelected: true });
+        }
+        return json(response, discovered);
       }
       const statisticsCharacter = /^statistics\/character\/([a-f0-9]{32})$/.exec(route)?.[1];
       if (statisticsCharacter) {
@@ -264,8 +362,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       const legacyProfile = /^profile\/(\d+)$/.exec(route)?.[1];
       const saveFile = character ? savesByCharacter.get(character) : saves[Number(legacyProfile)];
       if (saveFile) {
-        const data = readProfile(saveFile, catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
-          (component, skill) => log.record('save_component_unreadable', { component, skill }), catalog.items);
+        const data = loadSaveProfile(saveFile);
         if (character && data.characterId !== character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
         log.record('profile_loaded');
         return json(response, data);

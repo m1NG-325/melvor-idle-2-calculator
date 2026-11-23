@@ -1,8 +1,10 @@
 const preferenceFields = [
   'hours', 'metric', 'sell', 'sellFishingSpecial', 'includeRiskyThieving', 'filter', 'search', 'item', 'quantity', 'action',
   'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
-  'productionTarget', 'productionHours', 'productionStock', 'productionSellByproducts', 'productionComparisonItems',
+  'productionTarget', 'productionMode', 'productionHours', 'productionQuantity', 'productionReserve',
+  'productionStock', 'productionSellByproducts', 'productionComparisonItems',
   'statisticsSearch',
+  'xpIgnoreStock',
   'queueDraft', 'queueLibrary', 'queueName', 'queueRepeat', 'queueSkill', 'queueCategory', 'queueQuestActions',
   'combatTrainingSkill',
   'combatTarget', 'combatAreaChoice', 'combatRateMode', 'combatKillRate', 'combatHours', 'combatCap', 'combatCollect', 'combatSell'

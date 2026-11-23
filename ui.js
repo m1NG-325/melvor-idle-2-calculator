@@ -5,7 +5,9 @@ const webMode = globalThis.calculatorWeb;
 const gpOfflineHours = 24;
 let numbers;
 let decimals;
+let fractionalXp;
 const fullNumber = value => numbers.format(value);
+const formatXp = value => value > 0 && value < 1 ? fractionalXp.format(value) : fullNumber(value);
 const expectedQuantity = value => value > 0 && value < 0.01
   ? value.toLocaleString(uiLocale(), { maximumSignificantDigits: 2 }) : decimals.format(value);
 const actionArea = action => localizedName(action.areaNames, action.area);
@@ -15,6 +17,7 @@ let results = [];
 let keptDrops = new Set();
 let showCount = 15;
 let profileRequest = 0;
+let savePickerError;
 let profileReading = false;
 let savesRefreshing = false;
 let autoSaveReadFailed = false;
@@ -469,6 +472,9 @@ function renderSaveRefreshStatus() {
   const status = byId('saveRefreshStatus');
   status.hidden = byId('save').value === '';
   status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' : '存档每 15 秒刷新');
+  const notice = byId('savePickerNotice');
+  notice.hidden = !savePickerError;
+  notice.textContent = savePickerError ? t(savePickerError) : '';
 }
 
 function renderProfileNotice() {
@@ -501,7 +507,7 @@ async function loadProfile(automatic = false) {
     if (selected && data.characterId !== selected) throw new Error('角色存档已变化，请重新读取存档。');
     autoSaveReadFailed = false;
     profileReadError = undefined;
-    if (automatic && data.characterId === profile?.characterId && Date.parse(data.date) <= Date.parse(profile.date)) {
+    if (automatic && data.characterId === profile?.characterId && data.date === profile.date) {
       if (profileRenderErrors.size) renderProfile(true, true);
       else if (statisticsState.failed) void renderStatistics();
       return;
@@ -528,26 +534,55 @@ async function refreshSaves(preferredCharacter) {
   const target = typeof preferredCharacter === 'string' ? preferredCharacter : selectedId;
   try {
     const saves = await get('saves');
-    select.replaceChildren(...saves.map(({ index, name, unknown, characterId }) => {
-      const option = new Option(unknown ? t('存档 {count}（格式未知）', { count: index + 1 }) : name,
+    select.replaceChildren(...saves.map(({ index, name, unknown, characterId, manuallySelected }) => {
+      const label = unknown ? t('存档 {count}（格式未知）', { count: index + 1 }) :
+        manuallySelected ? t('{name}（手动选择）', { name }) : name;
+      const option = new Option(label,
         characterId ?? 'unknown-' + index);
       if (unknown) {
         option.dataset.unknown = index + 1;
         option.disabled = true;
       }
       if (characterId) option.dataset.characterId = characterId;
+      if (manuallySelected) option.dataset.selectedFileName = name;
       return option;
     }), new Option(t('手动设置'), ''));
     const previous = target && Array.from(select.options).find(option => option.dataset.characterId === target);
     if (target === 'manual') select.value = '';
     else if (previous) select.value = previous.value;
     else select.value = Array.from(select.options).find(option => !option.disabled).value;
+    byId('forgetSaveFile').hidden = !saves.some(save => save.manuallySelected);
     await loadProfile();
   } catch (error) {
     if (!select.options.length) select.add(new Option(t('手动设置'), ''));
     noteProfileReadFailure(error, false);
   } finally {
     savesRefreshing = false;
+    renderSaveRefreshStatus();
+  }
+}
+
+async function changeSelectedSave(operation) {
+  const choose = byId('chooseSaveFile');
+  const forget = byId('forgetSaveFile');
+  if (savesRefreshing || choose.disabled) return;
+  const reload = byId('reload');
+  reload.disabled = true;
+  choose.disabled = forget.disabled = true;
+  savePickerError = undefined;
+  renderSaveRefreshStatus();
+  try {
+    const response = await fetch('saves/' + operation, {
+      method: 'POST', headers: { 'X-Calculator-Save-Picker': '1' }
+    });
+    const result = await response.json();
+    if (!response.ok) throw Error(result.error);
+    if (operation === 'forget' || result.characterId) await refreshSaves(result.characterId);
+  } catch (error) {
+    savePickerError = Object.hasOwn(english, error.message) ? error.message : '无法打开存档选择窗口。';
+  } finally {
+    reload.disabled = false;
+    choose.disabled = forget.disabled = false;
     renderSaveRefreshStatus();
   }
 }
@@ -648,6 +683,9 @@ async function init() {
   }
   function localizeControls() {
     applyLanguage();
+    for (const option of byId('save').querySelectorAll('[data-selected-file-name]')) {
+      option.textContent = t('{name}（手动选择）', { name: option.dataset.selectedFileName });
+    }
     for (const button of document.querySelectorAll('[data-duration-step]')) {
       button.title = t(Number(button.dataset.durationStep) > 0 ? '增加 30 分钟' : '减少 30 分钟');
       button.setAttribute('aria-label', button.title);
@@ -657,6 +695,7 @@ async function init() {
     renderRuntimeStatus();
     numbers = new Intl.NumberFormat(uiLocale(), { maximumFractionDigits: 0 });
     decimals = new Intl.NumberFormat(uiLocale(), { maximumFractionDigits: 2 });
+    fractionalXp = new Intl.NumberFormat(uiLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     showPage();
     if (!catalog) return;
     byId('source').textContent = t('Steam 构建 {build} · {count} 项动作', {
@@ -774,6 +813,11 @@ async function init() {
     byId('more').addEventListener('click', () => { showCount += 30; renderResults(); });
     byId('save').addEventListener('change', () => loadProfile());
     byId('reload').addEventListener('click', refreshSaves);
+    if (!webMode) {
+      byId('chooseSaveFile').hidden = false;
+      byId('chooseSaveFile').addEventListener('click', () => changeSelectedSave('choose'));
+      byId('forgetSaveFile').addEventListener('click', () => changeSelectedSave('forget'));
+    }
     byId('item').addEventListener('input', () => {
       const id = findItem();
       if (id && profile) byId('quantity').value = profile.stock[id] ?? 0;

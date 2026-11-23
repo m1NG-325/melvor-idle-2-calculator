@@ -421,7 +421,7 @@ function renderCombatTraining(container, result, character) {
   const box = create('div', undefined, 'metrics');
   const hoursToGoal = goalHours ?? projectedHours;
   for (const [label, value] of [
-    ['预计可获 XP', fullNumber(xp)], ['行动中 XP／小时', fullNumber(perHour)],
+    ['预计可获 XP', formatXp(xp)], ['行动中 XP／小时', formatXp(perHour)],
     ['到目标需时', hoursToGoal == null ? '—' : formatXpDuration(hoursToGoal)]
   ]) {
     const metric = create('div', t(label));

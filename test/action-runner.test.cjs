@@ -167,7 +167,8 @@ test('a completed product target advances to the next condition and uses a new l
 });
 
 test('a game-side unlock failure or manual action change stops the queue', async () => {
-  for (const [replies, state] of [[['locked'], 'locked'], [['started', 'action-changed'], 'action-changed']]) {
+  for (const [replies, state] of [[['locked'], 'locked'], [['started', 'action-changed'], 'action-changed'],
+    [['goal-product-unavailable'], 'goal-product-unavailable'], [['started', 'goal-product-unavailable'], 'goal-product-unavailable']]) {
     const bridge = {
       connect: async () => {},
       send: async () => {
@@ -193,9 +194,13 @@ test('the managed runtime is staged with the first-party assembly without changi
   const module = path.join(root, bridge + '.dll');
   try {
     await fs.mkdir(runtime, { recursive: true });
+    await fs.mkdir(path.join(game, 'Languages'));
+    const overrides = '[internationalization]\nlocale/translations=PackedStringArray("res://Locale/zh_CN.po")\n';
     await Promise.all([
       fs.writeFile(path.join(game, 'Melvor2.exe'), 'original executable'),
-      fs.writeFile(path.join(game, 'override.cfg'), 'original overrides'),
+      fs.writeFile(path.join(game, 'override.cfg'), overrides),
+      fs.writeFile(path.join(game, 'Languages', 'zh_CN.json'), '{"language":"zh_CN"}'),
+      fs.writeFile(path.join(game, 'Melvor2.pck'), 'external localization pack'),
       fs.writeFile(path.join(runtime, gameAssembly + '.dll'), 'original assembly'),
       fs.writeFile(path.join(runtime, gameAssembly + '.runtimeconfig.json'), '{}'),
       fs.writeFile(path.join(runtime, gameAssembly + '.deps.json'),
@@ -209,14 +214,22 @@ test('the managed runtime is staged with the first-party assembly without changi
     } });
     const { directory, executable } = stage;
     assert.equal(linked[0][0], path.join(await fs.realpath(game), 'Melvor2.exe'));
-    assert.equal(linked.length, 4);
+    assert.equal(linked.length, 6);
     assert.equal(await fs.readFile(executable, 'utf8'), 'original executable');
-    assert.equal(await fs.readFile(path.join(game, 'override.cfg'), 'utf8'), 'original overrides');
-    assert.match(await fs.readFile(path.join(directory, 'override.cfg'), 'utf8'), /CalculatorQueueBridge/);
+    assert.equal(await fs.readFile(path.join(game, 'override.cfg'), 'utf8'), overrides);
+    const stagedOverrides = await fs.readFile(path.join(directory, 'override.cfg'), 'utf8');
+    assert(stagedOverrides.startsWith(overrides));
+    assert.match(stagedOverrides, /CalculatorQueueBridge/);
+    assert.equal(await fs.readFile(path.join(directory, 'Languages', 'zh_CN.json'), 'utf8'), '{"language":"zh_CN"}');
+    assert.equal(await fs.readFile(path.join(directory, 'Melvor2.pck'), 'utf8'), 'external localization pack');
     const stagedRuntime = path.join(directory, 'data_CalculatorQueueBridge_windows_x86_64');
     const metadata = JSON.parse(await fs.readFile(path.join(stagedRuntime, bridge + '.deps.json'), 'utf8'));
     assert.deepEqual(metadata.targets[runtimeId][bridge + '/1.0.0'].runtime, { [bridge + '.dll']: {} });
     await stage.cleanup();
+    assert.equal(await fs.readFile(path.join(game, 'Languages', 'zh_CN.json'), 'utf8'), '{"language":"zh_CN"}');
+    await fs.writeFile(path.join(game, 'override.cfg'), '[dotnet]\nproject/assembly_name="TranslationLoader"\n');
+    await assert.rejects(prepareLinkedGame(game, { assemblyFile: module }), /bridge-override-conflict/);
+    await fs.writeFile(path.join(game, 'override.cfg'), overrides);
     const attempted = [];
     await assert.rejects(prepareLinkedGame(game, { assemblyFile: module, link: async (from, to) => {
       attempted.push([from, to]);

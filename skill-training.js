@@ -71,20 +71,21 @@ function skillTrainingProfile(character, skill, loadout, current, preparation) {
   return updated;
 }
 
-function compareSkillTraining(a, b) {
+function compareSkillTraining(a, b, ignoreStock) {
+  if (ignoreStock) return experienceHourlyRate(b.row) - experienceHourlyRate(a.row);
   const reachable = Number(Boolean(b.target?.reaches)) - Number(Boolean(a.target?.reaches));
   if (reachable) return reachable;
   if (a.target?.reaches) return a.target.hours - b.target.hours;
   return (b.target?.xp ?? 0) - (a.target?.xp ?? 0);
 }
 
-function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId }, shop = false) {
+function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId, ignoreStock }, shop = false) {
   const actions = catalogue.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId));
   const { current, candidates, owned, offers } = skillTrainingOptions(catalogue, character, skill, actions, shop);
   if (!actions.length || (shop && !offers.size)) return null;
   const skillCatalogue = { ...catalogue, xpActions: actions };
   const saved = new Map(current.map(row => [row.slot, row]));
-  const compare = (a, b) => compareSkillTraining(a, b) ||
+  const compare = (a, b) => compareSkillTraining(a, b, ignoreStock) ||
     (a.preparation?.crafts.length ?? 0) - (b.preparation?.crafts.length ?? 0) || a.changes - b.changes;
   const evaluated = new Map();
   function score(loadout) {
@@ -94,7 +95,7 @@ function* skillTrainingSearch(catalogue, character, { skill, hours, goal, action
     let result = null;
     if (preparation) {
       const actor = skillTrainingProfile(character, skill, loadout, current, preparation);
-      for (const row of rank(skillCatalogue, actor, { hours, offlineCap: 24, sell: false, metric: 'xp' })) {
+      for (const row of rank(skillCatalogue, actor, { hours, offlineCap: 24, sell: false, metric: 'xp', ignoreStock })) {
         const target = goal?.remaining > 0 ? row.planXp(goal.remaining) : goal ? { hours: 0, xp: 0, reaches: true } : null;
         if (!(row.xp > 0 || target?.xp > 0)) continue;
         const option = { row, target, loadout, current, preparation: preparation.crafts.length ? preparation : null,
@@ -162,7 +163,7 @@ let skillTrainingState = {};
 function updateSkillTraining(character, settings) {
   const panel = byId('skillTraining');
   if (panel.closest('[hidden]')) return;
-  const { skill, actionId, hours, goal } = settings;
+  const { skill, actionId, hours, goal, ignoreStock } = settings;
   const ownedStatus = byId('skillTrainingOwnedStatus');
   const shopStatus = byId('skillTrainingShopStatus');
   const ownedResult = byId('skillTrainingOwnedResult');
@@ -175,7 +176,7 @@ function updateSkillTraining(character, settings) {
     return;
   }
   shopSection.hidden = false;
-  const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target]);
+  const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target, ignoreStock]);
   const key = JSON.stringify([scope, goal?.remaining, character.levels, character.stock, character.currencies,
     character.equipped, character.skillToolbelt?.[skill], character.bonuses, character.xpBonuses, character.purchases,
     character.ranks, character.astrologyNodes, character.unlockedPets, character.questProgress, character.recipeStatistics,
@@ -220,16 +221,16 @@ function updateSkillTraining(character, settings) {
   const summary = skillTrainingState.summary;
   const owned = summary?.owned;
   const purchased = summary?.shop;
-  const upgrade = purchased?.preparation && (!owned || compareSkillTraining(purchased, owned) < 0) ? purchased : null;
+  const upgrade = purchased?.preparation && (!owned || compareSkillTraining(purchased, owned, ignoreStock) < 0) ? purchased : null;
   const ownedMessage = !summary ? '正在比较可用的技能配装…' : summary.ownedFailed ? '暂时无法计算练级方案。' :
-    !owned ? '没有同时满足等级、解锁条件和库存的行动。' : null;
+    !owned ? (ignoreStock ? '没有符合当前解锁条件和配置的行动。' : '没有同时满足等级、解锁条件和库存的行动。') : null;
   const shopMessage = !summary ? '正在比较灵巧商店的装备…' : summary.shopFailed ? '暂时无法计算练级方案。' :
     !upgrade ? (owned ? '灵巧商店暂无更快的配装，沿用现有装备即可。' : '当前未找到可用的商店配装。') : null;
-  showSkillTrainingPlan(ownedResult, ownedStatus, owned, ownedMessage);
-  showSkillTrainingPlan(shopResult, shopStatus, upgrade, shopMessage);
+  showSkillTrainingPlan(ownedResult, ownedStatus, owned, ownedMessage, ignoreStock);
+  showSkillTrainingPlan(shopResult, shopStatus, upgrade, shopMessage, ignoreStock);
 }
 
-function showSkillTrainingPlan(container, status, result, message) {
+function showSkillTrainingPlan(container, status, result, message, ignoreStock) {
   container.hidden = !result;
   status.hidden = !message;
   if (message && status.textContent !== t(message)) status.textContent = t(message);
@@ -237,16 +238,18 @@ function showSkillTrainingPlan(container, status, result, message) {
   const { row, target, preparation, loadout, current } = result;
   const name = id => gameName(catalog.items[id]) ?? t('未知物品');
   const metrics = create('div', undefined, 'metrics');
-  for (const [label, value] of [
-    ['预计可获 XP', fullNumber(target?.xp ?? row.xp)],
-    ['行动中 XP／小时', fullNumber(target?.rate ?? row.activeXpPerHour)],
+  for (const [label, value] of ignoreStock ? [['XP／小时', formatXp(experienceHourlyRate(row))]] : [
+    ['预计可获 XP', formatXp(target?.xp ?? row.xp)],
+    ['行动中 XP／小时', formatXp(target?.rate ?? row.activeXpPerHour)],
     ['到目标需时', target?.reaches ? formatXpDuration(target.hours) : target ? t(target.reason ?? '当前库存不足') : '—']
   ]) {
     const metric = create('div', t(label));
     metric.append(create('strong', value));
     metrics.append(metric);
   }
-  const children = [create('h4', gameName(row.action), 'combat-training-target'), metrics];
+  const summary = create('div', undefined, 'skill-training-summary');
+  summary.append(create('strong', gameName(row.action), 'skill-training-action'), metrics);
+  const children = [summary];
   const gear = create('dl', undefined, 'combat-training-gear');
   for (const id of new Set([...loadout, ...current].map(item => item.slot))) {
     const equipped = loadout.find(item => item.slot === id);

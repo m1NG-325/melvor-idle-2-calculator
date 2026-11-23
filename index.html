@@ -28,6 +28,7 @@
         <label>亮度<input type="range" id="themeLightness" min="55" max="83" value="68"></label>
       </div>
     </details>
+    <a class="repository-link" href="https://github.com/m1NG-325/melvor-idle-2-calculator" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
   </div>
 </div>
 <div class="workspace">
@@ -83,7 +84,13 @@
       <p id="sacrificialAnvilStatus" class="status muted" hidden></p>
       <label class="check" id="astralOfferingsSettings" hidden><input id="astralOfferings" type="checkbox">按星界献祭计算</label>
     </div>
-    <div class="save-controls"><label>角色存档<select id="save"></select></label><button id="reload" type="button">重新读取存档</button></div>
+    <div class="save-controls">
+      <label>角色存档<select id="save"></select></label>
+      <button id="reload" type="button">重新读取存档</button>
+      <button id="chooseSaveFile" type="button" hidden>手动选择存档</button>
+      <button id="forgetSaveFile" type="button" hidden>移除手动存档</button>
+    </div>
+    <p id="savePickerNotice" class="status muted" role="status" hidden></p>
     <p id="saveRefreshStatus" class="status muted" hidden>存档每 15 秒刷新</p>
     <div class="runtime-controls">
       <p id="profileNotice" class="muted" role="status" hidden></p>
@@ -244,7 +251,10 @@
     </div>
     <div id="xpSkillsSection">
       <section class="panel" aria-labelledby="xpBestHeading">
-        <h2 id="xpBestHeading">各技能首选</h2>
+        <div class="xp-overview-heading">
+          <h2 id="xpBestHeading">各技能首选</h2>
+          <label class="check"><input id="xpIgnoreStock" type="checkbox">忽略库存，按经验／小时排序</label>
+        </div>
         <p id="xpStatus" class="status muted" role="status"></p>
         <div id="xpBest" class="xp-grid"></div>
       </section>
@@ -253,32 +263,32 @@
         <div class="xp-goal">
           <div class="inputs">
             <label class="xp-action-choice">估算行动<select id="xpActionChoice"></select></label>
-            <label>目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
-            <label class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
+            <label id="xpGoalLevelField">目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
+            <label id="xpGoalSliderField" class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
             <button id="xpNextLevel" type="button">下一级</button>
             <button id="xpResetGoals" type="button" title="将当前角色的所有非战斗目标恢复为下一级">重置目标等级</button>
             <label>额外经验加成 %<input id="xpBonus" type="number" min="-99" max="1000" step="any" value="0"></label>
           </div>
           <div id="xpGoalOverview"></div>
         </div>
-        <section id="skillTraining" class="combat-training skill-training" aria-labelledby="skillTrainingTitle">
-          <h3 id="skillTrainingTitle">技能配装推荐</h3>
-          <section class="combat-training-plan" aria-labelledby="skillTrainingOwnedTitle">
-            <h4 id="skillTrainingOwnedTitle">已拥有装备推荐</h4>
-            <p id="skillTrainingOwnedStatus" class="muted" role="status" hidden></p>
-            <div id="skillTrainingOwnedResult" hidden></div>
-          </section>
-          <section id="skillTrainingShop" class="combat-training-plan" aria-labelledby="skillTrainingShopTitle" hidden>
-            <h4 id="skillTrainingShopTitle">灵巧商店装备推荐</h4>
-            <p id="skillTrainingShopStatus" class="muted" role="status" hidden></p>
-            <div id="skillTrainingShopResult" hidden></div>
-          </section>
-        </section>
         <p id="xpEmpty" class="muted"></p>
-        <div id="xpTable" class="scroll" hidden><table>
-          <thead><tr><th>行动</th><th class="number">预计可获 XP</th><th class="number">行动中 XP／小时</th><th>到目标需时</th><th>数据和限制</th></tr></thead>
+        <div id="xpTable" class="scroll" role="region" aria-labelledby="xpDetailHeading" tabindex="0" hidden><table>
+          <thead><tr><th>行动</th><th id="xpAmountHeader" class="number">预计可获 XP</th><th id="xpRateHeader" class="number">行动中 XP／小时</th><th id="xpEtaHeader">到目标需时</th><th>数据和限制</th></tr></thead>
           <tbody id="xpRows"></tbody>
         </table></div>
+      </section>
+      <section id="skillTraining" class="panel" aria-labelledby="skillTrainingTitle">
+        <h2 id="skillTrainingTitle">技能配装推荐</h2>
+        <section class="combat-training-plan" aria-labelledby="skillTrainingOwnedTitle">
+          <h3 id="skillTrainingOwnedTitle">已拥有装备推荐</h3>
+          <p id="skillTrainingOwnedStatus" class="muted" role="status" hidden></p>
+          <div id="skillTrainingOwnedResult" hidden></div>
+        </section>
+        <section id="skillTrainingShop" class="combat-training-plan" aria-labelledby="skillTrainingShopTitle" hidden>
+          <h3 id="skillTrainingShopTitle">灵巧商店装备推荐</h3>
+          <p id="skillTrainingShopStatus" class="muted" role="status" hidden></p>
+          <div id="skillTrainingShopResult" data-preparation-open="false" hidden></div>
+        </section>
       </section>
     </div>
     <div id="xpCombatSection" hidden>
@@ -465,7 +475,10 @@
           placeholder="搜索目标物品" autocomplete="off"></label>
         <select id="productionTarget" hidden></select>
         <datalist id="productionTargets"></datalist>
-        <label>挂机时长（小时）<input id="productionHours" data-idle-duration type="number" value="8" min="0.016666666666666666" max="24" step="any" required></label>
+        <label>计算方式<select id="productionMode"><option value="hours">按时长</option><option value="quantity">按目标数量</option></select></label>
+        <label id="productionHoursField">挂机时长（小时）<input id="productionHours" data-idle-duration type="number" value="8" min="0.016666666666666666" max="24" step="any" required></label>
+        <label id="productionQuantityField" hidden>目标数量<input id="productionQuantity" type="number" value="100" min="1" max="1000000000" step="1" required disabled></label>
+        <label id="productionReserveField" hidden>随机步骤备料余量 %<input id="productionReserve" type="number" value="0" min="0" max="100" step="1" required disabled></label>
         <label class="check"><input id="productionStock" type="checkbox">使用仓库库存</label>
         <label class="check"><input id="productionSellByproducts" type="checkbox">出售剩余副产物</label>
         <button id="addProductionComparison" type="button" disabled>加入对比</button>
@@ -479,7 +492,7 @@
         <h2>产线对比</h2>
         <button id="clearProductionComparison" type="button">清空对比</button>
       </div>
-      <p class="muted">各方案使用同一挂机时长，并分别从相同的起始库存计算。</p>
+      <p class="muted" id="productionComparisonBasis">各方案使用同一挂机时长，并分别从相同的起始库存计算。</p>
       <p id="productionComparisonHint" class="muted">再选一个目标物品并加入对比。</p>
       <div class="scroll">
         <table class="production-table">
@@ -500,6 +513,7 @@
       <div id="productionPlanBody">
       <h2 id="productionDetailTitle"></h2>
       <p id="productionPreview" class="production-restriction" hidden></p>
+      <p id="productionRandomNotice" class="muted" hidden></p>
       <p id="productionRevenue" class="muted"></p>
       <p id="productionBank" class="muted"></p>
       <button type="button" id="productionToQueue" hidden>加入定时挂机</button>

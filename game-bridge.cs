@@ -117,7 +117,9 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
                 {
                     elapsed += Math.Clamp(now - lastFrame, 0, 250);
                     bool goalMet = GoalReached;
-                    if (goalMet || duration > 0 && elapsed >= duration)
+                    if (!goalMet && canProduceGoal?.Invoke() == false)
+                        outcome = active.TryStop(false) ? "goal-product-unavailable" : "game-error";
+                    else if (goalMet || duration > 0 && elapsed >= duration)
                         outcome = active.TryStop(false) ? (goalMet || !HasGoal ? "completed" : "goal-timeout") : "game-error";
                 }
             }
@@ -173,7 +175,7 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
                     state += ":" + (long)Math.Clamp(Math.Floor(GoalProgress), 0, int.MaxValue) + ":" + goalQuantity;
                 return state;
             }
-            if (outcome is "completed" or "goal-timeout") return "stopped";
+            if (outcome is "completed" or "goal-timeout" or "goal-product-unavailable") return "stopped";
             if (ownsAction?.Invoke() != true) return "action-changed";
             if (!active.TryStop(false)) return "game-error";
             active = null;
@@ -219,6 +221,13 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
             stock = () => inventory.GetQuantity(item);
             if (mode == "owned" ? stock() >= value : stock() <= value) return "completed";
         }
+        Func<bool> goalCanProduce = () => true;
+        if (mode is "item" or "owned" && component is ArtisanActionComponent producer)
+        {
+            var recipe = producer.ActiveRecipes.Values.FirstOrDefault(entry => entry.Recipe.Id == target);
+            if (recipe is not null) goalCanProduce = () => CanProduce(producer, recipe, itemId!);
+        }
+        if (!goalCanProduce()) return "goal-product-unavailable";
         var result = component switch
         {
             WoodcuttingActionComponent wood => StartTree(game, wood, target),
@@ -251,6 +260,7 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
             goalQuantity = mode is "item" or "owned" or "spent" or "remaining" or "recipes" ? value : 0;
             goalItem = itemId;
             goalStock = stock;
+            canProduceGoal = goalCanProduce;
             reachWhenBelow = mode == "remaining";
             countSpent = mode == "spent";
             gained = 0;
@@ -271,6 +281,26 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
             }
         }
         return result;
+    }
+
+    private Func<bool>? canProduceGoal;
+
+    private static bool CanProduce(ArtisanActionComponent action, ActiveArtisanRecipe recipe, string itemId)
+    {
+        var normal = recipe.Stats.Products.Values.Any(product => product.Value.Item.Id == itemId &&
+            product.Value.Quantity > 0 && product.Value.Chance > 0);
+        var mode = recipe.CurrentRewardMode;
+        if (mode is null || !mode.ShowAlternativeMode(recipe)) return true;
+        if (mode is SacrificialAnvilRewardMode anvil)
+            return !normal || anvil.Collectables.Any(drop => drop.Item.Id == itemId && drop.Weight > 0);
+        if (mode is AstralOfferingsRewardMode offerings)
+        {
+            var level = recipe.Requirements.Conditions.OfType<LevelCondition>()
+                .FirstOrDefault(condition => condition.Component == action.Experience)?.Level ?? 0;
+            return normal || offerings.Rewards.Any(reward => reward.Item.Id == itemId &&
+                level >= reward.MinLevel && level <= reward.MaxLevel && reward.Quantity > 0);
+        }
+        return true;
     }
 
     private void UntrackItem()

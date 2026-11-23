@@ -24,12 +24,65 @@ async function verifyBridgeRuntime(file, signal) {
   if (hash.digest('hex') !== supportedGameRuntime) throw new Error('bridge-build');
 }
 
+function bridgeOverrides(original) {
+  const lines = original.split(/\r?\n/);
+  let dotnet = -1;
+  for (const [index, line] of lines.entries()) {
+    const section = /^\s*\[([^\]]+)\]\s*(?:;.*)?$/.exec(line);
+    if (section) {
+      if (dotnet >= 0) {
+        lines.splice(index, 0, 'project/assembly_name="' + bridgeAssembly + '"');
+        return lines.join('\n');
+      }
+      if (section[1] === 'dotnet') dotnet = index;
+    } else if (dotnet >= 0 && /^\s*project\/assembly_name\s*=/.test(line)) {
+      // Two custom managed entry points cannot share the same Godot project.
+      const assembly = /=\s*"([^"]+)"\s*(?:;.*)?$/.exec(line)?.[1];
+      if (assembly !== gameAssembly && assembly !== bridgeAssembly) throw new Error('bridge-override-conflict');
+      lines[index] = 'project/assembly_name="' + bridgeAssembly + '"';
+      return lines.join('\n');
+    }
+  }
+  if (dotnet < 0) lines.push('[dotnet]');
+  lines.push('project/assembly_name="' + bridgeAssembly + '"', '');
+  return lines.join('\n');
+}
+
+async function stageLanguageDirectory(source, destination, stageFile) {
+  await fs.mkdir(destination);
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    if (entry.isDirectory()) await stageLanguageDirectory(from, to, stageFile);
+    else if (entry.isFile() || entry.isSymbolicLink()) {
+      const resource = await fs.realpath(from);
+      if ((await fs.stat(resource)).isFile()) await stageFile(resource, to);
+    }
+  }
+}
+
 async function stageGameBridge(game, directory, assemblyFile, stageFile = fs.link) {
   const source = path.join(game, runtimeFolder(gameAssembly));
   const destination = path.join(directory, runtimeFolder(bridgeAssembly));
+  const original = await fs.readFile(path.join(game, 'override.cfg'), 'utf8').catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+    return '';
+  });
+  const overrides = bridgeOverrides(original.replace(/^\uFEFF/, ''));
   await fs.mkdir(destination, { recursive: true });
   const executable = path.join(directory, 'Melvor2.exe');
-  await stageFile(path.join(game, 'Melvor2.exe'), executable);
+  await stageFile(await fs.realpath(path.join(game, 'Melvor2.exe')), executable);
+  for (const entry of await fs.readdir(game, { withFileTypes: true })) {
+    const from = path.join(game, entry.name);
+    const to = path.join(directory, entry.name);
+    if (/^(?:languages|locale)$/i.test(entry.name) && (entry.isDirectory() || entry.isSymbolicLink())) {
+      const resource = await fs.realpath(from);
+      if ((await fs.stat(resource)).isDirectory()) await stageLanguageDirectory(resource, to, stageFile);
+    } else if (/\.(?:pck|po|mo|translation)$/i.test(entry.name) && (entry.isFile() || entry.isSymbolicLink())) {
+      const resource = await fs.realpath(from);
+      if ((await fs.stat(resource)).isFile()) await stageFile(resource, to);
+    }
+  }
   const entries = await fs.readdir(source, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.isFile()) await stageFile(path.join(source, entry.name), path.join(destination, entry.name));
@@ -55,7 +108,7 @@ async function stageGameBridge(game, directory, assemblyFile, stageFile = fs.lin
   };
   metadata.libraries[library] = { type: 'project', serviceable: false, sha512: '' };
   await fs.writeFile(path.join(destination, bridgeAssembly + '.deps.json'), JSON.stringify(metadata));
-  await fs.writeFile(path.join(directory, 'override.cfg'), '[dotnet]\nproject/assembly_name="' + bridgeAssembly + '"\n');
+  await fs.writeFile(path.join(directory, 'override.cfg'), overrides);
   return executable;
 }
 
@@ -116,7 +169,7 @@ function createGameBridge(game, build) {
       await verifyBridgeRuntime(path.join(stage.directory, runtimeFolder(bridgeAssembly), gameAssembly + '.dll'), signal);
     } catch (error) {
       await stage?.cleanup?.();
-      if (signal.aborted || error.message === 'bridge-build') throw error;
+      if (signal.aborted || ['bridge-build', 'bridge-override-conflict'].includes(error.message)) throw error;
       throw new Error('direct-link-failed');
     }
     let directory;

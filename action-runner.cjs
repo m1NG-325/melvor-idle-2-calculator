@@ -46,7 +46,7 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
                 target: progress[4] == null ? undefined : Number(progress[4]) });
               continue;
             }
-            if (['completed', 'action-changed', 'goal-timeout'].includes(next)) mayOwnAction = false;
+            if (['completed', 'action-changed', 'goal-timeout', 'goal-product-unavailable'].includes(next)) mayOwnAction = false;
             if (next === 'completed') break;
             setStatus(next, { step: stepNumber });
             return;
@@ -98,7 +98,7 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
       controller = new AbortController();
       const { signal } = controller;
       void run(actions, character, characterId, repeat === true, signal).catch(error => {
-        const known = ['game-already-open', 'bridge-unavailable', 'bridge-build', 'direct-link-failed'];
+        const known = ['game-already-open', 'bridge-unavailable', 'bridge-build', 'bridge-override-conflict', 'direct-link-failed'];
         if (status.state !== 'cancel-unconfirmed') {
           setStatus(signal.aborted ? 'cancelled' : known.includes(error.message) ? error.message : 'failed');
         }

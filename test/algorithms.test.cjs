@@ -4,7 +4,7 @@ const { rank, actionModifiers, projectHourlyProduction, productionCycle } = requ
 const { indexProduction, planProduction, compareProduction } = require('../production.js');
 const { suggestionMatches } = require('../choices.js');
 const { combatFoodProjection, combatSupplyEstimate, combatAttackAverage, estimateCombatEffects } = require('../combat-model.js');
-const { estimateCombat, measuredCombatRate, combatExperiencePlan, forecastCombatExperience } = require('../combat.js');
+const { estimateCombat, measuredCombatRate, combatExperiencePlan, forecastCombatExperience, combineDungeonSupply } = require('../combat.js');
 const { calculateShoppingList } = require('../shop.js');
 const { levelFor, xpGoalProgress } = require('../xp-progress.js');
 
@@ -16,6 +16,19 @@ const recipe = { id: 'Crafting:test', skill: 'Crafting', kind: 'Artisan', recipe
 const items = { bar: { price: 30 }, ore: { price: 2 } };
 const catalog = actions => ({ items, actions, xpActions: actions });
 const options = { hours: 1, metric: 'xp', sell: true };
+
+test('hourly XP mode includes recipes with no materials while respecting skill requirements', () => {
+  const locked = { ...recipe, id: 'Crafting:locked', requirementGroups: [[{ type: 'Level', skill: 'Crafting', level: 5 }]] };
+  const actor = { ...profile, stock: {}, keep: ['ore'] };
+  const data = catalog([recipe, locked]);
+  assert.deepEqual(rank(data, actor, options), []);
+  const rows = rank(data, actor, { ...options, ignoreStock: true });
+  assert.deepEqual(rows.map(row => row.action.id), [recipe.id]);
+  assert.equal(rows[0].activeXpPerHour, 70);
+  assert.equal(rows[0].stockLimit, '');
+  assert.deepEqual(actor.stock, {});
+  assert.deepEqual(rank(data, actor, { ...options, metric: 'net', ignoreStock: true }), []);
+});
 
 test('a two-hit special changes average damage, hit count and turn delay', () => {
   const actor = { min: 4, max: 4, hp: 40, chance: .5, immunity: 0 };
@@ -139,6 +152,47 @@ test('a nested recipe cannot spend an ingredient reserved for its parent', () =>
     'bar', 5 / 3600, true, productionCycle).find(row => row.item === 'bar');
   assert.deepEqual(result.steps.map(step => step.action.id), [safe.id, finish.id]);
   assert.equal(result.quantity, 1);
+});
+
+test('quantity plans meet the target in whole batches and choose the faster producer', () => {
+  const mine = { ...recipe, id: 'Crafting:ore', costs: [], rewards: [['ore', 1, 1]], seconds: 2 };
+  const fast = { ...recipe, id: 'Crafting:fast', costs: [['ore', 2]], rewards: [['bar', 2, 1]], seconds: 3 };
+  const slow = { ...fast, id: 'Crafting:slow', costs: [], seconds: 30 };
+  const data = catalog([mine, fast, slow]);
+  const index = indexProduction(data);
+  const goals = stock => planProduction(data, { ...profile, stock: { ore: 2, bar: 100 } }, index,
+    'bar', 1 / 3600, stock, productionCycle, { targetQuantity: 3 });
+  const [fromStock] = goals(true);
+  assert.equal(fromStock.quantity, 4);
+  assert.equal(fromStock.seconds, 10);
+  assert.deepEqual(fromStock.steps.map(step => [step.action.id, step.cycles]), [[mine.id, 2], [fast.id, 2]]);
+  assert.equal(fromStock.bankUsed.get('ore'), 2);
+  assert.equal(goals(false)[0].seconds, 14);
+  assert.deepEqual(goals(true).map(plan => plan.item), ['bar']);
+});
+
+test('quantity plans combine partial sources for intermediates and finished goods', () => {
+  const first = { ...recipe, id: 'first', costs: [['ore', 1]], rewards: [['part', 1, 1]], seconds: 1 };
+  const second = { ...first, id: 'second', costs: [['gem', 1]], seconds: 2 };
+  const finish = { ...recipe, id: 'finish', costs: [['part', 1]], rewards: [['bar', 1, 1]], seconds: 1 };
+  const data = { ...catalog([first, second, finish]), items: { ...items, part: { price: 1 }, gem: { price: 2 } } };
+  const actor = { ...profile, stock: { ore: 2, gem: 2 } };
+  const plan = target => planProduction(data, actor, indexProduction(data), target, 1, true, productionCycle,
+    { targetQuantity: 4 })[0];
+  assert.deepEqual(plan('bar').steps.map(row => [row.action.id, row.cycles]), [['first', 2], ['second', 2], ['finish', 4]]);
+  assert.equal(plan('part').quantity, 4);
+  assert.equal(plan('bar').seconds, 10);
+});
+
+test('quantity buffers only increase the planned batches for random outputs', () => {
+  const fish = { ...recipe, skill: 'Fishing', kind: 'Fishing', minSeconds: 3, maxSeconds: 3,
+    costs: [], rewards: [], fishChance: 1, fish: [['ore', 1, 1]], special: [] };
+  const craft = { ...recipe, id: 'Crafting:bar', costs: [['ore', 1]], seconds: 1 };
+  const data = catalog([fish, craft]);
+  const actor = { ...profile, levels: { ...profile.levels, Fishing: 10 } };
+  const [plan] = planProduction(data, actor, indexProduction(data), 'bar', 1, false, productionCycle,
+    { targetQuantity: 10, reservePercent: 20 });
+  assert.deepEqual(plan.steps.map(step => [step.cycles, step.randomOutput]), [[12, true], [10, false]]);
 });
 
 test('Astral Offerings use the recipe requirement tier and replace crafting products', () => {
@@ -337,6 +391,20 @@ test('automatic harvest alone does not plant an empty farming plot', () => {
   assert.equal(rank(data, saved, options)[0].xp, 0);
 });
 
+test('farm rates consider unlocked crops for an occupied plot and report switch time', () => {
+  const first = { ...recipe, id: 'Farming:first', recipe: 'first', skill: 'Farming', kind: 'Farming', category: 'plots',
+    costs: [['seed', 1]], farm: { automation: [], autoItems: [], autoCurrencies: [], regrows: 0 } };
+  const next = { ...first, id: 'Farming:next', recipe: 'next', baseXp: first.baseXp * 2 };
+  const data = { ...catalog([first, next]), xpSkillData: { farmingPlots: { plot: 'plots', locked: 'plots' } } };
+  const plot = { id: 'plot', crop: 'first', seconds: 300, state: 2, autoHarvest: false };
+  const saved = { ...profile, stock: {}, xpSkillState: { Farming: [plot, { id: 'locked', state: 0 }] } };
+  const [result] = rank(data, saved, { ...options, ignoreStock: true });
+  assert.equal(result.action.id, next.id);
+  assert.equal(result.passive.plots, 1);
+  assert.equal(result.passive.switchWait, 300);
+  assert.equal(result.xpPerHour, 140);
+});
+
 test('different crops share the same farming supplies in harvest order regardless of catalogue order', () => {
   const first = { ...recipe, id: 'Farming:first', recipe: 'first', skill: 'Farming', kind: 'Farming', category: 'plots',
     costs: [], farm: { automation: [], autoItems: [['fuel', 1]], autoCurrencies: [], regrows: 0 } };
@@ -483,6 +551,16 @@ test('Slayer charges apply only to the matching target and stop at task completi
   assert.equal(plan.hoursAtStock(3), .3);
   assert.equal(plan.hoursAtStock(5), Infinity);
   assert.equal(combatSupplyEstimate(rule, 'charge', { ...context, target: { id: 'other' } }), 0);
+});
+
+test('dungeon supply projections preserve task-only consumption across different waves', () => {
+  const task = { id: 'charge', projection: { neededAt: hours => Math.min(10 * hours, 5) } };
+  const ordinary = { id: 'charge', perHour: 2 };
+  const projection = combineDungeonSupply([{ entry: task, fraction: .5 }, { entry: ordinary, fraction: .5 }], 4);
+  assert.equal(projection.neededAt(2), 7);
+  assert.equal(projection.neededAt(4), 9);
+  assert.equal(projection.hoursAtStock(9), Infinity);
+  assert.ok(Math.abs(projection.hoursAtStock(7) - 2) < 1e-8);
 });
 
 test('rune and ammunition costs respect preservation and optional imbuement', () => {
