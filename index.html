@@ -78,6 +78,9 @@
           <path d="M4 4v16h16M8 16v-4m5 4V7m5 9V9"/>
         </svg><span>数据统计</span>
       </a>
+      <a id="itemLookupLink" href="#item-lookup">
+        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><span>物品检索</span>
+      </a>
     </nav>
     <div id="sacrificialAnvilSettings" hidden>
       <label class="check"><input id="sacrificialAnvil" type="checkbox" aria-describedby="sacrificialAnvilStatus">按献祭砧台计算</label>
@@ -384,6 +387,28 @@
       <p id="shopCostHelp" class="status muted">带已购标记的商品按首次购买规划。普通可重复购买的补给不计入。</p>
     </section>
   </div>
+  <div id="itemLookupPage" hidden>
+    <h1>物品检索</h1>
+    <section class="panel item-lookup-toolbar">
+      <label>搜索物品<input id="itemLookupSearch" type="search" placeholder="输入中文名、英文名或物品编号" autocomplete="off"></label>
+      <label>排序方式<select id="itemLookupSort">
+        <option value="name">名称顺序</option>
+        <option value="price-desc">售价从高到低</option>
+        <option value="price-asc">售价从低到高</option>
+      </select></label>
+    </section>
+    <div class="item-lookup-layout">
+      <section class="panel item-lookup-results" aria-label="物品列表">
+        <p id="itemLookupCount" class="status muted" aria-live="polite"></p>
+        <ul id="itemLookupList"></ul>
+        <div class="item-lookup-pagination">
+          <button id="itemLookupPrevious" type="button">上一页</button>
+          <button id="itemLookupNext" type="button">下一页</button>
+        </div>
+      </section>
+      <section class="panel item-lookup-detail" id="itemLookupDetail" aria-label="物品详情"></section>
+    </div>
+  </div>
   <div id="questsPage" hidden>
     <h1>任务材料</h1>
     <section class="panel">
@@ -476,7 +501,9 @@
         <select id="productionTarget" hidden></select>
         <datalist id="productionTargets"></datalist>
         <label>计算方式<select id="productionMode"><option value="hours">按时长</option><option value="quantity">按目标数量</option></select></label>
-        <label id="productionHoursField">挂机时长（小时）<input id="productionHours" data-idle-duration type="number" value="8" min="0.016666666666666666" max="24" step="any" required></label>
+        <div id="productionHoursField">
+          <label>挂机时长（小时）<input id="productionHours" data-idle-duration type="number" value="8" min="0.016666666666666666" max="24" step="any" required></label>
+        </div>
         <label id="productionQuantityField" hidden>目标数量<input id="productionQuantity" type="number" value="100" min="1" max="1000000000" step="1" required disabled></label>
         <label id="productionReserveField" hidden>随机步骤备料余量 %<input id="productionReserve" type="number" value="0" min="0" max="100" step="1" required disabled></label>
         <label class="check"><input id="productionStock" type="checkbox">使用仓库库存</label>
@@ -505,6 +532,10 @@
       <h2 class="muted" id="productionHeading">收益最高的产线</h2>
       <p class="winner" id="productionWinner"></p>
       <div class="metrics" id="productionMetrics"></div>
+      <details id="productionTimeDetails" class="production-time-details">
+        <summary>查看耗时明细</summary>
+        <ol id="productionTimeRows"></ol>
+      </details>
     </section>
     <section class="panel" id="productionDetail" hidden>
       <div class="inputs">
@@ -517,6 +548,7 @@
       <p id="productionRevenue" class="muted"></p>
       <p id="productionBank" class="muted"></p>
       <button type="button" id="productionToQueue" hidden>加入定时挂机</button>
+      <p id="productionQueueNote" class="status muted" hidden></p>
       <details id="productionByproducts" class="production-byproducts" hidden>
         <summary>剩余副产物</summary>
         <ul id="productionByproductRows"></ul>
@@ -562,6 +594,7 @@
 <script src="skill-training.js"></script>
 <script src="shop.js"></script>
 <script src="quests.js"></script>
+<script src="item-lookup.js"></script>
 <script src="preferences.js"></script>
 <script src="choices.js"></script>
 <script src="ui.js"></script>

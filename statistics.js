@@ -207,7 +207,8 @@ function selectStatisticCategory(id) {
 }
 
 function statisticsProfileKey() {
-  return profile?.characterId ? profile.characterId + ':' + profile.date : '';
+  return profile?.characterId
+    ? profile.characterId + ':' + profile.date + (profile.saveFallback ? ':automatic-fallback' : '') : '';
 }
 
 function statisticsScope() {

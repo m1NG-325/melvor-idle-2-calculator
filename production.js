@@ -49,6 +49,45 @@ function productionFamily(index, target) {
   return [...new Set([...upstream, ...siblings, ...nextStage])];
 }
 
+function independentProductionBatches(sources, missing, costOf) {
+  const goal = Math.ceil(missing);
+  const candidates = sources.filter(({ amount, model }) => Number.isSafeInteger(amount) &&
+    !model.inputs.length && !['Hunting', 'Herblore'].includes(model.action.kind));
+  if (candidates.length < 2) return [];
+  const limit = goal + Math.max(...candidates.map(source => source.amount)) - 1;
+  if (limit * candidates.length > 50000) return [];
+  const times = new Float64Array(limit + 1).fill(Infinity);
+  const costs = new Float64Array(limit + 1).fill(Infinity);
+  const previous = new Int32Array(limit + 1).fill(-1);
+  const batches = candidates.map(({ model }) => ({ seconds: model.duration(1), cost: costOf(model) }));
+  times[0] = costs[0] = 0;
+  for (let amount = 0; amount < goal; amount++) {
+    if (!Number.isFinite(times[amount])) continue;
+    for (const [index, source] of candidates.entries()) {
+      const next = amount + source.amount;
+      const time = times[amount] + batches[index].seconds;
+      const cost = costs[amount] + batches[index].cost;
+      if (time < times[next] || (time === times[next] && cost < costs[next])) {
+        times[next] = time;
+        costs[next] = cost;
+        previous[next] = index;
+      }
+    }
+  }
+  let best = goal;
+  for (let amount = goal + 1; amount <= limit; amount++) {
+    if (times[amount] < times[best] || (times[amount] === times[best] && costs[amount] < costs[best])) best = amount;
+  }
+  if (previous[best] < 0) return [];
+  const counts = new Map();
+  for (let amount = best; amount > 0;) {
+    const source = candidates[previous[amount]];
+    counts.set(source.model, (counts.get(source.model) ?? 0) + 1);
+    amount -= source.amount;
+  }
+  return [...counts];
+}
+
 function planProduction(catalog, profile, index, target, hours, useStock, evaluateCycle,
   { preview = false, items, sellByproducts = false, keptItems = new Set(), targetQuantity, reservePercent = 0 } = {}) {
   const byQuantity = targetQuantity != null;
@@ -63,13 +102,12 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       if (!row || (!(row.activeHours > 0) && action.kind !== 'ItemUpgrade')) models.set(action.id, null);
       else {
         const output = new Map();
+        const randomItems = new Set();
         for (const drop of row.drops) {
           output.set(drop.id, (output.get(drop.id) ?? 0) + drop.quantity);
+          if (drop.random ?? !Number.isInteger(drop.quantity)) randomItems.add(drop.id);
         }
-        const randomOutput = row.drops.some(drop => !Number.isInteger(drop.quantity)) ||
-          row.doubleOutput > 0 && row.doubleOutput < 1 || row.cooking?.success < 1 ||
-          ['Fishing', 'Hunting', 'Mining', 'Woodcutting'].includes(action.kind);
-        models.set(action.id, { action, output, randomOutput, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
+        models.set(action.id, { action, output, randomItems, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
           inputs: row.inputs, restrictions: row.restrictions ?? [], sacrifice: row.sacrifice });
       }
     }
@@ -120,7 +158,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     for (const action of index.producers.get(id) ?? []) {
       const model = modelFor(action);
       const quantity = model?.output.get(id);
-      const amount = strategy.quantityMix && model?.randomOutput ? quantity / (1 + reservePercent / 100) : quantity;
+      const amount = strategy.quantityMix && model?.randomItems.has(id) ? quantity / (1 + reservePercent / 100) : quantity;
       if (!(amount > 0)) continue;
       sources.push({ model, amount });
       const cycles = Math.max(1, roundUp(missing / amount));
@@ -131,12 +169,20 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     }
     if (strategy.quantityMix && sources.length > 1) {
       const sorted = sources.sort((a, b) => a.model.seconds / a.amount - b.model.seconds / b.amount);
-      for (const first of sorted) {
-        const candidate = copy(state);
-        let outstanding = missing;
-        for (const { model, amount } of [first, ...sorted.filter(source => source !== first)]) {
+      if (strategy.quantityTrials) {
+        const batches = independentProductionBatches(sorted, missing, model => -model.direct -
+          [...model.output].reduce((sum, [outputId, amount]) =>
+            sum + (outputId !== id && canSell(outputId) ? amount * price(outputId) : 0), 0));
+        if (batches.length > 1) {
+          const candidate = copy(state);
+          if (batches.every(([model, count]) => run(candidate, model, count, nextTrail, timeLimit, strategy))) consider(candidate);
+        }
+      }
+      function fill(candidate, choices, outstanding, trial) {
+        for (const { model, amount } of choices) {
+          if (enough(missing - outstanding, missing)) break;
           const max = roundUp(outstanding / amount);
-          if (!Number.isSafeInteger(max) || max <= 0) break;
+          if (!Number.isSafeInteger(max) || max <= 0) continue;
           let low = 1;
           let high = max;
           let partial;
@@ -144,18 +190,38 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
           while (low <= high) {
             const count = low === 1 && high === max ? max : Math.floor((low + high) / 2);
             const probe = copy(candidate);
-            if (run(probe, model, count, nextTrail, timeLimit, strategy)) {
+            if (run(probe, model, count, nextTrail, timeLimit, trial)) {
               partial = probe;
               cycles = count;
               low = count + 1;
             } else high = count - 1;
           }
-          if (partial) {
-            Object.assign(candidate, partial);
-            outstanding -= cycles * amount;
-          }
+          if (!partial) continue;
+          Object.assign(candidate, partial);
+          outstanding -= cycles * amount;
         }
         if (enough(missing - outstanding, missing)) consider(candidate);
+      }
+      for (const first of sorted) {
+        const others = sorted.filter(source => source !== first);
+        fill(copy(state), [first, ...others], missing, strategy);
+        const max = roundUp(missing / first.amount) - 1;
+        if (!Number.isSafeInteger(max) || max < 1 || !strategy.quantityTrials?.remaining) continue;
+        const probes = new Set();
+        for (let offset = 0; offset < Math.min(8, max); offset++) {
+          probes.add(max - offset);
+          probes.add(offset + 1);
+        }
+        const trial = { ...strategy, quantityTrials: undefined };
+        for (const count of probes) {
+          if (strategy.quantityTrials.remaining <= 0) break;
+          if (best && state.seconds + first.model.duration(count) > best.seconds) continue;
+          strategy.quantityTrials.remaining--;
+          const candidate = copy(state);
+          if (run(candidate, first.model, count, nextTrail, timeLimit, trial)) {
+            fill(candidate, others, missing - count * first.amount, trial);
+          }
+        }
       }
     }
     strategy.alternatives ||= sources.length > 1;
@@ -263,7 +329,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     state.direct += direct;
     state.wallet.set('GoldPieces', (state.wallet.get('GoldPieces') ?? 0) + direct);
     state.seconds += seconds;
-    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions, randomOutput: model.randomOutput,
+    state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions, randomOutput: model.randomItems.size > 0,
       sacrificeGp: (model.sacrifice?.gp ?? 0) * cycles });
     return true;
   }
@@ -326,7 +392,9 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       }
     }
     if (byQuantity) {
-      result = bestSource(newState(), item, targetQuantity, new Set(), budget, { ...fastest, quantityMix: true });
+      result = bestSource(newState(), item, targetQuantity, new Set(), budget, {
+        ...fastest, quantityMix: true, quantityTrials: { remaining: 256 }
+      });
     } else {
       search(fastest);
       if (fastest.alternatives) {
@@ -358,7 +426,8 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       }
     }
     const elapsedHours = byQuantity ? result.seconds / 3600 : Math.max(hours, result.seconds / 3600);
-    return { item, quantity, sales, byproducts, byproductSales, materials, net, sacrifice,
+    return { item, quantity, targetQuantity, reservePercent, budgetSeconds: byQuantity ? null : budget,
+      sales, byproducts, byproductSales, materials, net, sacrifice,
       netPerHour: elapsedHours > 0 ? net / elapsedHours : null, seconds: result.seconds,
       direct: result.direct, goldCost: result.goldCost, steps: result.steps, bankUsed: result.bankUsed, externalCost: result.externalCost, preview };
   }
@@ -392,7 +461,7 @@ function compareProduction(catalog, profile, index, items, hours, useStock, eval
     (b.net ?? -Infinity) - (a.net ?? -Infinity));
 }
 
-if (typeof module !== 'undefined') module.exports = { indexProduction, planProduction, compareProduction };
+if (typeof module !== 'undefined') module.exports = { indexProduction, planProduction, compareProduction, productionTimedQueueSteps };
 
 let productionView;
 
@@ -539,6 +608,11 @@ function renderProduction() {
       metric.append(create('strong', value));
       return metric;
     }));
+    byId('productionTimeRows').replaceChildren(...selected.steps.map(step => {
+      const row = create('li');
+      row.append(create('strong', productionStepName(step)), productionStepTiming(step));
+      return row;
+    }));
   }
   const options = byId('productionPlan');
   options.replaceChildren(...detailPlans.map(({ item, net, preview }) => new Option(
@@ -607,9 +681,72 @@ function productionRestrictionText(restriction, catalog) {
   }
 }
 
-function renderProductionDetail(plan) {
-  const queueButton = byId('productionToQueue');
-  const queueSteps = (plan?.steps ?? []).map((step, index) => {
+function productionStepName({ action, item }) {
+  if (!action) return t('准备 {item}', { item: questItem(item) });
+  if (action.kind === 'ItemUpgrade') return t('升级 {item}', { item: questItem(action.item) });
+  return skillName(action.skill, productionView.catalog.xpSkills) + ' · ' + gameName(action);
+}
+
+function productionStepTiming(step) {
+  const body = create('div', undefined, 'production-step-time');
+  if (step.seconds == null) {
+    body.append(create('small', t('另行准备，耗时未计入')));
+    return body;
+  }
+  const time = step.seconds ? formatXpDuration(step.seconds / 3600) : t('即时');
+  body.append(create('small', t('本步骤耗时 {time}', { time })));
+  if (step.cycles > 0) {
+    body.append(create('small', t('预计执行 {count} 次 · 平均每次 {time}', {
+      count: fullNumber(step.cycles), time: t('{value} 秒', { value: expectedQuantity(step.seconds / step.cycles) })
+    })));
+    const products = scale => step.output.map(({ id, quantity }) => t('{item} × {quantity}', {
+      item: questItem(id), quantity: expectedQuantity(quantity * scale)
+    })).join(' · ');
+    if (step.output.length) {
+      body.append(create('small', t('平均每次产出 {items}', { items: products(1 / step.cycles) })));
+      if (step.seconds > 0) body.append(create('small', t('预计每小时产出 {items}', { items: products(3600 / step.seconds) })));
+    }
+  }
+  return body;
+}
+
+function productionTimedQueueSteps(plan) {
+  const { steps, budgetSeconds, seconds } = plan;
+  if (!(seconds > 0) || !Number.isFinite(seconds) || !Number.isFinite(budgetSeconds) || !steps.length ||
+    steps.some(step => !(step.seconds > 0) || !Number.isFinite(step.seconds))) return [];
+  const budget = Math.floor(budgetSeconds / 60 + 1e-9);
+  if (steps.length > budget) return [];
+  const minutes = Math.min(budget, Math.max(steps.length, Math.round(seconds / 60)));
+  const shares = steps.map(step => {
+    const ideal = step.seconds / 60;
+    return { key: step.action?.id, minutes: Math.max(1, Math.round(ideal)), ideal };
+  });
+  let unassigned = minutes - shares.reduce((sum, step) => sum + step.minutes, 0);
+  while (unassigned) {
+    const change = Math.sign(unassigned);
+    let best;
+    let lowestError = Infinity;
+    for (const step of shares) {
+      if (step.minutes + change < 1) continue;
+      const error = Math.abs(step.minutes + change - step.ideal) - Math.abs(step.minutes - step.ideal);
+      if (error < lowestError) {
+        best = step;
+        lowestError = error;
+      }
+    }
+    best.minutes += change;
+    unassigned -= change;
+  }
+  return shares.map(({ key, minutes }) => ({ key, minutes }));
+}
+
+function productionQueueSteps(plan) {
+  if (!plan) return [];
+  if (plan.targetQuantity == null) return productionTimedQueueSteps(plan);
+  const consumedTarget = plan.steps.reduce((total, step) => total + step.used.reduce((used, row) =>
+    used + (!row.currency && row.id === plan.item ? row.quantity : 0), 0), 0);
+  let remaining = plan.targetQuantity + Math.ceil(consumedTarget);
+  return plan.steps.flatMap((step, index) => {
     const key = step.action?.id;
     const target = actionQueue.targets.get(key);
     const minutes = Math.ceil(step.seconds / 60);
@@ -618,14 +755,42 @@ function renderProductionDetail(plan) {
     const products = step.output.filter(row => needed.has(row.id));
     if (products.length === 1 && queueGoalItems('item', target).includes(products[0].id)) {
       const { id, quantity } = products[0];
-      return { key, minutes: 0, goal: { type: 'item', item: id, value: Math.ceil(quantity) } };
+      let value = Math.ceil(quantity - Math.abs(quantity) * Number.EPSILON * 4);
+      if (id === plan.item) {
+        value = Math.min(remaining, value);
+        remaining -= value;
+        if (!value) return [];
+      }
+      return [{ key, minutes: 0, goal: { type: 'item', item: id, value } }];
     }
+    const output = products.find(row => row.id === plan.item);
+    if (output) remaining = Math.max(0, remaining - Math.floor(output.quantity));
     if (recipeGoalAvailable(target) && Number.isInteger(step.cycles)) {
-      return { key, minutes: 0, goal: { type: 'recipes', value: step.cycles } };
+      return [{ key, minutes: 0, goal: { type: 'recipes', value: step.cycles } }];
     }
-    return { key, minutes: minutes || NaN };
+    return [{ key, minutes: minutes || NaN }];
   });
+}
+
+function renderProductionDetail(plan) {
+  const queueButton = byId('productionToQueue');
+  const queueSteps = productionQueueSteps(plan);
   queueButton.hidden = plan?.preview || !queueSteps.length || !queueSteps.every(validQueueStep);
+  const queueNote = byId('productionQueueNote');
+  let queueNotice = '';
+  if (!queueButton.hidden && plan.targetQuantity == null) {
+    const minutes = queueSteps.reduce((sum, step) => sum + step.minutes, 0);
+    queueNotice = t('队列按整分钟执行，合计 {time}。各步骤到时切换。', { time: formatDuration(minutes / 60) });
+  } else if (!queueButton.hidden && plan.reservePercent > 0) {
+    queueNotice = t('含备料的预计产量为 {expected}，队列目标为 {target}。耗时和收益按预计产量计算。', {
+      expected: expectedQuantity(plan.quantity), target: fullNumber(plan.targetQuantity)
+    });
+  } else if (plan && !plan.preview && plan.targetQuantity == null && plan.steps.every(step => step.seconds > 0) &&
+    plan.steps.length > Math.floor(plan.budgetSeconds / 60 + 1e-9)) {
+    queueNotice = t('时长不足以给队列的每一步分配至少 1 分钟。');
+  }
+  queueNote.textContent = queueNotice;
+  queueNote.hidden = !queueNotice;
   queueButton.onclick = () => {
     if (!appendQueuePlan(queueSteps)) byId('productionStatus').textContent =
       t(queueBusy() ? '挂机中，队列已锁定。' : '队列最多可添加 200 步。');
@@ -670,16 +835,21 @@ function renderProductionDetail(plan) {
   sale.append(...[t(plan.sacrifice ? '献祭 {item}' : '出售 {item}', { item: itemName(plan.item) }), '—', '—',
     quantities([{ id: plan.item, quantity: plan.quantity }]),
     formatGp(plan.sacrifice?.gp ?? plan.sales)].map(value => create('td', value)));
-  byId('productionSteps').replaceChildren(...plan.steps.map(step => {
+  const steps = byId('productionSteps');
+  const expanded = new Set([...steps.querySelectorAll('details[open]')].map(row => row.dataset.step));
+  steps.replaceChildren(...plan.steps.map((step, index) => {
     const row = create('tr');
-    const action = step.action?.kind === 'ItemUpgrade'
-      ? t('升级 {item}', { item: itemName(step.action.item) })
-      : step.action
-      ? skillName(step.action.skill, catalog.xpSkills) + ' · ' + gameName(step.action)
-      : t('准备 {item}', { item: itemName(step.item) });
+    const time = create('td', '—');
+    if (step.seconds != null) {
+      const breakdown = create('details', undefined, 'production-step-details');
+      breakdown.dataset.step = [plan.item, step.action?.id, index].join(':');
+      breakdown.open = expanded.has(breakdown.dataset.step);
+      const duration = step.seconds === 0 ? t('即时') : formatDuration(step.seconds / 3600);
+      breakdown.append(create('summary', duration), productionStepTiming(step));
+      time.replaceChildren(breakdown);
+    }
     const flags = [...new Set(step.restrictions.map(restriction => productionRestrictionText(restriction, catalog)))];
-    row.append(create('td', action), create('td', flags.join(' · ') || '—', flags.length ? 'production-restriction' : undefined),
-      create('td', step.seconds == null ? '—' : step.action?.kind === 'ItemUpgrade' ? t('即时') : formatDuration(step.seconds / 3600)),
+    row.append(create('td', productionStepName(step)), create('td', flags.join(' · ') || '—', flags.length ? 'production-restriction' : undefined), time,
       create('td', quantities(step.used) || '—'), create('td', [
         step.sacrificeGp > 0 && t('献祭折现 {value} GP', { value: fullNumber(step.sacrificeGp) }),
         quantities(step.output)

@@ -79,7 +79,8 @@ function questSourceLabel(where) {
   const prefix = {
     open: '打开 {name}', reward: '任务奖励 · {name}', purchase: '购买 · {name}',
     drop: '掉落 · {name}', clear: '通关奖励 · {name}', modifierDrop: '需额外掉落加成 · {name}',
-    upgrade: '升级 · {name}'
+    upgrade: '升级 · {name}', event: '特殊事件 · {name}', timedReward: '限时通关奖励 · {name}',
+    offering: '星界献祭 · {name}'
   }[where.kind];
   const path = questSourcePath(where);
   return prefix ? t(prefix, { name: path }) : path;

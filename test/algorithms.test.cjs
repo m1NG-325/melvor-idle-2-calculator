@@ -1,12 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { rank, actionModifiers, projectHourlyProduction, productionCycle } = require('../rank.js');
-const { indexProduction, planProduction, compareProduction } = require('../production.js');
+const { indexProduction, planProduction, compareProduction, productionTimedQueueSteps } = require('../production.js');
 const { suggestionMatches } = require('../choices.js');
 const { combatFoodProjection, combatSupplyEstimate, combatAttackAverage, estimateCombatEffects } = require('../combat-model.js');
 const { estimateCombat, measuredCombatRate, combatExperiencePlan, forecastCombatExperience, combineDungeonSupply } = require('../combat.js');
 const { calculateShoppingList } = require('../shop.js');
 const { levelFor, xpGoalProgress } = require('../xp-progress.js');
+const { makeQuestGuide } = require('../quest-catalog.cjs');
 
 const profile = { levels: { Crafting: 1, Cooking: 11, Farming: 1 }, stock: { ore: 10 },
   currencies: {}, date: '2026-11-21T00:00:00Z' };
@@ -16,6 +17,22 @@ const recipe = { id: 'Crafting:test', skill: 'Crafting', kind: 'Artisan', recipe
 const items = { bar: { price: 30 }, ore: { price: 2 } };
 const catalog = actions => ({ items, actions, xpActions: actions });
 const options = { hours: 1, metric: 'xp', sell: true };
+
+test('item lookup excludes junk only at fishing locations with a guaranteed base catch', () => {
+  const spots = [
+    { Id: 'Guaranteed', DisplayName: 'Guaranteed', FishChance: 1 },
+    { Id: 'Ordinary', DisplayName: 'Ordinary', FishChance: 0.8 }
+  ].map(row => ({ ...row, JunkItem: 'MelvorBase:Junk',
+    RandomProducts: [{ Item: 'MelvorBase:Fish', Weight: 1 }],
+    SpecialProducts: [{ Item: 'MelvorBase:Trinket', Chance: 0.01 }] }));
+  const { sources } = makeQuestGuide({
+    Objects: { FishingRecipe: spots, Item: ['Fish', 'Junk', 'Trinket'].map(Id => ({ Id })) },
+    EntityConfig: { 'MelvorBase:Fishing': { Recipes: spots.map(({ Id }) => ({ Id: 'MelvorBase:' + Id })) } }
+  });
+  assert.deepEqual(sources.Junk.map(where => where.actionId), ['Fishing:Ordinary']);
+  assert.equal(sources.Fish.length, 2);
+  assert.equal(sources.Trinket.length, 2);
+});
 
 test('hourly XP mode includes recipes with no materials while respecting skill requirements', () => {
   const locked = { ...recipe, id: 'Crafting:locked', requirementGroups: [[{ type: 'Level', skill: 'Crafting', level: 5 }]] };
@@ -184,15 +201,58 @@ test('quantity plans combine partial sources for intermediates and finished good
   assert.equal(plan('bar').seconds, 10);
 });
 
-test('quantity buffers only increase the planned batches for random outputs', () => {
+test('quantity planning tries complementary batches even when either producer can finish on its own', () => {
+  const large = { ...recipe, id: 'large', costs: [], rewards: [['bar', 6, 1]], seconds: 10 };
+  const small = { ...recipe, id: 'small', costs: [], rewards: [['bar', 4, 1]], seconds: 8 };
+  const data = catalog([large, small]);
+  const [plan] = planProduction(data, profile, indexProduction(data), 'bar', 1, false, productionCycle, { targetQuantity: 10 });
+  assert.equal(plan.seconds, 18);
+  assert.equal(plan.quantity, 10);
+  assert.deepEqual(plan.steps.map(step => step.cycles), [1, 1]);
+});
+
+test('independent integer batches search interior combinations for the fastest quantity plan', () => {
+  const first = { ...recipe, id: 'batch-41', costs: [], rewards: [['bar', 41, 1]], seconds: 41 };
+  const second = { ...recipe, id: 'batch-42', costs: [], rewards: [['bar', 42, 1]], seconds: 42 };
+  const data = catalog([first, second]);
+  const [plan] = planProduction(data, profile, indexProduction(data), 'bar', 1, false, productionCycle, { targetQuantity: 1773 });
+  assert.equal(plan.seconds, 1773);
+  assert.equal(plan.quantity, 1773);
+  assert.deepEqual(Object.fromEntries(plan.steps.map(step => [step.action.id, step.cycles])), { 'batch-41': 33, 'batch-42': 10 });
+});
+
+test('time-based production queues use whole-minute timers within the requested duration', () => {
+  const step = (id, seconds) => ({ action: { id }, seconds });
+  assert.deepEqual(productionTimedQueueSteps({
+    seconds: 28800, budgetSeconds: 28800, steps: [step('fish', 28800)]
+  }), [{ key: 'fish', minutes: 480 }]);
+  assert.deepEqual(productionTimedQueueSteps({
+    seconds: 660, budgetSeconds: 660, steps: [step('mine', 60), step('smelt', 600)]
+  }), [{ key: 'mine', minutes: 1 }, { key: 'smelt', minutes: 10 }]);
+  assert.deepEqual(productionTimedQueueSteps({
+    seconds: 175, budgetSeconds: 180, steps: [step('mine', 95), step('smelt', 80)]
+  }), [{ key: 'mine', minutes: 2 }, { key: 'smelt', minutes: 1 }]);
+  assert.deepEqual(productionTimedQueueSteps({
+    seconds: 60, budgetSeconds: 60, steps: [step('mine', 20), step('smelt', 40)]
+  }), []);
+  assert.deepEqual(productionTimedQueueSteps({
+    seconds: 144, budgetSeconds: 180, steps: [step('mine', 12), step('smelt', 132)]
+  }), [{ key: 'mine', minutes: 1 }, { key: 'smelt', minutes: 1 }]);
+});
+
+test('quantity buffers use the selected product rather than random byproducts or skill type', () => {
   const fish = { ...recipe, skill: 'Fishing', kind: 'Fishing', minSeconds: 3, maxSeconds: 3,
-    costs: [], rewards: [], fishChance: 1, fish: [['ore', 1, 1]], special: [] };
+    costs: [], rewards: [], fishChance: 1, fish: [['ore', 1, 1, 1, 1]], special: [['byproduct', 1, 0.1]] };
   const craft = { ...recipe, id: 'Crafting:bar', costs: [['ore', 1]], seconds: 1 };
-  const data = catalog([fish, craft]);
   const actor = { ...profile, levels: { ...profile.levels, Fishing: 10 } };
-  const [plan] = planProduction(data, actor, indexProduction(data), 'bar', 1, false, productionCycle,
-    { targetQuantity: 10, reservePercent: 20 });
-  assert.deepEqual(plan.steps.map(step => [step.cycles, step.randomOutput]), [[12, true], [10, false]]);
+  const plan = action => {
+    const data = { ...catalog([action, craft]), items: { ...items, byproduct: { price: 1 } } };
+    return planProduction(data, actor, indexProduction(data), 'bar', 1, false, productionCycle,
+      { targetQuantity: 10, reservePercent: 20 })[0];
+  };
+  assert.deepEqual(plan(fish).steps.map(step => step.cycles), [10, 10]);
+  assert.deepEqual(plan({ ...fish, fishChance: 0.5 }).steps.map(step => step.cycles), [24, 10]);
+  assert.deepEqual(plan({ ...fish, fish: [['ore', 2, 1, 1, 3]] }).steps.map(step => step.cycles), [6, 10]);
 });
 
 test('Astral Offerings use the recipe requirement tier and replace crafting products', () => {

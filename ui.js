@@ -36,7 +36,7 @@ function reportBrowserError(event) {
   if (webMode || reportedBrowserError) return;
   reportedBrowserError = true;
   const script = event?.filename?.split('/').pop();
-  const source = ['language.js', 'rank.js', 'production.js', 'action-queue.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js'].includes(script)
+  const source = ['language.js', 'rank.js', 'production.js', 'action-queue.js', 'statistics.js', 'ui.js', 'shop.js', 'quests.js', 'item-lookup.js', 'experience.js', 'xp-progress.js', 'combat.js', 'combat-model.js', 'combat-training.js', 'skill-training.js', 'preferences.js', 'choices.js'].includes(script)
     ? '/' + script + '/' + (event.lineno || 0) : '';
   fetch('diagnostics/client-error' + source, { method: 'POST', keepalive: true }).catch(() => {});
 }
@@ -471,7 +471,8 @@ function renderSaveRefreshStatus() {
   if (webMode) return webMode.renderStatus();
   const status = byId('saveRefreshStatus');
   status.hidden = byId('save').value === '';
-  status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' : '存档每 15 秒刷新');
+  status.textContent = t(autoSaveReadFailed ? '存档暂无法读取，15 秒后重试' :
+    profile?.saveFallback ? '已切回自动识别的存档，每 15 秒刷新' : '存档每 15 秒刷新');
   const notice = byId('savePickerNotice');
   notice.hidden = !savePickerError;
   notice.textContent = savePickerError ? t(savePickerError) : '';
@@ -507,7 +508,8 @@ async function loadProfile(automatic = false) {
     if (selected && data.characterId !== selected) throw new Error('角色存档已变化，请重新读取存档。');
     autoSaveReadFailed = false;
     profileReadError = undefined;
-    if (automatic && data.characterId === profile?.characterId && data.date === profile.date) {
+    if (automatic && data.characterId === profile?.characterId && data.date === profile.date &&
+      data.saveFallback === profile.saveFallback) {
       if (profileRenderErrors.size) renderProfile(true, true);
       else if (statisticsState.failed) void renderStatistics();
       return;
@@ -652,21 +654,21 @@ async function init() {
   preferences = await get('preferences').catch(() => ({}));
   uiLanguage = requestedLanguage ?? supportedLanguage(preferences.language) ?? uiLanguage;
   experienceSection = preferences.fields?.xpSection === 'combat' ? 'combat' : 'skills';
-  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page', '#production', '#statistics', '#action-queue'].includes(preferences.page)) {
+  if (!location.hash && ['#combat', '#shop', '#quests', '#experience', '#ranking-page', '#production', '#statistics', '#action-queue', '#item-lookup'].includes(preferences.page)) {
     history.replaceState(null, '', preferences.page);
   }
   initTheme();
   function showPage() {
     const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat', '#production': 'production',
-      '#statistics': 'statistics', '#action-queue': 'queue' }[location.hash] ?? 'rank';
+      '#statistics': 'statistics', '#action-queue': 'queue', '#item-lookup': 'itemLookup' }[location.hash] ?? 'rank';
     showExperienceSection();
-    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics', 'queue']) {
+    for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics', 'queue', 'itemLookup']) {
       byId(key + 'Page').hidden = key !== page;
       const link = byId(key + 'Link');
       if (key === page) {
         link.setAttribute('aria-current', 'page');
         byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益',
-          quests: '任务材料', production: '连锁产线', statistics: '数据统计', queue: '定时挂机' }[page]);
+          quests: '任务材料', production: '连锁产线', statistics: '数据统计', queue: '定时挂机', itemLookup: '物品检索' }[page]);
       } else link.removeAttribute('aria-current');
     }
     if (page === 'xp' && experienceSection === 'combat') updateCombatTraining();
@@ -735,6 +737,7 @@ async function init() {
     localizeShop();
     localizeCombat();
     localizeQuests();
+    localizeItemLookup();
     localizeProduction();
     localizeActionQueue();
     if (profile) renderProfile(true);
@@ -769,6 +772,7 @@ async function init() {
     initExperience(catalog);
     initCombat(catalog);
     initQuests(catalog.questGuide);
+    initItemLookup();
     const shopLoad = get('shop').then(shop => {
       initShop(shop, catalog.items);
       if (profile) updateShop(profile);

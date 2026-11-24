@@ -1,4 +1,5 @@
 const probability = value => Math.min(1, Math.max(0, value));
+const randomChance = chance => chance > 0 && chance < 1;
 
 function actionModifiers(action, profile, catalog, extraModifiers) {
   const stats = new Map();
@@ -859,11 +860,12 @@ function evaluateAction(action, profile, catalog, settings) {
   let cash = action.cash;
   let directSources;
   const rewards = new Map();
-  const add = (id, quantity, source, target, doubling) => {
+  const add = (id, quantity, source, { target, doubling, random = false } = {}) => {
     if (!id || !(quantity > 0)) return;
     const key = [source, id, target?.id].join(':');
     const prior = rewards.get(key);
-    rewards.set(key, { id, source, target, doubling, quantity: (prior?.quantity ?? 0) + quantity });
+    rewards.set(key, { id, source, target, doubling, quantity: (prior?.quantity ?? 0) + quantity,
+      random: random || prior?.random || false });
   };
   let success = hunting?.success ?? 1;
   let thievingCompletion = 1;
@@ -885,7 +887,7 @@ function evaluateAction(action, profile, catalog, settings) {
       for (const [id, , weight, minimum, maximum] of table) {
         let total = 0;
         for (let qty = minimum; qty <= maximum; qty++) total += Math.floor(qty * (1 + fortune / 100));
-        add(id, total / (maximum - minimum + 1) * weight * odds, source, target, doubling);
+        add(id, total / (maximum - minimum + 1) * weight * odds, source, { target, doubling });
       }
     }
     function pickpocket(target, targetStat, chance, trigger) {
@@ -901,8 +903,10 @@ function evaluateAction(action, profile, catalog, settings) {
       }
       const different = target === action ? undefined : target;
       const doubling = probability(targetStat('DoublingChance'));
-      addLoot(target.common, odds * probability(target.commonChance * (1 + targetStat('PercentCommonLootChance'))), fortune, 'common', different, doubling);
-      addLoot(target.rare, odds * probability(target.rareChance * (1 + targetStat('PercentRareLootChance'))), fortune, 'rare', different, doubling);
+      const commonChance = probability(target.commonChance * (1 + targetStat('PercentCommonLootChance')));
+      const rareChance = probability(target.rareChance * (1 + targetStat('PercentRareLootChance')));
+      addLoot(target.common, odds * commonChance, fortune, 'common', different, doubling);
+      addLoot(target.rare, odds * rareChance, fortune, 'rare', different, doubling);
       if (!different) addLoot(target.completion, thievingCompletion, fortune, 'completion');
     }
     pickpocket(action, stat, success, 1);
@@ -921,19 +925,20 @@ function evaluateAction(action, profile, catalog, settings) {
   let productChanceLeft = 1;
   for (const [index, [id, qty, chance]] of products.entries()) {
     if (action.kind === 'Mining') {
-      add(id, qty * probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id))), 'hit');
+      const odds = probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id)));
+      add(id, qty * odds, 'hit', { random: randomChance(odds) });
     } else if (action.kind === 'Woodcutting' && index > 0) {
-      add(id, (qty + Math.trunc(stat('FlatOnCutItemQuantity', id))) *
-        probability((chance + stat('FlatOnCutItemChance', id)) * (1 + stat('PercentOnCutItemChance', id))), 'cut');
+      const odds = probability((chance + stat('FlatOnCutItemChance', id)) * (1 + stat('PercentOnCutItemChance', id)));
+      add(id, (qty + Math.trunc(stat('FlatOnCutItemQuantity', id))) * odds, 'cut', { random: randomChance(odds) });
     } else if (action.kind === 'Firemaking') {
       const quantity = qty + Math.trunc(stat('FlatProductQuantity', id));
       const odds = probability(chance * (1 + stat('IncreasedProductChance', id)) + stat('FlatProductChance', id));
-      add(id, quantity * odds, 'product');
+      add(id, quantity * odds, 'product', { random: randomChance(odds) });
     } else {
       const quantity = Math.max(1, Math.trunc((qty + stat('FlatProductQuantity', id)) * (1 + stat('PercentProductQuantity', id))));
       const odds = singleProduct ? Math.min(probability(chance), productChanceLeft) : chance;
       if (singleProduct) productChanceLeft -= odds;
-      add(id, quantity * odds * success, 'product');
+      add(id, quantity * odds * success, 'product', { random: randomChance(odds) || randomChance(success) });
     }
   }
   if (action.kind === 'Firemaking' && (action.cashReward || cash)) {
@@ -943,18 +948,22 @@ function evaluateAction(action, profile, catalog, settings) {
   for (const event of action.events ?? []) {
     if (!meetsRequirements(event.requirements, profile)) continue;
     if (action.kind === 'Firemaking') {
-      add(event.item, Math.max(1, Math.trunc(event.quantity * seconds)) * event.chance, 'event');
+      add(event.item, Math.max(1, Math.trunc(event.quantity * seconds)) * event.chance,
+        'event', { random: randomChance(event.chance) });
     } else {
       const chance = probability(event.chance * (1 + stat('PercentEventChance', undefined, event.id)) +
         stat('FlatEventChance', undefined, event.id));
       const quantity = event.quantity + level * event.quantityPerLevel / 2;
-      add(event.item, quantity * chance * (1 + probability(stat('ItemDoublingChance', undefined, event.id))), 'event');
+      const doubling = probability(stat('ItemDoublingChance', undefined, event.id));
+      add(event.item, quantity * chance * (1 + doubling), 'event', { random: randomChance(chance) || randomChance(doubling) });
     }
   }
   if (action.kind === 'Woodcutting') {
+    const variableHits = wood.health > 1 && [wood.doubleDamage, wood.instant, wood.weak].some(randomChance);
     for (const [id, qty, chance] of action.hitRewards) {
-      add(id, (qty + Math.trunc(stat('FlatOnHitItemQuantity', id))) *
-        probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id))) * woodHits, 'hit');
+      const odds = probability((chance + stat('FlatOnHitItemChance', id)) * (1 + stat('PercentOnHitItemChance', id)));
+      add(id, (qty + Math.trunc(stat('FlatOnHitItemQuantity', id))) * odds * woodHits,
+        'hit', { random: randomChance(odds) || variableHits });
     }
   }
   let xpChance = hunting?.success ?? thievingCompletion;
@@ -972,11 +981,14 @@ function evaluateAction(action, profile, catalog, settings) {
     }
     mining = { chance, shatter, prospecting, breakRate };
     xpChance = breakRate * (1 + shatter);
-    add(id, (qty + Math.trunc(stat('FlatProductQuantity', id)) + probability(stat('AdditionalProductQuantityChance'))) *
-      breakRate * (1 + 2 * shatter), 'break');
-    add(action.bar, breakRate * probability(stat('BarItemChance')), 'break');
-    add(action.stone, probability(stat('StoneItemChance')), 'hit');
-    add(action.essence, probability(stat('EssenceItemChance')), 'hit');
+    const extra = probability(stat('AdditionalProductQuantityChance'));
+    add(id, (qty + Math.trunc(stat('FlatProductQuantity', id)) + extra) * breakRate * (1 + 2 * shatter),
+      'break', { random: [breakRate, shatter, extra].some(randomChance) });
+    for (const [item, odds, source] of [
+      [action.bar, breakRate * probability(stat('BarItemChance')), 'break'],
+      [action.stone, probability(stat('StoneItemChance')), 'hit'],
+      [action.essence, probability(stat('EssenceItemChance')), 'hit']
+    ]) add(item, odds, source, { random: randomChance(odds) });
   }
   let fishing;
   if (action.kind === 'Fishing') {
@@ -985,8 +997,9 @@ function evaluateAction(action, profile, catalog, settings) {
     const priority = action.fish.find(([id]) => id === profile.fishingPriorities?.[action.recipe]);
     const priorityChance = priority ? baseFishChance * priority[2] : 0;
     const junkChance = (1 - priorityChance) * (1 - baseFishChance) * (1 - probability(stat('JunkRerollChance')));
-    for (const [id, qty, chance] of action.fish) {
-      add(id, qty * (chance * (1 - priorityChance - junkChance) + (id === priority?.[0] ? priorityChance : 0)), 'fish');
+    for (const [id, qty, chance, min, max] of action.fish) {
+      const odds = chance * (1 - priorityChance - junkChance) + (id === priority?.[0] ? priorityChance : 0);
+      add(id, qty * odds, 'fish', { random: randomChance(odds) || min !== max });
     }
     fishing = { junkChance, priority: priority?.[0] };
     const conversion = stat('JunkToGP');
@@ -994,7 +1007,7 @@ function evaluateAction(action, profile, catalog, settings) {
       const price = (catalog.items[action.junk]?.price ?? 0) * conversion;
       const doubling = probability(stat('DoublingChance'));
       cash += junkChance * (Math.floor(price) * (1 - doubling) + Math.floor(2 * price) * doubling);
-    } else add(action.junk, junkChance, 'junk');
+    } else add(action.junk, junkChance, 'junk', { random: randomChance(junkChance) });
     let remaining = 1;
     const special = action.special.map(([id, qty, chance]) => [id, qty + Math.trunc(stat('FlatSpecialProductQuantity', id)),
       probability(chance * (1 + stat('IncreasedSpecialProductChance', id)) + stat('FlatSpecialProductChance', id))]);
@@ -1002,12 +1015,15 @@ function evaluateAction(action, profile, catalog, settings) {
     const rolls = 1 + (1 - special.reduce((rest, [, , chance]) => rest * (1 - chance), 1)) *
       probability(stat('SecondSpecialItemChance'));
     for (const [id, qty, chance] of special) {
-      add(id, qty * chance * remaining * rolls, 'special');
+      add(id, qty * chance * remaining * rolls, 'special', {
+        random: randomChance(chance * remaining) || randomChance(rolls - 1)
+      });
       remaining *= 1 - chance;
     }
   }
 
-  const outputMultiplier = (1 + probability(stat('DoublingChance'))) * (1 + (bonus.output ?? 0) / 100);
+  const doubleOutput = probability(stat('DoublingChance'));
+  const outputMultiplier = (1 + doubleOutput) * (1 + (bonus.output ?? 0) / 100);
   if (action.modeProducts?.length && profile.astralOfferings && canUseAstralOfferings(catalog, profile)) {
     const list = catalog.astralOfferings.rewards.filter(row => action.offeringLevel >= row.min && action.offeringLevel <= row.max);
     if (list.length) {
@@ -1032,7 +1048,7 @@ function evaluateAction(action, profile, catalog, settings) {
       const totalWeight = anvil.collectables.reduce((sum, row) => sum + row.weight, 0);
       const chance = action.steps * anvil.collectableWeight / rolls;
       for (const row of anvil.collectables) {
-        add(row.id, row.quantity * row.weight / totalWeight * chance, 'collectable');
+        add(row.id, row.quantity * row.weight / totalWeight * chance, 'collectable', { random: true });
       }
       sacrifice = { items, gp: base + extra, xpFactor: 1 + (anvil.xpMultiplier - 1) * anvil.xpWeight / rolls };
     }
@@ -1104,15 +1120,18 @@ function evaluateAction(action, profile, catalog, settings) {
     cooking.sessionSuccess = effectiveCycles / cycles;
   }
   const itemRates = settings.itemProjection ? new Map() : null;
-  const drops = [...rewards.values()].map(({ id, source, target, quantity, doubling }) => {
-    const perCycle = quantity * (['event', 'collectable', 'offering'].includes(source) ? 1 :
+  const drops = [...rewards.values()].map(({ id, source, target, quantity, doubling, random }) => {
+    const naturalAmount = ['event', 'collectable', 'offering'].includes(source);
+    const perCycle = quantity * (naturalAmount ? 1 :
       target ? (1 + doubling) * (1 + (bonus.output ?? 0) / 100) : outputMultiplier);
     const amount = perCycle * effectiveCycles;
     if (itemRates && !target) itemRates.set(id, (itemRates.get(id) ?? 0) + perCycle);
     const unitPrice = catalog.items[id]?.price ?? 0;
     const sold = settings.sell && (source !== 'special' || settings.sellSpecial !== false) &&
       !profile.keep?.includes(id) && !settings.keptDrops?.has(id);
-    return { id, source, target, quantity: amount, unitPrice, value: sold ? unitPrice * amount : 0, sold };
+    return { id, source, target, quantity: amount, unitPrice, value: sold ? unitPrice * amount : 0, sold,
+      ...(settings.production ? { random: random || (!naturalAmount && randomChance(target ? doubling : doubleOutput)) ||
+        randomChance(cooking?.success) } : {}) };
   }).sort((a, b) => b.value - a.value);
   const inputs = [...ingredients.map(([id, qty]) => ({ id, qty, unitPrice: catalog.items[id]?.price ?? 0 })),
     ...currencyIngredients.map(([id, qty]) => ({ id, qty, unitPrice: id === 'GoldPieces' ? 1 : 0, currency: true }))]
@@ -1172,7 +1191,7 @@ function evaluateAction(action, profile, catalog, settings) {
     xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
     activeXpPerHour: xpPerReward * effectiveCycles / activeHours, stockLimit, knownXpPercent, manualXpPercent, risky,
     wood, mining, cooking, thieving, fishing, brewing, craftingSteps, agility, hunting, preservation, consumption, sacrifice,
-    planXp, doubleOutput: probability(stat('DoublingChance')), flatXp: stat('FlatXPGained'), xpPerCycle
+    planXp, doubleOutput, flatXp: stat('FlatXPGained'), xpPerCycle
   };
 }
 

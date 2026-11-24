@@ -27,6 +27,7 @@ const artisanSkills = ['Smithing', 'Crafting', 'Fletching', 'Runecrafting', 'Bea
 const places = {
   Woodcutting: 'WoodcuttingRecipeCategory', Mining: 'MiningRecipeCategory', Fishing: 'FishingLocation',
   Hunting: 'HuntingLocation', Farming: 'RecipeCategory', Ranching: 'RanchingCategory', Agility: 'AgilityLocation',
+  Thieving: 'ThievingLocation',
   Combat: 'CombatAreaCategory', Shop: 'ShopSubcategory', Quests: 'QuestCategory'
 };
 const actionGoals = {
@@ -37,14 +38,18 @@ const actionGoals = {
   CompleteDungeon: ['Dungeon', 'clear'], AgilityCompleteCourse: ['Course', 'clear']
 };
 
+function productAvailable(entry) {
+  return entry.Item && entry.Chance !== 0 && entry.Weight !== 0 && entry.Quantity !== 0 && entry.MaxQuantity !== 0;
+}
+
 function makeQuestGuide(data) {
   const { Objects: objects, EntityConfig: config } = data;
   const indexes = new Map();
   const names = Object.create(null);
   const actions = new Map();
   const sources = new Map();
+  const uses = new Map();
   const observations = new Map();
-  const needed = new Set();
   const get = (type, id) => {
     if (!indexes.has(type)) indexes.set(type, new Map((objects[type] ?? []).map(row => [row.Id, row])));
     return indexes.get(type).get(localId(id));
@@ -52,6 +57,7 @@ function makeQuestGuide(data) {
   const registered = skill => config['MelvorBase:' + skill] ?? {};
   const records = (skill, list, type) => (registered(skill)[list] ?? [])
     .map(({ Id }) => get(type, Id)).filter(Boolean);
+  const offerings = records('Beastcrafting', 'RewardModes', 'AstralOfferingsRewardMode')[0];
   const nameRef = (type, row) => {
     if (!row?.Id) return undefined;
     const ref = type + ':' + row.Id;
@@ -81,11 +87,31 @@ function makeQuestGuide(data) {
   }
   function addProducts(products, where) {
     for (const entry of products ?? []) {
+      if (!productAvailable(entry)) continue;
       const id = localId(entry.Item);
-      if (!id || entry.Chance === 0 || entry.Weight === 0 || entry.Quantity === 0 || entry.MaxQuantity === 0) continue;
       if (!sources.has(id)) sources.set(id, new Map());
       const key = [where.skill, where.target, where.area, where.variant, where.kind, where.upgrade].join(':');
-      sources.get(id).set(key, where);
+      const min = entry.Quantity ?? entry.MinQuantity;
+      const max = entry.Quantity ?? entry.MaxQuantity ?? min;
+      const previous = sources.get(id).get(key);
+      sources.get(id).set(key, { ...where,
+        min: Number.isFinite(min) ? Math.min(previous?.min ?? min, min) : previous?.min,
+        max: Number.isFinite(max) ? Math.max(previous?.max ?? max, max) : previous?.max });
+    }
+  }
+  function addUses(entries, where, kind, outputs = []) {
+    for (const entry of entries ?? []) {
+      const item = localId(entry.Item);
+      if (!get('Item', item)) continue;
+      if (!uses.has(item)) uses.set(item, []);
+      const { skill, target, area, step } = where;
+      const quantity = entry.Quantity;
+      const list = uses.get(item);
+      const previous = list.find(row => row.skill === skill && row.target === target &&
+        row.area === area && row.kind === kind && row.step === step);
+      if (previous) {
+        if (Number.isFinite(quantity)) previous.quantity = (previous.quantity ?? 0) + quantity;
+      } else list.push({ skill, target, area, kind, step, quantity, outputs });
     }
   }
   function addDrops(drops, where) {
@@ -93,13 +119,18 @@ function makeQuestGuide(data) {
     for (const table of drops?.ItemTables ?? []) if (table.Chance > 0) addProducts(table.Table, where);
   }
   function addAction(skill, type, row) {
-    const areaId = row.Location ?? row.Category;
+    const areaId = row.Location ?? row.Category ?? row.Book;
     const areaType = type === 'GrainMillRecipe' ? 'FarmingMillCategory' : places[skill] ?? 'RecipeCategory';
     const area = get(areaType, areaId);
     const actionId = (type === 'GrainMillRecipe' ? 'Farming:Mill:' : skill + ':') + row.Id;
     const where = { ...source(skill, type, row, 'action', nameRef(areaType, area), [area]), actionId };
     actions.set(actionId, [where]);
-    addProducts([...(row.Products ?? []), ...(row.Product ? [row.Product] : [])], where);
+    const products = [...(row.Products ?? []), ...(row.Product ? [row.Product] : [])].filter(productAvailable);
+    addProducts(products, where);
+    addUses(row.Ingredients?.Items, where, 'ingredient', products.map(product => localId(product.Item)));
+    addUses(row.EntryCost?.Items, where, 'entry');
+    addUses(row.AutomationCosts?.Items, where, 'automation');
+    addUses(row.PurchaseCosts?.Items, where, 'purchaseCost');
     if (skill === 'Woodcutting' || skill === 'Mining') {
       addProducts([...(row.RandomProductsPerHit ?? []), ...(row.RandomProductsPerCut ?? [])], { ...where, kind: 'drop' });
       addProducts([row.BarItem, row.StoneItem, row.EssenceItem].filter(Boolean).map(Item => ({ Item })),
@@ -107,12 +138,16 @@ function makeQuestGuide(data) {
     } else if (skill === 'Fishing') {
       addProducts(row.RandomProducts, where);
       addProducts(row.SpecialProducts, { ...where, kind: 'drop' });
-      if (row.JunkItem) addProducts([{ Item: row.JunkItem }], { ...where, kind: 'drop' });
+      if (row.JunkItem && !(row.FishChance >= 1)) {
+        addProducts([{ Item: row.JunkItem }], { ...where, kind: 'drop' });
+      }
     } else if (skill === 'Thieving') {
       if (row.BaseCommonLootChance > 0) addProducts(row.CommonDropTable, { ...where, kind: 'drop' });
       if (row.BaseRareLootChance > 0) addProducts(row.RareDropTable, { ...where, kind: 'drop' });
       addProducts(row.CompletionDropTable, { ...where, kind: 'drop' });
     } else if (skill === 'Hunting') {
+      addUses([{ Item: row.PreferredBait }], where, 'bait');
+      addUses([{ Item: row.Tool }], where, 'tool');
       addProducts(row.SurveyingProducts, { ...where, kind: 'drop' });
       for (const entry of row.RareSpecies ?? []) {
         const variant = get('HuntingAnimalSpecies', entry.Species);
@@ -120,6 +155,18 @@ function makeQuestGuide(data) {
         addProducts(variant.ExtraProducts, { ...where, ...source(skill, type, row, 'drop', where.area, [area, variant]),
           variant: nameRef('HuntingAnimalSpecies', variant) });
       }
+    } else if (skill === 'Ranching') {
+      addUses(row.Eats, where, 'animalFood');
+    } else if (skill === 'Agility') {
+      addProducts(row.CompletionRewards?.Items, { ...where, kind: 'clear' });
+      for (const reward of row.TimedCompletionRewards ?? []) {
+        if (reward.Chance > 0) addProducts(reward.Items, { ...where, kind: 'timedReward' });
+      }
+    } else if (skill === 'Beastcrafting' && offerings?.AllowedCategories?.includes(row.Category)) {
+      const level = where.level;
+      addProducts(offerings.Rewards.filter(reward => level >= reward.MinLevel && level <= reward.MaxLevel), {
+        ...where, kind: 'offering', requirementGroups: [...where.requirementGroups, normalizeRequirements(offerings.UnlockRequirements)]
+      });
     } else if (skill === 'Astrology') {
       for (const event of row.Events ?? []) {
         if (!observations.has(localId(event))) observations.set(localId(event), []);
@@ -132,19 +179,49 @@ function makeQuestGuide(data) {
     for (const row of records(skill, actionLists[skill] ?? 'Recipes', type)) addAction(skill, type, row);
   }
   for (const row of records('Farming', 'GrainMillRecipes', 'GrainMillRecipe')) addAction('Farming', 'GrainMillRecipe', row);
+  const extraCosts = [
+    ['Firemaking', 'Bonfires', 'FiremakingBonfire', 'bonfire'],
+    ['Ranching', 'EnclosureUpgrades', 'RanchingEnclosureUpgrade', 'upgrade'],
+    ['Ranching', 'Enclosures', 'RanchingEnclosure', 'entry']
+  ];
+  for (const [skill, list, type, kind] of extraCosts) for (const row of records(skill, list, type)) {
+    addUses(row.Costs?.Items, source(skill, type, row), kind);
+  }
+  for (const row of records('Combat', 'Spells', 'MagicSpell')) {
+    addUses(row.RuneCosts, source('Magic', 'MagicSpell', row, undefined, label('SpellBook', row.Book)), 'spell');
+  }
+  for (const row of records('Combat', 'Imbuements', 'Imbuement')) {
+    addUses(row.RuneCosts, source('Magic', 'Imbuement', row), 'imbuement');
+  }
+  for (const row of records('Firemaking', 'Events', 'FiremakingEvent')) {
+    addProducts(row.Chance > 0 && row.Reward ? [row.Reward] : [], source('Firemaking', 'FiremakingEvent', row, 'event'));
+  }
+  for (const row of objects.AstrologyItemEvent ?? []) {
+    if (!(row.Chance > 0)) continue;
+    const event = source('Astrology', 'AstrologyItemEvent', row, 'event');
+    const matches = observations.get(row.Id) ?? [];
+    const global = (registered('Astrology').GlobalEvents ?? []).some(entry => localId(entry.Id) === row.Id);
+    for (const location of global ? [event] : matches) {
+      addProducts([{ Item: row.Item }], global ? event : { ...location, kind: 'event', variant: event.target,
+        requirementGroups: [...location.requirementGroups, ...event.requirementGroups] });
+    }
+  }
   for (const row of objects.ItemUpgrade ?? []) {
     const item = get('Item', row.UpgradedItem);
     if (!item || !(row.QuantityPerUpgrade > 0)) continue;
     const costs = ingredients({ Ingredients: row.Costs });
-    addProducts([{ Item: row.UpgradedItem, Quantity: row.QuantityPerUpgrade }], {
+    const where = {
       ...source(null, 'Item', { ...item, Requirements: row.Requirements, DisplayRequirements: row.DisplayRequirements }, 'upgrade'),
       ingredients: costs, upgrade: row.Id
-    });
+    };
+    addProducts([{ Item: row.UpgradedItem, Quantity: row.QuantityPerUpgrade }], where);
+    addUses(row.Costs?.Items, where, 'upgrade', [item.Id]);
   }
   for (const type of ['CombatArea', 'Dungeon']) {
     for (const area of records('Combat', 'Areas', type)) {
       const category = label('CombatAreaCategory', area.Category);
       const where = source('Combat', type, area, 'clear', category);
+      addUses(area.EntryCost?.Items, where, 'entry');
       if (type === 'Dungeon') actions.set('Dungeon:' + area.Id, [where]);
       addDrops(area.Rewards, where);
       for (const enemyId of (area.Enemies ?? []).flatMap(entry =>
@@ -160,26 +237,70 @@ function makeQuestGuide(data) {
     }
   }
   for (const row of records('Shop', 'Purchases', 'ShopPurchase')) {
-    addProducts(row.Provides?.Items, source('Shop', 'ShopPurchase', row, 'purchase', label('ShopSubcategory', row.Subcategory)));
+    const where = source('Shop', 'ShopPurchase', row, 'purchase', label('ShopSubcategory', row.Subcategory));
+    addProducts(row.Provides?.Items, { ...where, ingredients: ingredients({ Ingredients: row.Costs }) });
+    addUses(row.Costs?.Items, where, 'purchaseCost', (row.Provides?.Items ?? []).map(row => localId(row.Item)));
   }
   const questRows = records('Quests', 'Quests', 'Quest');
   for (const row of questRows) {
     addProducts(row.Rewards?.Items, source('Quests', 'Quest', row, 'reward', label('QuestCategory', row.Category)));
   }
-  const opened = new Set();
-  const containers = (objects.Item ?? []).filter(row => row.Capabilities?.['MelvorBase:Openable']);
-  let changed;
-  do {
-    changed = false;
-    for (const row of containers) {
-      if (opened.has(row.Id) || !sources.has(row.Id)) continue;
-      const openable = row.Capabilities['MelvorBase:Openable'];
-      opened.add(row.Id);
-      changed = true;
-      addProducts([...(openable.AlwaysDrops ?? []), ...(openable.DropTable ?? [])],
-        { ...source(null, 'Item', row, 'open'), container: row.Id });
+  const items = objects.Item ?? [];
+  const toolsByType = new Map();
+  for (const [entity, entry] of Object.entries(config)) for (const { Id } of entry.ToolbeltSlots ?? []) {
+    const slot = get('ToolbeltSlot', Id);
+    const type = localId(slot?.FitsType);
+    if (!type) continue;
+    if (!toolsByType.has(type)) toolsByType.set(type, []);
+    toolsByType.get(type).push({
+      skill: localId(entity),
+      target: label('ToolbeltSlotType', type) ?? nameRef('ToolbeltSlot', slot)
+    });
+  }
+  const equipmentByType = new Map();
+  for (const slot of records('Combat', 'EquipmentSlots', 'EquipmentSlot')) {
+    const type = localId(slot.FitsType);
+    if (!type) continue;
+    if (!equipmentByType.has(type)) equipmentByType.set(type, []);
+    equipmentByType.get(type).push({ skill: 'Combat', target: nameRef('EquipmentSlot', slot) });
+  }
+  const ammunition = new Map();
+  for (const item of items) {
+    const type = item.Capabilities?.['MelvorBase:Equipment']?.AmmoType;
+    if (!type) continue;
+    if (!ammunition.has(type)) ammunition.set(type, []);
+    ammunition.get(type).push({ Item: item.Id });
+  }
+  for (const row of items) {
+    const caps = row.Capabilities ?? {};
+    const openable = caps['MelvorBase:Openable'];
+    const where = source(null, 'Item', row);
+    const ammoType = caps['MelvorBase:Weapon']?.RequiredAmmoType;
+    if (ammunition.has(ammoType)) addUses(ammunition.get(ammoType), { ...where, skill: 'Combat' }, 'ammo');
+    if (openable) {
+      const contents = [...(openable.AlwaysDrops ?? []), ...(openable.DropTable ?? [])];
+      addProducts(contents, { ...source(null, 'Item', row, 'open', undefined, [openable]), container: row.Id });
+      addUses([{ Item: row.Id }], where, 'container', contents.filter(productAvailable).map(entry => localId(entry.Item)));
     }
-  } while (changed);
+    const useItem = [{ Item: row.Id }];
+    const tool = caps['MelvorBase:Toolbelt'];
+    if (tool) {
+      const type = localId(tool.FitsInSlot);
+      const slots = toolsByType.get(type) ?? [{ target: label('ToolbeltSlotType', type) ?? where.target }];
+      for (const slot of slots) addUses(useItem, slot, 'toolbelt');
+    }
+    const equipment = caps['MelvorBase:Equipment'];
+    if (equipment) {
+      for (const slot of equipmentByType.get(localId(equipment.Type)) ?? [where]) addUses(useItem, slot, 'equipment');
+    }
+    const trap = caps['MelvorBase:HuntingTrap'];
+    if (trap) addUses(useItem, { skill: 'Hunting', target: label('HuntingTrapType', trap.TrapType) }, 'trap');
+    for (const [capability, kind, skill] of [
+      ['Food', 'food'], ['Bury', 'bury'], ['Compost', 'compost', 'Farming'], ['FishingBait', 'bait', 'Fishing']
+    ]) {
+      if (caps['MelvorBase:' + capability]) addUses(useItem, { skill }, kind);
+    }
+  }
 
   function goal({ Type, Data }) {
     if (!Data) return null;
@@ -187,7 +308,6 @@ function makeQuestGuide(data) {
     const skill = localId(Data.Component?.Entity);
     if (type === 'ActionGainItem' && Data.Item) {
       const item = localId(Data.Item);
-      needed.add(item);
       return { kind: 'collect', item, skill, quantity: Data.MaxProgress };
     }
     if (type === 'AstrologyObserveEvent') {
@@ -219,7 +339,6 @@ function makeQuestGuide(data) {
         }),
         ...(task.Costs?.Items ?? []).map(({ Item, Quantity }) => {
           const item = localId(Item);
-          needed.add(item);
           return { kind: 'submit', item, quantity: Quantity };
         }),
         ...(task.Costs?.Currencies ?? []).map(({ Currency, Quantity }) =>
@@ -227,24 +346,22 @@ function makeQuestGuide(data) {
       ] }))
     }))
   }));
-  for (const purchase of objects.ShopPurchase ?? []) {
-    for (const { Item } of purchase.Costs?.Items ?? []) if (Item) needed.add(localId(Item));
-  }
-  for (const quest of quests) for (const step of quest.steps) for (const objective of step.tasks.flatMap(task => task.objectives)) {
-    for (const where of objective.locations ?? []) for (const { item } of where.ingredients) needed.add(item);
-  }
-  for (const item of needed) {
-    for (const where of sources.get(item)?.values() ?? []) {
-      for (const input of where.ingredients) needed.add(input.item);
-      if (where.container) needed.add(where.container);
+  for (const quest of quests) for (const [index, step] of quest.steps.entries()) {
+    for (const objective of step.tasks.flatMap(task => task.objectives)) {
+      if (!objective.item) continue;
+      addUses([{ Item: objective.item, Quantity: objective.quantity }], {
+        skill: 'Quests', target: label('Quest', quest.id), area: quest.category, step: index + 1
+      }, objective.kind);
     }
   }
-  const itemSources = Object.fromEntries([...needed].map(item => [item, [...(sources.get(item)?.values() ?? [])]]));
+  const itemSources = Object.fromEntries([...sources].map(([item, locations]) => [item, [...locations.values()]]));
+  const itemUses = Object.fromEntries(uses);
   const visibleNames = new Set(quests.map(quest => quest.category));
   const collectNames = ({ target, area, variant }) => {
     for (const ref of [target, area, variant]) if (ref) visibleNames.add(ref);
   };
   for (const where of Object.values(itemSources).flat()) collectNames(where);
+  for (const where of Object.values(itemUses).flat()) collectNames(where);
   const queueSources = Object.fromEntries(actions);
   for (const where of Object.values(queueSources).flat()) collectNames(where);
   for (const quest of quests) for (const step of quest.steps) for (const objective of step.tasks.flatMap(task => task.objectives)) {
@@ -252,7 +369,7 @@ function makeQuestGuide(data) {
     (objective.locations ?? []).forEach(collectNames);
   }
   return { quests, names: Object.fromEntries([...visibleNames].filter(ref => names[ref]).map(ref => [ref, names[ref]])),
-    sources: itemSources, queueSources };
+    sources: itemSources, itemUses, queueSources };
 }
 
 module.exports = { makeQuestGuide, normalizeRequirements };

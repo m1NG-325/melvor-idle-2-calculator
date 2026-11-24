@@ -3,7 +3,7 @@ const preferenceFields = [
   'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
   'productionTarget', 'productionMode', 'productionHours', 'productionQuantity', 'productionReserve',
   'productionStock', 'productionSellByproducts', 'productionComparisonItems',
-  'statisticsSearch',
+  'statisticsSearch', 'itemLookupSort',
   'xpIgnoreStock',
   'queueDraft', 'queueLibrary', 'queueName', 'queueRepeat', 'queueSkill', 'queueCategory', 'queueQuestActions',
   'combatTrainingSkill',

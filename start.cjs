@@ -146,6 +146,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     'choices.js': ['text/javascript', 'choices.js'],
     'shop.js': ['text/javascript', 'shop.js'],
     'quests.js': ['text/javascript', 'quests.js'],
+    'item-lookup.js': ['text/javascript', 'item-lookup.js'],
     'ui.js': ['text/javascript', 'ui.js'],
     'language.js': ['text/javascript', 'language.js'],
     'vendor/opencc/cn2t.js': ['text/javascript', 'vendor/opencc/cn2t.js']
@@ -197,6 +198,29 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   let saves = [];
   let savesByCharacter = new Map();
   let savePickerOpen = false;
+  function readCharacter(response, characterId, read) {
+    const manual = selectedSave?.characterId === characterId ? selectedSave.file : undefined;
+    const automatic = savesByCharacter.get(characterId);
+    const files = [...new Set([manual, automatic].filter(Boolean))];
+    let failure;
+    for (const file of files) {
+      let data;
+      try {
+        data = read(file);
+      } catch (error) {
+        failure = error;
+        continue;
+      }
+      if (data.characterId !== characterId) continue;
+      if (read === loadSaveProfile) {
+        if (manual && file !== manual) data.saveFallback = true;
+        log.record('profile_loaded');
+      }
+      return json(response, data);
+    }
+    if (failure) throw failure;
+    return json(response, { error: '角色存档已变化，请重新读取存档。' }, files.length ? 409 : 404);
+  }
   const server = http.createServer((request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -250,7 +274,6 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       if (route === 'saves/forget') {
         try {
           fs.rmSync(selectedSaveFile, { force: true });
-          if (selectedSave) savesByCharacter.delete(selectedSave.characterId);
           selectedSave = undefined;
           return json(response, {});
         } catch {
@@ -300,7 +323,7 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       response.writeHead(204).end();
       return;
     }
-    const browserError = /^diagnostics\/client-error(?:\/(language|rank|production|action-queue|statistics|ui|shop|quests|experience|xp-progress|combat|combat-model|combat-training|skill-training|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
+    const browserError = /^diagnostics\/client-error(?:\/(language|rank|production|action-queue|statistics|ui|shop|quests|item-lookup|experience|xp-progress|combat|combat-model|combat-training|skill-training|preferences|choices)\.js\/(\d{1,6}))?$/.exec(route);
     if (browserError && request.method === 'POST') {
       if (loggedClientErrors++ < 20) log.record('browser_error', {
         script: browserError[1], line: browserError[2] && Number(browserError[2])
@@ -331,13 +354,13 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
           log.record('save_scan_failed');
         }
         savesByCharacter = new Map();
-        if (selectedSave) savesByCharacter.set(selectedSave.characterId, selectedSave.file);
         log.record('saves_scanned', { count: saves.length });
         const discovered = saves.map((file, index) => {
           try {
             const { name, characterId } = readHeader(fs.readFileSync(file));
             if (savesByCharacter.has(characterId)) return null;
             savesByCharacter.set(characterId, file);
+            if (selectedSave?.characterId === characterId) return null;
             return { index, name, characterId };
           } catch {
             log.record('save_header_unreadable');
@@ -351,23 +374,16 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
         return json(response, discovered);
       }
       const statisticsCharacter = /^statistics\/character\/([a-f0-9]{32})$/.exec(route)?.[1];
-      if (statisticsCharacter) {
-        const file = savesByCharacter.get(statisticsCharacter);
-        if (!file) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 404);
-        const data = readCharacterStatistics(file);
-        if (data.characterId !== statisticsCharacter) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
-        return json(response, data);
-      }
+      if (statisticsCharacter) return readCharacter(response, statisticsCharacter, readCharacterStatistics);
       const character = /^profile\/character\/([a-f0-9]{32})$/.exec(route)?.[1];
+      if (character) return readCharacter(response, character, loadSaveProfile);
       const legacyProfile = /^profile\/(\d+)$/.exec(route)?.[1];
-      const saveFile = character ? savesByCharacter.get(character) : saves[Number(legacyProfile)];
+      const saveFile = saves[Number(legacyProfile)];
       if (saveFile) {
         const data = loadSaveProfile(saveFile);
-        if (character && data.characterId !== character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 409);
         log.record('profile_loaded');
         return json(response, data);
       }
-      if (character) return json(response, { error: '角色存档已变化，请重新读取存档。' }, 404);
       if (Object.hasOwn(assets, route)) {
         const [type, file] = assets[route];
         const body = fs.readFileSync(path.join(__dirname, file));
