@@ -23,6 +23,29 @@ const regions = entries => Buffer.concat([int(entries.length), ...entries.flatMa
 const dictionary = (...entries) => Buffer.concat([int(entries.length), ...entries.flatMap(([key, value]) =>
   [double(value), string(key)])]);
 
+test('bank tabs with and without an icon keep subsequent stacks and locked items aligned', () => {
+  const { parseProfile } = require('../save-parser.cjs');
+  for (const version of [31, 32]) {
+    const tab = (id, icon) => Buffer.concat([
+      Buffer.alloc(14), int(1), int(7), Buffer.from([0, 0]), string(id),
+      string('Materials'), int(1), Buffer.from([1, 0]), string('MelvorBase:Ore'),
+      ...(version === 32 ? [Buffer.from([Number(Boolean(icon))]), ...(icon ? [string(icon)] : [])] : [])
+    ]);
+    const bank = Buffer.concat([int(0), int(2), tab('MelvorBase:CopperOre', 'MelvorBase:Tinderbox'),
+      tab('MelvorBase:CoalOre'), int(1), string('MelvorBase:CoalOre')]);
+    const data = Buffer.concat([
+      int(version), Buffer.alloc(16), string('Test'), Buffer.alloc(34),
+      regions([
+        ['MelvorBase:Bank', regions([['Inventory', bank]])],
+        ['MelvorBase:Woodcutting', regions([['Experience', double(0)]])]
+      ])
+    ]);
+    const { stock, keep } = parseProfile(data, '', { Woodcutting: true });
+    assert.deepEqual({ ...stock }, { CopperOre: 7, CoalOre: 7 });
+    assert.deepEqual(keep, ['CoalOre']);
+  }
+});
+
 test('a two-handed weapon slot reference does not become a second equipped item', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'melvor-two-handed-'));
   const file = path.join(directory, 'character.sav');

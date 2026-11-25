@@ -660,7 +660,7 @@ async function init() {
   initTheme();
   function showPage() {
     const page = { '#shop': 'shop', '#quests': 'quests', '#experience': 'xp', '#combat': 'combat', '#production': 'production',
-      '#statistics': 'statistics', '#action-queue': 'queue', '#item-lookup': 'itemLookup' }[location.hash] ?? 'rank';
+      '#statistics': 'statistics', '#action-queue': 'queue', '#item-lookup': 'itemLookup' }[location.hash.split('/')[0]] ?? 'rank';
     showExperienceSection();
     for (const key of ['rank', 'xp', 'shop', 'combat', 'quests', 'production', 'statistics', 'queue', 'itemLookup']) {
       byId(key + 'Page').hidden = key !== page;
@@ -673,6 +673,7 @@ async function init() {
     }
     if (page === 'xp' && experienceSection === 'combat') updateCombatTraining();
     if (page === 'xp' && experienceSection === 'skills') renderExperience();
+    if (page === 'itemLookup') syncItemLookupHash();
   }
   for (const [id, section] of [['xpSkillsButton', 'skills'], ['xpCombatButton', 'combat']]) {
     byId(id).addEventListener('click', () => {

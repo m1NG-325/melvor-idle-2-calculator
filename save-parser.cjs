@@ -2,7 +2,7 @@ const { localId } = require('./game-ids.cjs');
 const { levelFor } = require('./xp-progress.js');
 
 const textDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
-const SAVE_VERSION = 31;
+const BANK_TAB_ICON_VERSION = 32;
 const MAX_SAVE_BYTES = 32 * 1024 * 1024;
 
 class SaveCursor {
@@ -57,7 +57,8 @@ class SaveCursor {
 
 function parseHeader(data) {
   const reader = new SaveCursor(data);
-  if (reader.int() !== SAVE_VERSION) {
+  const version = reader.int();
+  if (version !== 31 && version !== BANK_TAB_ICON_VERSION) {
     const error = new Error('此存档版本暂不支持。请先用当前游戏保存一次。');
     error.code = 'UNSUPPORTED_SAVE_VERSION';
     throw error;
@@ -71,10 +72,10 @@ function parseHeader(data) {
   const gp = Number(reader.long());
   const slayerCoins = Number(reader.long());
   reader.byte();
-  return { name, characterId, totalLevel, currencies: { GoldPieces: gp, SlayerCoins: slayerCoins }, reader };
+  return { version, name, characterId, totalLevel, currencies: { GoldPieces: gp, SlayerCoins: slayerCoins }, reader };
 }
 
-function readBank(reader) {
+function readBank(reader, version) {
   const stock = Object.create(null);
   const keep = new Set();
   reader.int();
@@ -96,6 +97,7 @@ function readBank(reader) {
       reader.take(2);
       reader.string();
     }
+    if (version >= BANK_TAB_ICON_VERSION && reader.byte()) reader.string();
   }
   const locked = reader.count();
   for (let i = 0; i < locked; i++) keep.add(localId(reader.string()));
@@ -547,7 +549,7 @@ function readBonfire(reader) {
 }
 
 function parseProfile(data, date, skills, shopSkills = [], mastery = {}, constellations = [], onWarning = () => {}, items = {}) {
-  const { reader, ...header } = parseHeader(data);
+  const { reader, version, ...header } = parseHeader(data);
   const entities = reader.regions();
   const componentMaps = new Map();
   const componentsFor = id => {
@@ -657,7 +659,7 @@ function parseProfile(data, date, skills, shopSkills = [], mastery = {}, constel
     }
   }
   return {
-    ...header, levels, skillXp, equipped, skillToolbelt, cookingCharges, ...readBank(bank), ...readShopPurchases(shopReader),
+    ...header, levels, skillXp, equipped, skillToolbelt, cookingCharges, ...readBank(bank, version), ...readShopPurchases(shopReader),
     dungeonCompletions, slayerCompletions, slayerTasks, astrologyNodes, fishingPriorities, recipeStatistics, unlockedPets, ranks, combat,
     questProgress, bonfire,
     xpSkillState,

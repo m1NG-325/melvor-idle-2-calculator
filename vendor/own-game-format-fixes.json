@@ -1,0 +1,8 @@
+{
+  "{Value:+0.##%;-#.##%} Trap success chance in {LocComponent.Entity.DisplayName}": "{Value:+0.##%;-#.##%} Trap success chance in {LocalContext.Component.Entity.DisplayName}",
+  "Use [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] [img height=1.25em]ItemIcon}[/img] [b]{ItemName}[/b] in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]": "Use [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] [img height=1.25em]{ItemIcon}[/img] [b]{ItemName}[/b] in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]",
+  "Use [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] [img height=1.25em]AmmoTypeIcon}[/img] [b]{AmmoTypeName}[/b] in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]": "Use [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] [img height=1.25em]{AmmoTypeIcon}[/img] [b]{AmmoTypeName}[/b] in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]",
+  "Study [img height=1.25em]ConstellationIcon}[/img] [b]{ConstellationName}[/b] [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] times": "Study [img height=1.25em]{ConstellationIcon}[/img] [b]{ConstellationName}[/b] [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] times",
+  "Study [img height=1.25em]ConstellationIcon}[/img] [b]{ConstellationName}[/b] [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] times in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]": "Study [img height=1.25em]{ConstellationIcon}[/img] [b]{ConstellationName}[/b] [b][color=#{ProgressColor}]{Current:N0} / {Max:N0}[/color][/b] times in [img height=1.25em]{EntityIcon}[/img] [b]{EntityName}[/b]",
+  "{0:N0}-{0:N0} Damage": "{0:N0}-{1:N0} Damage"
+}

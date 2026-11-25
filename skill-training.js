@@ -248,7 +248,7 @@ function showSkillTrainingPlan(container, status, result, message, ignoreStock) 
     metrics.append(metric);
   }
   const summary = create('div', undefined, 'skill-training-summary');
-  summary.append(create('strong', gameName(row.action), 'skill-training-action'), metrics);
+  summary.append(create('strong', experienceActionName(row.action), 'skill-training-action'), metrics);
   const children = [summary];
   const gear = create('dl', undefined, 'combat-training-gear');
   for (const id of new Set([...loadout, ...current].map(item => item.slot))) {

@@ -119,7 +119,7 @@ function savePreferences() {
   clearTimeout(preferencesTimer);
   if (!preferencesReady) return Promise.resolve(false);
   const settings = JSON.stringify({
-    version: 1, language: uiLanguage, page: location.hash, theme,
+    version: 1, language: uiLanguage, page: location.hash.split('/')[0], theme,
     character: profile?.characterId ?? (profileReadError || byId('save').value ? preferences.character : 'manual'),
     fields: { xpSkill: xpView.skill, xpSection: experienceSection, statisticsScope: statisticsScope(),
       ...Object.fromEntries(preferenceFields.filter(id => byId(id)).map(id => {

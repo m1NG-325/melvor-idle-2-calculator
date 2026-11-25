@@ -168,7 +168,7 @@ function appendQueuePlan(steps) {
 }
 
 const queueBusy = () => ['connecting', 'switching', 'running', 'paused', 'cancelling',
-  'character-required', 'character-mismatch', 'busy'].includes(actionQueue.status.state);
+  'character-required', 'character-loading', 'character-mismatch', 'busy'].includes(actionQueue.status.state);
 function queueCanRun(step) {
   const target = actionQueue.targets.get(step.key);
   // The game checks unlocks at the start of each step, after earlier steps may have met them.
@@ -271,14 +271,7 @@ function queueStepFromForm(key = selectedQueueTarget(), prefix = 'queue') {
   return step;
 }
 
-function showQueueRun() {
-  const { state, step, remaining, current, target } = actionQueue.status;
-  const available = !webMode && Boolean(actionQueue.status.skills?.length);
-  byId('queueNative').hidden = !available;
-  byId('queueWebNote').hidden = !webMode;
-  byId('queueBridgeUnavailable').hidden = webMode || available || state !== 'unavailable';
-  byId('queueCancel').hidden = !queueBusy();
-  byId('queueCancel').disabled = queueCommandPending || state === 'cancelling';
+function queueRunMessage({ state, step, remaining, current, target }) {
   const messages = {
     connecting: '正在启动并连接游戏。',
     switching: '正在启动第 {step} 步。',
@@ -288,10 +281,15 @@ function showQueueRun() {
     'cancel-unconfirmed': '队列已终止，未能确认游戏行动是否已停止。请查看游戏。',
     'action-in-use': '此行动已在游戏中运行。请先在游戏中停止，再启动队列。',
     'character-required': '请在工具启动的游戏里打开所选角色。',
+    'character-loading': '游戏正在载入所选角色。',
+    'character-not-found': '找不到所选角色的本地存档。请在游戏中导入后重试。',
+    'character-load-failed': '游戏未能载入所选存档，请检查游戏中的提示。',
+    'character-timeout': '等待角色载入超时，队列已停止。',
+    'save-copy-mismatch': '游戏载入的存档与手动选择的文件不一致。请导入选中的文件后重试。',
     'character-mismatch': '游戏中打开的角色与工具所选角色不同。',
     'game-already-open': '请先关闭已打开的游戏，再由工具启动并连接。',
     'bridge-unavailable': '游戏连接未响应。请检查游戏是否已启动。',
-    'bridge-build': '此游戏版本尚不支持直接挂机。',
+    'bridge-build': '游戏运行文件与定时挂机组件不兼容，队列未启动。',
     'bridge-override-conflict': '当前汉化或模组加载器使用了独立的游戏入口。定时挂机已停止，游戏文件和汉化设置保持原样。',
     'direct-link-failed': '无法链接已安装的游戏。请检查游戏目录权限；跨盘符号链接可能需要 Windows 开发人员模式。',
     'action-changed': '游戏中的行动已停止或被切换，队列已结束。',
@@ -307,10 +305,21 @@ function showQueueRun() {
     busy: '已经有队列正在运行。',
     'invalid-queue': '队列包含无法直接执行的步骤。'
   };
-  queueStatus(messages[state], { step, seconds: Math.max(0, Math.ceil((remaining ?? 0) / 1000)) });
+  const message = messages[state] ? t(messages[state], { step, seconds: Math.max(0, Math.ceil((remaining ?? 0) / 1000)) }) : '';
   if (current != null && target != null) {
-    byId('queueStatus').append(' · ' + t('目标进度 {current} / {target}', { current, target }));
+    return message + ' · ' + t('目标进度 {current} / {target}', { current, target });
   }
+  return message;
+}
+
+function showQueueRun() {
+  const available = !webMode && Boolean(actionQueue.status.skills?.length);
+  byId('queueNative').hidden = !available;
+  byId('queueWebNote').hidden = !webMode;
+  byId('queueBridgeUnavailable').hidden = webMode || available || actionQueue.status.state !== 'unavailable';
+  byId('queueCancel').hidden = !queueBusy();
+  byId('queueCancel').disabled = queueCommandPending || actionQueue.status.state === 'cancelling';
+  byId('queueStatus').textContent = queueRunMessage(actionQueue.status);
   updateQueueTotal();
 }
 

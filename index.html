@@ -87,6 +87,44 @@
       <p id="sacrificialAnvilStatus" class="status muted" hidden></p>
       <label class="check" id="astralOfferingsSettings" hidden><input id="astralOfferings" type="checkbox">按星界献祭计算</label>
     </div>
+    <div id="desktopAccountControls">
+      <button id="desktopAccount" type="button" hidden>账号 Beta（未完善）</button>
+      <dialog class="supply-picker desktop-account-dialog" id="desktopAccountDialog" aria-labelledby="desktopAccountTitle">
+        <div class="theme-heading">
+          <h2 id="desktopAccountTitle">账号 Beta（未完善）</h2>
+          <button id="desktopAccountClose" type="button">关闭</button>
+        </div>
+        <p class="muted">与网页版共用账号。注册和登录需要联网。</p>
+        <form id="desktopCredentials" method="post">
+          <label>用户名<input name="username" maxlength="254" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+          <label>密码<input name="password" type="password" maxlength="128" autocomplete="current-password" required></label>
+          <p class="muted">注册时密码至少 8 个字符。</p>
+          <div class="inputs"><button type="submit" value="login">登录</button><button type="submit" value="register">注册</button></div>
+          <p class="muted">旧账号可先用原邮箱登录，再设置用户名。</p>
+        </form>
+        <div id="desktopSignedIn" class="theme-heading" hidden>
+          <span id="desktopAccountName"></span><button id="desktopSignOut" type="button">退出登录</button>
+        </div>
+        <form id="desktopClaimUsername" method="post" hidden>
+          <label>用户名<input name="username" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+          <button type="submit">设置用户名</button>
+        </form>
+        <section id="desktopCharacterSync" class="remote-queue-controls" hidden>
+          <h3>角色数据同步</h3>
+          <p class="muted">开启后，当前角色的等级、装备、库存和统计等数据会同步到账号。原始存档保留在本机。</p>
+          <button id="desktopSyncToggle" type="button">开启角色同步</button>
+          <p id="desktopSyncState" class="muted" role="status"></p>
+        </section>
+        <section id="desktopRemoteQueue" class="remote-queue-controls" hidden>
+          <h3>远程挂机</h3>
+          <p class="muted">开启后，同一账号可在网页控制本机的挂机队列。请先在本机选择角色并保存队列。</p>
+          <label>电脑名称<input id="desktopRemoteName" maxlength="40" placeholder="例如：家里的电脑"></label>
+          <button id="desktopRemoteToggle" type="button">开启远程控制</button>
+          <p id="desktopRemoteState" class="muted" role="status"></p>
+        </section>
+        <p id="desktopAccountStatus" class="muted" role="status"></p>
+      </dialog>
+    </div>
     <div class="save-controls">
       <label>角色存档<select id="save"></select></label>
       <button id="reload" type="button">重新读取存档</button>
@@ -96,6 +134,17 @@
     <p id="savePickerNotice" class="status muted" role="status" hidden></p>
     <p id="saveRefreshStatus" class="status muted" hidden>存档每 15 秒刷新</p>
     <div class="runtime-controls">
+      <button id="gameLocalization" type="button" hidden>一键汉化</button>
+      <dialog class="supply-picker" id="gameLocalizationDialog" aria-labelledby="gameLocalizationTitle">
+        <div class="theme-heading">
+          <h2 id="gameLocalizationTitle">一键汉化</h2>
+          <button id="gameLocalizationClose" type="button">关闭</button>
+        </div>
+        <p class="muted">退出游戏后安装。重新打开游戏即可使用汉化，游戏语言保持 English。</p>
+        <p class="muted">如需恢复原版，请在 Steam 中验证游戏文件完整性。</p>
+        <button id="gameLocalizationInstall" type="button">安装自制汉化</button>
+        <p id="gameLocalizationStatus" class="muted" role="status"></p>
+      </dialog>
       <p id="profileNotice" class="muted" role="status" hidden></p>
       <p id="dataNotice" class="muted" role="status" hidden></p>
       <p id="settingsNotice" class="muted" role="status" hidden></p>
@@ -390,7 +439,7 @@
   <div id="itemLookupPage" hidden>
     <h1>物品检索</h1>
     <section class="panel item-lookup-toolbar">
-      <label>搜索物品<input id="itemLookupSearch" type="search" placeholder="输入中文名、英文名或物品编号" autocomplete="off"></label>
+      <label>搜索物品<input id="itemLookupSearch" type="search" placeholder="输入物品名称、编号或效果" autocomplete="off"></label>
       <label>排序方式<select id="itemLookupSort">
         <option value="name">名称顺序</option>
         <option value="price-desc">售价从高到低</option>
@@ -478,13 +527,13 @@
       </dialog>
       <p id="queueTotal" class="muted" hidden></p>
       <p id="queueWebNote" class="muted" hidden>网页版可保存计划，执行队列请使用 Windows 桌面版。</p>
-      <p id="queueBridgeUnavailable" class="muted" hidden>此游戏构建暂未接入直接挂机。</p>
+      <p id="queueBridgeUnavailable" class="muted" hidden>无法使用直接挂机，请检查工具安装并重新打开工具。</p>
       <div id="queueNative" hidden>
         <div class="inputs">
           <button type="button" id="queueStart" disabled>开始挂机</button>
           <button type="button" id="queueCancel" hidden>取消队列</button>
         </div>
-        <p class="muted">开始挂机后，工具会打开已安装的游戏。请在游戏中载入对应角色。</p>
+        <p class="muted">开始挂机后，工具会打开游戏并自动载入所选角色。如果游戏找不到该存档，请在游戏内载入。</p>
       </div>
       <p id="queueStatus" class="status muted" role="status" hidden></p>
       <input id="queueDraft" type="hidden" value="[]">
@@ -597,6 +646,8 @@
 <script src="item-lookup.js"></script>
 <script src="preferences.js"></script>
 <script src="choices.js"></script>
+<script src="desktop-account.js"></script>
+<script src="game-localization.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

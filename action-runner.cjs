@@ -2,12 +2,13 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { randomUUID } = require('node:crypto');
 const { directQueueSkills } = require('./game-bridge.cjs');
 
-function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 } = {}) {
+function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500,
+  characterTimeout = 90000, now = () => performance.now() } = {}) {
   let controller;
   let status = { state: 'idle', skills: directQueueSkills };
   const setStatus = (state, detail = {}) => { status = { state, skills: directQueueSkills, ...detail }; };
 
-  async function run(steps, character, characterId, repeat, signal) {
+  async function run(steps, character, characterId, saveHash, repeat, signal) {
     setStatus('connecting');
     await bridge.connect(signal);
     let ranStep;
@@ -18,12 +19,18 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
         const lease = randomUUID();
         let mayOwnAction = false;
         let started = false;
+        let characterDeadline;
         try {
           setStatus('switching', { step: stepNumber });
           while (true) {
             signal.throwIfAborted();
+            if (characterDeadline !== undefined && now() >= characterDeadline) {
+              setStatus('character-timeout', { step: stepNumber });
+              return;
+            }
             mayOwnAction = true;
-            const result = await bridge.send('start', { ...step, character, characterId, lease }, signal);
+            const result = await bridge.send('start', { ...step, character, characterId, lease,
+              ...(saveHash && { saveHash }) }, signal);
             if (result === 'started') {
               started = ranStep = true;
               break;
@@ -31,8 +38,15 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
             mayOwnAction = false;
             if (result === 'completed') break;
             setStatus(result, { step: stepNumber });
-            if (!['character-required', 'character-mismatch', 'paused'].includes(result)) return;
-            await wait(2000, undefined, { signal });
+            if (!['character-required', 'character-loading', 'character-mismatch', 'paused'].includes(result)) return;
+            if (result === 'paused') {
+              characterDeadline = undefined;
+              await wait(2000, undefined, { signal });
+            } else {
+              characterDeadline ??= now() + characterTimeout;
+              const remaining = characterDeadline - now();
+              await wait(Math.max(0, Math.min(2000, remaining)), undefined, { signal });
+            }
           }
           if (!started) continue;
           setStatus('running', { step: stepNumber, remaining: step.minutes ? step.minutes * 60000 : -1 });
@@ -68,7 +82,8 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
 
   return {
     status: () => status,
-    start(steps, character, repeat, characterId) {
+    active: () => Boolean(controller),
+    start(steps, character, repeat, characterId, saveHash) {
       if (controller) throw new Error('busy');
       if (typeof character !== 'string' || !character.trim() || character.length > 120 ||
           !Array.isArray(steps) || !steps.length || steps.length > 200) {
@@ -97,7 +112,7 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500 }
       });
       controller = new AbortController();
       const { signal } = controller;
-      void run(actions, character, characterId, repeat === true, signal).catch(error => {
+      void run(actions, character, characterId, saveHash, repeat === true, signal).catch(error => {
         const known = ['game-already-open', 'bridge-unavailable', 'bridge-build', 'bridge-override-conflict', 'direct-link-failed'];
         if (status.state !== 'cancel-unconfirmed') {
           setStatus(signal.aborted ? 'cancelled' : known.includes(error.message) ? error.message : 'failed');

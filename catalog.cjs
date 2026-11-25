@@ -152,6 +152,141 @@ function skillChargeModel(tool) {
   if (modifiers.length) return { modifiers, events };
 }
 
+function makeItemDetails(data) {
+  const objects = data.Objects;
+  const labels = Object.create(null);
+  const records = new Map(Object.entries(objects).map(([type, rows]) =>
+    [type, new Map(rows.map(row => [row.Id, row]))]));
+  const byId = new Map();
+  for (const [type, rows] of records) for (const [id, row] of rows) {
+    if (!row.DisplayName) continue;
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push({ type, row });
+  }
+  function label(key, name) {
+    if (!name) return undefined;
+    labels[key] ??= { name };
+    return key;
+  }
+  function reference(type, id, field = 'DisplayName', plural = false) {
+    id = localId(id);
+    if (!id || id === 'Placeholder') return undefined;
+    const candidates = byId.get(id) ?? [];
+    const typeAlias = { TrapType: 'HuntingTrapType', Constellation: 'AstrologyConstellation',
+      Rune: 'Item', Location: 'FishingLocation', Spell: 'MagicSpell' }[type] ?? type;
+    const row = records.get(typeAlias)?.get(id) ?? candidates.find(entry =>
+      entry.type.endsWith(typeAlias))?.row ?? (candidates.length === 1 ? candidates[0].row : undefined);
+    if (type === 'Skill' || type === 'CombatLevel' && XP_SKILLS[id]) {
+      return label('skill:' + id, id === 'Combat' ? '战斗' : XP_SKILLS[id]);
+    }
+    const name = row?.[field];
+    return label([type, id, field, plural].join(':'), plural ? name?.Plural ?? name : name);
+  }
+  const contextKeys = context => Object.keys(context ?? {}).filter(key => context[key] != null).sort();
+  const templateKey = (stat, local = [], fromType = '', from = []) =>
+    [stat.StatsType, stat.Name, [...local].sort().join(','), fromType ?? '', [...from].sort().join(',')].join('|');
+  const templates = new Map((data.ComponentModifierDescriptions ?? []).map(({ Key, TemplateString }) =>
+    [templateKey(Key.Stat, Key.LocalContextObjectCombination, Key.FromContextType,
+      Key.FromContextObjectCombination), TemplateString]));
+  const globalTemplates = new Map((data.GlobalModifierDescriptions ?? []).map(row => [row.StatGroup, row]));
+  const decreasesHelp = /Interval|Cost$|DamageTaken|EatsQuantity|ObstacleDifficulty|^FlatDifficulty$/;
+  function effect(row, group) {
+    if (!Number.isFinite(row.Value) || row.Value === 0) return [];
+    const local = row.LocalContext;
+    const from = row.FromContext?.Data;
+    const stat = row.Stat?.Name ?? row.StatGroup;
+    if (!stat) return [];
+    const key = row.Stat && templateKey(row.Stat, contextKeys(local), row.FromContext?.Type, contextKeys(from));
+    const global = globalTemplates.get(stat);
+    const template = global?.TemplateString ?? templates.get(key);
+    const args = {};
+    for (const [token] of template?.matchAll(/\{(?:LocalContext|FromContext|LocComponent)\.[^{}]+\}/g) ?? []) {
+      const [scope, type, field, extra] = token.slice(1, -1).split('.');
+      const context = scope === 'FromContext' ? from : local;
+      args[token] = type === 'Component' || scope === 'LocComponent'
+        ? reference('Skill', context?.Component?.Entity)
+        : reference(type, context?.[type], field, extra === 'Plural');
+    }
+    const skills = [...new Set([local, from].map(context => localId(context?.Component?.Entity))
+      .filter(id => XP_SKILLS[id] || id === 'Combat'))];
+    const unit = template?.includes('intervaltime') || template?.includes('numbertime(ms)') ? 'seconds' :
+      template?.includes('%') || /^Percent/.test(stat) ? 'percent' : undefined;
+    const negative = global?.Kind === 'Negative' || decreasesHelp.test(stat);
+    return [{ group, stat, template: label('modifier:' + (key || stat), template), args, skills, value: row.Value, unit,
+      statLabel: reference('CombatStat', local?.CombatStat), polarity: (negative ? -row.Value : row.Value) > 0 ? 'buff' : 'debuff',
+      globalSkillEffect: ['GlobalPercentXpGained', 'GlobalFlatXpGained', 'GlobalPercentActionInterval', 'GlobalFlatActionInterval'].includes(stat),
+      conditional: !!(row.Condition || row.Scaling || row.FromContext) }];
+  }
+  function combatEffect(row, group) {
+    const modifier = row.Modifier ?? row;
+    const id = localId(modifier.Effect?.Data?.Effect);
+    const definition = records.get(localId(modifier.Effect?.Type) + 'Effect')?.get(id);
+    const name = label('effect:' + id, definition?.DisplayName ?? (byId.get(id) ?? [])
+      .find(entry => entry.type.endsWith('Effect'))?.row.DisplayName);
+    if (!name || row.Chance === 0) return [];
+    return [{ group, name, chance: row.Chance, target: modifier.AppliesTo === 'Target',
+      polarity: (definition?.IsPositive ?? modifier.AppliesTo !== 'Target') ? 'buff' : 'debuff',
+      conditional: !!(row.Condition || row.Scaling) }];
+  }
+  function modifierRows(bonuses, group) {
+    return [...(bonuses?.Global ?? []), ...(bonuses?.Component ?? [])].flatMap(row => effect(row, group))
+      .concat((bonuses?.CombatEffect ?? []).flatMap(row => combatEffect(row, group)));
+  }
+  const sets = new Map();
+  for (const set of objects.EquipmentSetBonus ?? []) {
+    for (const item of set.Items ?? []) {
+      const id = localId(item);
+      if (!sets.has(id)) sets.set(id, []);
+      for (const bonus of set.Bonuses ?? []) sets.get(id).push(...modifierRows(bonus.Modifiers,
+        { type: 'set', name: label('set:' + set.Id, set.DisplayName), count: bonus.ItemCount }));
+    }
+  }
+  const details = Object.fromEntries(objects.Item.flatMap(item => {
+    const get = capability => item.Capabilities?.['MelvorBase:' + capability];
+    const equipment = get('Equipment');
+    const tool = get('Toolbelt');
+    const food = get('Food');
+    const trap = get('HuntingTrap');
+    const stats = (equipment?.Stats?.Stats ?? []).flatMap(({ Stat, Value }) => {
+      if (!Number.isFinite(Value) || Value === 0) return [];
+      const id = localId(Stat);
+      const stat = records.get('CombatStat')?.get(id);
+      return [{ name: reference('CombatStat', id), stat: id, value: Value,
+        unit: id === 'AttackInterval' ? 'seconds' : stat?.IsPercent ? 'percent' : undefined,
+        polarity: id === 'AttackInterval' ? undefined : Value > 0 ? 'buff' : 'debuff' }];
+    });
+    for (const [rows, rating] of [[equipment?.Stats?.PowerRatings, 'power'], [equipment?.Stats?.ProtectionRatings, 'protection']]) {
+      for (const { DamageType, Value } of rows ?? []) if (Number.isFinite(Value) && Value !== 0) {
+        stats.push({ rating, name: reference('DamageType', DamageType), value: Value, polarity: Value > 0 ? 'buff' : 'debuff' });
+      }
+    }
+    const attacks = (equipment?.Attacks ?? []).flatMap(({ Attack, Chance }) => {
+      const attack = records.get('Attack')?.get(localId(Attack));
+      if (!attack || !(Chance > 0)) return [];
+      const group = { type: 'attack', name: reference('Attack', Attack), chance: Chance };
+      const effects = [...(attack.PreHitEffects ?? []), ...(attack.OnHitEffects ?? [])]
+        .flatMap(row => combatEffect(row, group));
+      return effects.length ? effects : [{ group, name: group.name }];
+    });
+    const effects = [
+      ...modifierRows(equipment?.Bonuses, { type: 'equipment' }), ...modifierRows(tool?.Bonuses, { type: 'tool' }),
+      ...modifierRows(food?.Bonuses?.Modifiers ?? food?.Bonuses, { type: 'food' }),
+      ...modifierRows(get('FishingBait')?.Bonuses, { type: 'bait' }),
+      ...modifierRows({ Component: get('Compost')?.CompostModifierTemplate }, { type: 'compost' }),
+      ...modifierRows({ Component: trap?.TrapBonuses }, { type: 'trap' }),
+      ...modifierRows({ Component: trap?.FailBonuses }, { type: 'trapFail' }),
+      ...attacks, ...(sets.get(item.Id) ?? [])
+    ];
+    const detail = { description: label('description:' + item.Id, item.Description),
+      slot: reference('EquipmentType', equipment?.Type) ?? reference('ToolbeltSlotType', tool?.FitsInSlot),
+      occupies: (equipment?.OccupiesSlots ?? []).map(slot => reference('EquipmentType', slot)),
+      requirements: requirements(equipment?.Requirements ?? tool?.Requirements),
+      healing: food?.BaseHealing, stats, effects };
+    return detail.description || detail.slot || detail.healing || stats.length || effects.length ? [[item.Id, detail]] : [];
+  }));
+  return { itemDetails: details, itemDetailLabels: labels };
+}
+
 function makeCatalog(data) {
   const objects = data.Objects;
   const items = Object.fromEntries(objects.Item.map(item => {
@@ -613,7 +748,7 @@ function makeCatalog(data) {
       ...(action.events ?? []).map(row => row.item), ...(action.modeProducts ?? []), action.ore?.[0],
       action.bar, action.stone, action.essence, action.junk].filter(id => items[id]))];
   }
-  return { items, actions, itemUpgrades, ...makeCombatTargets(data, items, combatAttacks), combatSlots, combatSpells, combatSupplies, combatModel, statisticSubjects, skillToolSlots, skillShop,
+  return { items, actions, itemUpgrades, ...makeItemDetails(data), ...makeCombatTargets(data, items, combatAttacks), combatSlots, combatSpells, combatSupplies, combatModel, statisticSubjects, skillToolSlots, skillShop,
     skills: SKILLS, xpActions, xpSkills: XP_SKILLS, xpSkillData, shopModifiers, astrologyModifiers,
     petModifiers, equipmentSets, mastery, bonfires, sacrificialAnvil, astralOfferings, questGuide: makeQuestGuide(data) };
 }

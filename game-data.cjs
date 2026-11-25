@@ -30,7 +30,7 @@ function findSteamGame() {
   throw new Error('未找到 Melvor Idle 2。请将含 Melvor2.exe 的游戏文件夹拖到 Start-GP-Calculator.cmd 上。');
 }
 
-function readPackedFile(executable, resourcePath, { onChecksumMismatch } = {}) {
+function withGamePack(executable, usePack) {
   const handle = fs.openSync(executable, 'r');
   const size = fs.fstatSync(handle).size;
   function read(offset, length) {
@@ -51,13 +51,16 @@ function readPackedFile(executable, resourcePath, { onChecksumMismatch } = {}) {
       throw new Error('无法识别 Melvor2.exe');
     }
     const sectionCount = pe.readUInt16LE(6);
-    const sections = read(peOffset + 24 + pe.readUInt16LE(20), sectionCount * 40);
+    const sectionTable = peOffset + 24 + pe.readUInt16LE(20);
+    const sections = read(sectionTable, sectionCount * 40);
     let packOffset;
     let packEnd;
+    let packSection;
     for (let entry = 0; entry < sections.length; entry += 40) {
       if (sections.toString('ascii', entry, entry + 8).replace(/\0+$/, '') === 'pck') {
         packOffset = sections.readUInt32LE(entry + 20);
         packEnd = packOffset + sections.readUInt32LE(entry + 16);
+        packSection = sectionTable + entry;
         break;
       }
     }
@@ -72,6 +75,7 @@ function readPackedFile(executable, resourcePath, { onChecksumMismatch } = {}) {
         directoryLength < 4 || directoryLength > 32 * 1024 * 1024) throw new Error('游戏数据目录无效');
     const directory = read(directoryStart, directoryLength);
     const count = directory.readUInt32LE(0);
+    const entries = new Map();
     let cursor = 4;
     for (let entry = 0; entry < count; entry++) {
       const nameLength = directory.readUInt32LE(cursor);
@@ -79,29 +83,44 @@ function readPackedFile(executable, resourcePath, { onChecksumMismatch } = {}) {
       if (nameLength < 1 || cursor + nameLength + 36 > directory.length) throw new Error('游戏数据目录不完整');
       const name = directory.toString('utf8', cursor, cursor + nameLength).replace(/\0+$/, '');
       cursor += nameLength;
-      if (name.replace(/^res:\/\//, '') === resourcePath) {
-        const offset = dataStart + u64(directory, cursor);
-        const length = u64(directory, cursor + 8);
-        if (offset < dataStart || offset + length > directoryStart || length > 64 * 1024 * 1024 ||
-            directory.readUInt32LE(cursor + 32) !== 0) throw new Error('物品与配方数据区无效');
-        const bytes = read(offset, length);
-        const digest = crypto.createHash('md5').update(bytes).digest();
-        const matched = digest.equals(directory.subarray(cursor + 16, cursor + 32));
-        if (!matched && !onChecksumMismatch) throw new Error('物品与配方数据校验失败');
-        if (!matched) onChecksumMismatch();
-        return bytes;
-      }
+      entries.set(name.replace(/^res:\/\//, ''), cursor);
       cursor += 36;
     }
-    throw new Error('数据包内找不到 ' + path.posix.basename(resourcePath));
+    return usePack({ read, size, peOffset, packOffset, packEnd, packSection, dataStart, directoryStart, directory,
+      directoryEntriesEnd: cursor, entries });
   } finally {
     fs.closeSync(handle);
   }
 }
 
+function readPackedFile(executable, resourcePath, options) {
+  return withGamePack(executable, pack => readPackEntry(pack, resourcePath, options));
+}
+
+function readPackEntry({ read, entries, directory, dataStart, directoryStart }, resourcePath, { onChecksumMismatch } = {}) {
+  const entry = entries.get(resourcePath);
+  if (entry === undefined) throw new Error('数据包内找不到 ' + path.posix.basename(resourcePath));
+  const offset = dataStart + Number(directory.readBigUInt64LE(entry));
+  const length = Number(directory.readBigUInt64LE(entry + 8));
+  if (offset < dataStart || offset + length > directoryStart || length > 64 * 1024 * 1024 ||
+      directory.readUInt32LE(entry + 32) !== 0) throw new Error('物品与配方数据区无效');
+  const bytes = read(offset, length);
+  const digest = crypto.createHash('md5').update(bytes).digest();
+  const matched = digest.equals(directory.subarray(entry + 16, entry + 32));
+  if (!matched && !onChecksumMismatch) throw new Error('物品与配方数据校验失败');
+  if (!matched) onChecksumMismatch();
+  return bytes;
+}
+
+const basePackagePath = 'Data/Packages/MelvorBase.json';
+const originalBasePackagePath = 'CalculatorOriginal/MelvorBase.json';
+function readBasePackageBytes(executable, options) {
+  return withGamePack(executable, pack => readPackEntry(pack,
+    pack.entries.has(originalBasePackagePath) ? originalBasePackagePath : basePackagePath, options));
+}
+
 function readPackage(executable, options) {
-  const bytes = readPackedFile(executable, 'Data/Packages/MelvorBase.json', options);
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(readBasePackageBytes(executable, options)));
 }
 
 function getBuild(gameDirectory) {
@@ -111,4 +130,7 @@ function getBuild(gameDirectory) {
     : '未知';
 }
 
-module.exports = { findSteamGame, GOLD, getBuild, localId, readPackage, readPackedFile };
+module.exports = {
+  findSteamGame, GOLD, getBuild, localId, readPackage, readBasePackageBytes, readPackedFile, withGamePack, basePackagePath,
+  originalBasePackagePath
+};

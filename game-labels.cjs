@@ -22,8 +22,8 @@ function originalPackage(game, build) {
 const hasChinese = text => /\p{Script=Han}/u.test(text ?? '');
 const displayText = value => typeof value === 'string' ? value : value?.Singular ?? value?.Message;
 
-function readChineseNames(executable) {
-  const source = readPackedFile(executable, 'Locale/zh_CN.po').toString('utf8');
+function readChineseNames(executable, locale = 'zh_CN') {
+  const source = readPackedFile(executable, 'Locale/' + locale + '.po').toString('utf8');
   const names = new Map();
   for (const entry of source.split(/\r?\n\s*\r?\n/)) {
     if (/^#,.*\bfuzzy\b/m.test(entry)) continue;
@@ -171,6 +171,32 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
   for (const quest of catalog.questGuide.quests) quest.names = label(quest.name, otherQuests.get(quest.id), quest.id);
   for (const [ref, record] of Object.entries(catalog.questGuide.names)) {
     record.names = label(record.name, otherGuide?.names[ref]?.name, ref.slice(ref.indexOf(':') + 1));
+  }
+  const englishByChinese = new Map();
+  const addReverseLabels = names => {
+    for (const [english, { name }] of names ?? []) {
+      if (!hasChinese(english) && !englishByChinese.has(name)) englishByChinese.set(name, english);
+    }
+  };
+  addReverseLabels(chineseNames);
+  if (chinese && !alternatives.catalog) {
+    try {
+      addReverseLabels(readChineseNames(executable, 'en_GB'));
+    } catch {
+      // Some builds have only one locale in the package.
+    }
+  }
+  for (const [id, record] of Object.entries(catalog.itemDetailLabels ?? {})) {
+    const name = displayText(record.name);
+    const alternateName = displayText(alternatives.catalog?.itemDetailLabels?.[id]?.name);
+    const other = alternateName ?? englishByChinese.get(name);
+    if (id.startsWith('skill:')) record.names = { zh: name, en: id.slice(6) };
+    else {
+      const neutral = id.startsWith('modifier:') && !/[\p{L}]/u.test(name?.replace(/\{[^{}]*\}/g, '') ?? '');
+      record.names = hasChinese(name) ? { zh: name, en: other && !hasChinese(other) ? other : englishByChinese.get(name) } :
+        { en: other && !hasChinese(other) ? other : name,
+          zh: neutral ? name : hasChinese(other) ? other : officialChinese(name) };
+    }
   }
 }
 

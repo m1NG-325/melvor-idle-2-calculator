@@ -1,19 +1,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { randomBytes } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { execFile, spawn } = require('node:child_process');
 const { Script } = require('node:vm');
 const { promisify } = require('node:util');
 const { findSteamGame, getBuild, readPackage } = require('./game-data.cjs');
+const { createGameLocalization } = require('./game-localization.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
 const { addGameLabels } = require('./game-labels.cjs');
-const { findSaves, readHeader, readProfile, readCharacterStatistics } = require('./saves.cjs');
+const { findSaves, readHeader, readProfile, readCharacterStatistics, readCharacterSnapshot } = require('./saves.cjs');
 const { VERSION, RELEASES_URL, checkForUpdate, createLog } = require('./runtime.cjs');
 const { installUpdate, installedUpdates } = require('./updater.cjs');
 const { createActionRunner } = require('./action-runner.cjs');
-const { bridgeBuild, createGameBridge, directQueueSkills, hasBridgeAssembly } = require('./game-bridge.cjs');
+const { createGameBridge, directQueueSkills, hasBridgeAssembly } = require('./game-bridge.cjs');
+const { createDesktopAccount, readAccountJson } = require('./desktop-account.cjs');
+const { createRemoteQueue } = require('./remote-queue.cjs');
+const { createCharacterSync } = require('./character-sync.cjs');
 const preferencesLimit = 512 * 1024;
 const invalidSelectedSave = '无法读取选中的存档。请选择有效的 Melvor Idle 2 存档。';
 
@@ -65,7 +69,7 @@ function readPreferences(preferencesFile) {
   }
 }
 
-async function writePreferences(request, response, json, preferencesFile, log) {
+async function writePreferences(request, response, json, preferencesFile, log, onSaved) {
   if (request.headers['content-type'] !== 'application/json') return json(response, {}, 415);
   try {
     const chunks = [];
@@ -78,6 +82,7 @@ async function writePreferences(request, response, json, preferencesFile, log) {
     const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (data?.version !== 1) return json(response, {}, 400);
     writeLocalJson(preferencesFile, data);
+    onSaved(data);
     response.writeHead(204).end();
   } catch {
     log.record('settings_write_failed');
@@ -88,6 +93,7 @@ async function writePreferences(request, response, json, preferencesFile, log) {
 async function launch({ root = __dirname, args = process.argv.slice(2), updateNotice, pickSave = chooseSaveFile } = {}) {
   const log = createLog(root);
   const preferencesFile = path.join(root, 'calculator-settings.json');
+  let queuePreferencesData = readPreferences(preferencesFile);
   const selectedSaveFile = path.join(root, 'calculator-selected-save.json');
   let selectedSave;
   try {
@@ -99,6 +105,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   const source = path.resolve(args.find(arg => !arg.startsWith('--')) ?? findSteamGame());
   const standalone = fs.statSync(source).isFile();
   const game = standalone ? path.dirname(source) : source;
+  const gameLocalization = process.platform === 'win32' && !standalone
+    ? createGameLocalization(path.join(game, 'Melvor2.exe'), log) : undefined;
   let checksumMismatch = false;
   let catalog;
   let shop;
@@ -125,8 +133,9 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   catalog.checksumMismatch = checksumMismatch;
   addGameLabels(game, catalog.build, catalog, shop, !standalone, standalone ? source : path.join(game, 'Melvor2.exe'));
   const constellations = catalog.xpActions.filter(action => action.kind === 'Astrology');
-  const loadSaveProfile = file => readProfile(file, catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
-    (component, skill) => log.record('save_component_unreadable', { component, skill }), catalog.items);
+  const saveOptions = [catalog.xpSkills, shop.levelSkills, catalog.mastery, constellations,
+    (component, skill) => log.record('save_component_unreadable', { component, skill }), catalog.items];
+  const loadSaveProfile = file => readProfile(file, ...saveOptions);
   log.record('game_data_loaded', { build: /^\d+$/.test(catalog.build) ? catalog.build : 'unknown',
     gpActions: catalog.actions.length, xpActions: catalog.xpActions.length, source: catalog.dataSource, checksumMismatch });
   const assets = {
@@ -147,6 +156,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
     'shop.js': ['text/javascript', 'shop.js'],
     'quests.js': ['text/javascript', 'quests.js'],
     'item-lookup.js': ['text/javascript', 'item-lookup.js'],
+    'desktop-account.js': ['text/javascript', 'desktop-account.js'],
+    'game-localization.js': ['text/javascript', 'game-localization.js'],
     'ui.js': ['text/javascript', 'ui.js'],
     'language.js': ['text/javascript', 'language.js'],
     'vendor/opencc/cn2t.js': ['text/javascript', 'vendor/opencc/cn2t.js']
@@ -163,11 +174,52 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   const directTargets = new Map(catalog.xpActions.filter(action => directQueueSkills.includes(action.skill))
     .map(action => [action.id, { skill: action.skill, target: 'MelvorBase:' + action.recipe, items: action.outputItems,
       materials: action.costs?.map(([id]) => id), crafting: ['Artisan', 'Cooking', 'Firemaking'].includes(action.kind) }]));
-  const gameBridge = process.platform === 'win32' && [bridgeBuild, '未知'].includes(catalog.build) &&
+  const gameBridge = process.platform === 'win32' &&
     (!standalone || path.basename(source).toLowerCase() === 'melvor2.exe') &&
     hasBridgeAssembly()
-    ? createGameBridge(game, catalog.build) : undefined;
+    ? createGameBridge(game) : undefined;
   const actionRunner = gameBridge && createActionRunner(gameBridge, directTargets);
+  const desktopAccount = createDesktopAccount(globalThis.fetch, () => {
+    remoteQueue.disable();
+    characterSync.disable();
+  });
+  const characterSync = createCharacterSync({
+    accountCookie: desktopAccount.cookie,
+    readSnapshot(previous) {
+      const id = queuePreferencesData.character;
+      if (!/^[a-f0-9]{32}$/.test(id ?? '')) return;
+      let failure;
+      for (const file of characterFiles(id)) {
+        try {
+          const stat = fs.statSync(file);
+          const stamp = JSON.stringify([id, file, stat.mtimeMs, stat.size]);
+          if (stamp === previous) return { stamp };
+          const snapshot = readCharacterSnapshot(file, ...saveOptions);
+          if (snapshot.profile.characterId === id) return { stamp, snapshot };
+        } catch (error) { failure = error; }
+      }
+      if (failure) throw failure;
+    }
+  });
+  const remoteQueue = createRemoteQueue({
+    runner: actionRunner, accountCookie: desktopAccount.cookie,
+    installationFile: path.join(root, 'calculator-remote-installation.txt'),
+    readQueues() {
+      const id = queuePreferencesData.character;
+      const characterId = /^[a-f0-9]{32}$/.test(id ?? '') && characterFiles(id).length ? id : undefined;
+      let library;
+      try { library = JSON.parse(queuePreferencesData.fields?.queueLibrary); } catch { /* A queue has not been saved. */ }
+      const queues = (Array.isArray(library?.queues) ? library.queues : []).slice(0, 16).filter(queue =>
+        typeof queue?.id === 'string' && /^[\w-]{1,48}$/.test(queue.id) && Array.isArray(queue.steps) &&
+        queue.steps.length > 0 && queue.steps.length <= 200 && queue.steps.every(step =>
+          directTargets.has(step?.key) && Number.isInteger(step.minutes) && step.minutes >= 0 && step.minutes <= 1440))
+        .map(queue => ({ id: queue.id, name: typeof queue.name === 'string' ? queue.name.slice(0, 40) : '',
+          steps: queue.steps, repeat: queue.repeat === true }));
+      return { characterId, queues, manualSave: characterId && selectedSave?.characterId === characterId
+        ? selectedSave.file : undefined };
+    },
+    readCharacter: queueCharacter
+  });
   let update = { state: 'checking' };
   let installation;
   let loggedClientErrors = 0;
@@ -183,6 +235,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       const replacement = require(path.join(directory, 'start.cjs'));
       return replacement.launch({ root, args: [source, '--no-open'], updateNotice: 'installed' });
     }, report).then(next => {
+      remoteQueue.disable();
+      characterSync.disable();
       log.record('update_installed', { latest: update.latest });
       report({ phase: 'ready', url: next.url });
       setTimeout(() => {
@@ -198,10 +252,25 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
   let saves = [];
   let savesByCharacter = new Map();
   let savePickerOpen = false;
+  function characterFiles(characterId) {
+    return [...new Set([selectedSave?.characterId === characterId ? selectedSave.file : undefined,
+      savesByCharacter.get(characterId)].filter(Boolean))];
+  }
+  function queueCharacter(characterId) {
+    const manual = selectedSave?.characterId === characterId ? selectedSave.file : undefined;
+    for (const file of manual ? [manual] : characterFiles(characterId)) {
+      try {
+        const bytes = fs.readFileSync(file);
+        const header = readHeader(bytes);
+        if (header.characterId === characterId) return {
+          name: header.name, saveHash: manual ? createHash('sha256').update(bytes).digest('hex') : undefined
+        };
+      } catch { /* The selected save may have moved. */ }
+    }
+  }
   function readCharacter(response, characterId, read) {
     const manual = selectedSave?.characterId === characterId ? selectedSave.file : undefined;
-    const automatic = savesByCharacter.get(characterId);
-    const files = [...new Set([manual, automatic].filter(Boolean))];
+    const files = characterFiles(characterId);
     let failure;
     for (const file of files) {
       let data;
@@ -233,6 +302,61 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       return;
     }
     const route = pathname.slice(prefix.length);
+    if (route.startsWith('game-localization/')) {
+      if (!gameLocalization) return json(response, { state: 'unavailable' });
+      if (request.headers['x-calculator-game-localization'] !== '1' ||
+          (request.method !== 'GET' || request.headers.origin) && request.headers.origin !== 'http://' + host) {
+        return json(response, {}, 403);
+      }
+      const action = route.slice('game-localization/'.length);
+      if (request.method === 'GET' && action === 'status') return json(response, { state: gameLocalization.status() });
+      if (request.method === 'POST' && action === 'install') {
+        request.resume();
+        void gameLocalization.install().then(result => json(response, result));
+        return;
+      }
+      return json(response, {}, 404);
+    }
+    if (route.startsWith('character-sync/')) {
+      if (request.headers['x-calculator-account'] !== '1' ||
+          (request.method !== 'GET' || request.headers.origin) && request.headers.origin !== 'http://' + host) {
+        return json(response, {}, 403);
+      }
+      const action = route.slice('character-sync/'.length);
+      if (request.method === 'POST' && (action === 'enable' || action === 'disable')) {
+        request.resume();
+        characterSync[action]();
+      } else if (request.method !== 'GET' || action !== 'status') return json(response, {}, 404);
+      return json(response, characterSync.status());
+    }
+    if (route.startsWith('remote-queue/')) {
+      if (request.headers['x-calculator-account'] !== '1' ||
+          (request.method !== 'GET' || request.headers.origin) && request.headers.origin !== 'http://' + host) {
+        return json(response, { state: 'failed' }, 403);
+      }
+      if (route === 'remote-queue/status' && request.method === 'GET') {
+        return json(response, { state: remoteQueue.status() });
+      }
+      if (route === 'remote-queue/disable' && request.method === 'POST') {
+        request.resume();
+        remoteQueue.disable();
+        return json(response, { state: remoteQueue.status() });
+      }
+      if (route === 'remote-queue/enable' && request.method === 'POST') {
+        void (async () => {
+          const data = await readAccountJson(request);
+          const name = typeof data?.name === 'string' ? data.name.trim() : '';
+          if (name.length > 40) return json(response, { state: 'failed' }, 400);
+          return json(response, { state: await remoteQueue.enable(name || undefined) });
+        })().catch(() => json(response, { state: 'failed' }, 503));
+        return;
+      }
+      return json(response, { state: 'failed' }, 404);
+    }
+    if (route.startsWith('account/')) {
+      void desktopAccount(route.slice('account/'.length), host, request, response, json);
+      return;
+    }
     if (route.startsWith('action-runner/')) {
       if (!actionRunner) return json(response, { state: 'unavailable' });
       if (route === 'action-runner/status' && request.method === 'GET') {
@@ -251,11 +375,14 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
               if (length > preferencesLimit) return json(response, { state: 'invalid-queue' }, 413);
               chunks.push(chunk);
             }
-            const { steps, character, characterId, repeat } = JSON.parse(Buffer.concat(chunks).toString());
-            if (typeof characterId !== 'string' || !/^[a-f0-9]{32}$/i.test(characterId)) {
+            const { steps, characterId: requestedId, repeat } = JSON.parse(Buffer.concat(chunks).toString());
+            if (typeof requestedId !== 'string' || !/^[a-f0-9]{32}$/i.test(requestedId)) {
               return json(response, { state: 'invalid-queue' }, 400);
             }
-            actionRunner.start(steps, character, repeat, characterId);
+            const characterId = requestedId.toLowerCase();
+            const selected = queueCharacter(characterId);
+            if (!selected) return json(response, { state: 'character-not-found' }, 409);
+            actionRunner.start(steps, selected.name, repeat, characterId, selected.saveHash);
           } else return json(response, { state: 'failed' }, 404);
           return json(response, actionRunner.status());
         } catch (error) {
@@ -266,7 +393,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       })();
       return;
     }
-    if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json, preferencesFile, log);
+    if (route === 'preferences' && request.method === 'POST') return void writePreferences(request, response, json,
+      preferencesFile, log, data => { queuePreferencesData = data; });
     if (route === 'saves/choose' || route === 'saves/forget') {
       if (request.method !== 'POST' || request.headers.origin !== 'http://' + host ||
           request.headers['x-calculator-save-picker'] !== '1') return json(response, {}, 403);
@@ -420,6 +548,8 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
         if (result.state === 'available') console.log('发现新版本 / Update available: v' + result.latest + ' ' + RELEASES_URL);
       });
       resolve({ url, close: () => new Promise(done => {
+        remoteQueue.disable();
+        characterSync.disable();
         actionRunner?.cancel();
         server.close(done);
       }) });

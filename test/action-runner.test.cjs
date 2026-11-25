@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setImmediate: turn } = require('node:timers/promises');
 const { createActionRunner } = require('../action-runner.cjs');
-const { prepareLinkedGame } = require('../game-bridge.cjs');
+const { createGameBridge, prepareLinkedGame } = require('../game-bridge.cjs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,6 +13,17 @@ const targets = new Map([
 ]);
 const steps = [...targets.keys()].map(key => ({ key, minutes: 10 }));
 
+test('the game bridge rejects an unrecognized assembly even when its size matches', async t => {
+  const game = await fs.mkdtemp(path.join(os.tmpdir(), 'melvor-bridge-runtime-test-'));
+  t.after(() => fs.rm(game, { recursive: true, force: true }));
+  const runtime = path.join(game, 'data_GamesByMalcs.Melvor2_windows_x86_64');
+  await fs.mkdir(runtime);
+  const assembly = path.join(runtime, 'GamesByMalcs.Melvor2.dll');
+  await fs.writeFile(assembly, Buffer.alloc(11732368));
+
+  await assert.rejects(createGameBridge(game).connect(new AbortController().signal), { message: 'bridge-build' });
+});
+
 test('the runner waits for the selected character, then starts and stops each action by ID', async () => {
   const commands = [];
   const waited = [];
@@ -21,6 +32,7 @@ test('the runner waits for the selected character, then starts and stops each ac
     send: async (operation, params) => {
       commands.push([operation, params]);
       if (commands.length === 1) return 'character-mismatch';
+      if (commands.length === 2) return 'character-loading';
       return operation === 'start' ? 'started' : 'completed';
     }
   };
@@ -29,10 +41,11 @@ test('the runner waits for the selected character, then starts and stops each ac
   runner.start(steps, 'Player', false);
   await turn();
   assert.deepEqual(commands.map(([operation, { target, character }]) => [operation, target, character]), [
-    ['start', 'MelvorBase:YewTree', 'Player'], ['start', 'MelvorBase:YewTree', 'Player'], ['inspect', undefined, undefined],
+    ['start', 'MelvorBase:YewTree', 'Player'], ['start', 'MelvorBase:YewTree', 'Player'],
+    ['start', 'MelvorBase:YewTree', 'Player'], ['inspect', undefined, undefined],
     ['start', 'MelvorBase:ShallowPools', 'Player'], ['inspect', undefined, undefined]
   ]);
-  assert.deepEqual(waited, [2000, 1500, 1500]);
+  assert.deepEqual(waited, [2000, 2000, 1500, 1500]);
   assert.equal(runner.status().state, 'completed');
 });
 
@@ -62,6 +75,24 @@ test('cancelling stops only the owned action after the game confirms the stop', 
   assert.deepEqual(commands, ['start', 'stop']);
   assert.equal(activeLease, null);
   assert.equal(runner.status().state, 'cancelled');
+});
+
+test('loading times out before the next start and retains the selected save fingerprint', async () => {
+  let clock = 0;
+  const requests = [];
+  const runner = createActionRunner({
+    connect: async () => {},
+    send: async (operation, params) => {
+      requests.push({ operation, saveHash: params.saveHash });
+      return 'character-loading';
+    }
+  }, targets, { now: () => clock, characterTimeout: 3000, wait: async ms => { clock += ms; } });
+  const saveHash = 'c'.repeat(64);
+  runner.start(steps, 'Player', false, 'a'.repeat(32), saveHash);
+  await turn();
+  assert.equal(runner.status().state, 'character-timeout');
+  assert.equal(runner.active(), false);
+  assert.deepEqual(requests, [{ operation: 'start', saveHash }, { operation: 'start', saveHash }]);
 });
 
 test('remaining time comes from the game and stays visible while it is paused', async () => {

@@ -5,9 +5,11 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using GamesByMalcs.Melvor2;
+using GamesByMalcs.Melvor2.CloudMenus;
 using GamesByMalcs.Melvor2.Components.Actions;
 using GamesByMalcs.Melvor2.Components.ArtisanAction;
 using GamesByMalcs.Melvor2.Components.CraftingAction;
@@ -20,6 +22,7 @@ using GamesByMalcs.Melvor2.Entities.Cooking;
 using GamesByMalcs.Melvor2.Entities.Firemaking;
 using GamesByMalcs.Melvor2.Entities.Mining;
 using GamesByMalcs.Melvor2.Entities.Woodcutting;
+using GamesByMalcs.Melvor2.MainMenu;
 using GamesByMalcs.Melvor2.Saves;
 using Godot;
 
@@ -70,6 +73,8 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
         "Game", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
     private static readonly PropertyInfo? ActiveSaveId = typeof(SaveManager).GetProperty(
         "ActiveSaveId", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+    private static readonly MethodInfo? ContinueToGame = typeof(MelvorCloudMenuView).GetMethod(
+        "ContinueToGameButtonPressedHandler", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly Func<ActionComponent, bool>? IsPerformingAction = typeof(ActionComponent)
         .GetProperty("IsPerformingAction", BindingFlags.Instance | BindingFlags.NonPublic)?
         .GetGetMethod(true)?.CreateDelegate<Func<ActionComponent, bool>>();
@@ -84,6 +89,11 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
     private int duration;
     private string? outcome;
     private Guid? activeCharacter;
+    private string? autoLoadLease;
+    private string? continueLease;
+    private string? verifiedSaveHash;
+    private Guid verifiedSaveId;
+    private GamesByMalcs.Melvor2.Game? verifiedSaveGame;
     private string? goalItem;
     private int goalQuantity;
     private double gained;
@@ -160,7 +170,7 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
     {
         if (!GodotObject.IsInstanceValid(driver)) driver = FindDriver(tree.Root);
         if (driver is null || GameProperty?.GetValue(driver) is not GamesByMalcs.Melvor2.Game game ||
-            !game.IsSaveLoaded) return operation == "start" ? "character-required" : "action-changed";
+            !game.IsSaveLoaded) return operation == "start" ? TryLoadCharacter(root) : "action-changed";
         var requestedLease = root.GetProperty("lease").GetString();
         if (operation is "inspect" or "stop")
         {
@@ -192,6 +202,12 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
                 StringComparison.OrdinalIgnoreCase)) return "character-mismatch";
         }
         else if (root.GetProperty("character").GetString() != game.CharacterName) return "character-mismatch";
+        if (RequestedSaveHash(root) is { } hash)
+        {
+            if (verifiedSaveHash != hash || verifiedSaveId != CurrentCharacter ||
+                (verifiedSaveGame is not null && !ReferenceEquals(verifiedSaveGame, game))) return "save-copy-mismatch";
+            verifiedSaveGame = game;
+        }
         if (GamePaused) return "paused";
         var skill = root.GetProperty("skill").GetString();
         var target = root.GetProperty("target").GetString();
@@ -282,6 +298,57 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
         }
         return result;
     }
+
+    private string TryLoadCharacter(JsonElement request)
+    {
+        if (!request.TryGetProperty("characterId", out var id) || id.ValueKind != JsonValueKind.String ||
+            id.GetString() is not string hex || hex.Length != 32 || !hex.All(Uri.IsHexDigit) ||
+            !request.TryGetProperty("lease", out var leaseProperty) || leaseProperty.ValueKind != JsonValueKind.String ||
+            leaseProperty.GetString() is not string requestedLease || requestedLease.Length == 0)
+            return "character-required";
+        var selected = new Guid(Convert.FromHexString(hex));
+        if (selected == Guid.Empty || CurrentCharacter is not Guid current) return "character-required";
+        if (current != Guid.Empty) return current == selected ? "character-loading" : "character-mismatch";
+        if (autoLoadLease == requestedLease) return "character-load-failed";
+        if (FindNode<SaveSelectPanel>(tree.Root) is not { } menu)
+        {
+            if (continueLease != requestedLease && ContinueToGame is not null &&
+                FindNode<MelvorCloudMenuView>(tree.Root) is { } cloud)
+            {
+                continueLease = requestedLease;
+                ContinueToGame.Invoke(cloud, null);
+                return "character-loading";
+            }
+            return "character-required";
+        }
+        if (!menu.IsVisibleInTree()) return "character-required";
+        if (!SaveManager.StoredSaves.TryGetValue(selected, out var saves)) return "character-not-found";
+        var candidates = saves.Saves.Keys.OfType<LocalSaveSource>()
+            .OrderByDescending(local => saves.Saves[local].Header.Timestamp);
+        var hash = RequestedSaveHash(request);
+        LocalSaveSource? source;
+        try
+        {
+            source = hash is null ? candidates.FirstOrDefault() : candidates.FirstOrDefault(local =>
+                string.Equals(Convert.ToHexString(SHA256.HashData(local.GetSaveDataForId(selected))), hash,
+                    StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception)
+        {
+            return "character-load-failed";
+        }
+        if (source is null) return hash is null ? "character-not-found" : "save-copy-mismatch";
+        autoLoadLease = requestedLease;
+        verifiedSaveId = selected;
+        verifiedSaveHash = hash;
+        verifiedSaveGame = null;
+        menu.SaveSelectedHandler(menu, new SaveSelectedEventArgs(selected, source));
+        return "character-loading";
+    }
+
+    private static string? RequestedSaveHash(JsonElement request) =>
+        request.TryGetProperty("saveHash", out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
 
     private Func<bool>? canProduceGoal;
 
@@ -401,12 +468,14 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
         return "started";
     }
 
-    private static GameDriver? FindDriver(Node root)
+    private static GameDriver? FindDriver(Node root) => FindNode<GameDriver>(root);
+
+    private static T? FindNode<T>(Node root) where T : Node
     {
-        if (root is GameDriver gameDriver) return gameDriver;
+        if (root is T node) return node;
         foreach (var child in root.GetChildren())
         {
-            var found = FindDriver(child);
+            var found = FindNode<T>(child);
             if (found is not null) return found;
         }
         return null;
