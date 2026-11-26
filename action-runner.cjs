@@ -5,6 +5,8 @@ const { directQueueSkills } = require('./game-bridge.cjs');
 function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500,
   characterTimeout = 90000, now = () => performance.now() } = {}) {
   let controller;
+  let queueTask;
+  let restartTask;
   let status = { state: 'idle', skills: directQueueSkills };
   const setStatus = (state, detail = {}) => { status = { state, skills: directQueueSkills, ...detail }; };
 
@@ -81,10 +83,17 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500,
   }
 
   return {
-    status: () => status,
-    active: () => Boolean(controller),
+    status: () => restartTask ? { state: 'restarting', skills: directQueueSkills } : status,
+    active: () => Boolean(controller || restartTask),
+    restart: typeof bridge.restart === 'function' ? () => {
+      if (restartTask) throw new Error('busy');
+      controller?.abort();
+      restartTask = Promise.resolve(queueTask).then(() => bridge.restart(AbortSignal.timeout(100000)))
+        .then(() => setStatus('game-restarted'), () => setStatus('restart-failed'))
+        .finally(() => { restartTask = undefined; });
+    } : undefined,
     start(steps, character, repeat, characterId, saveHash) {
-      if (controller) throw new Error('busy');
+      if (controller || restartTask) throw new Error('busy');
       if (typeof character !== 'string' || !character.trim() || character.length > 120 ||
           !Array.isArray(steps) || !steps.length || steps.length > 200) {
         throw new Error('invalid-queue');
@@ -112,12 +121,12 @@ function createActionRunner(bridge, targets, { wait = delay, checkEvery = 1500,
       });
       controller = new AbortController();
       const { signal } = controller;
-      void run(actions, character, characterId, saveHash, repeat === true, signal).catch(error => {
+      queueTask = run(actions, character, characterId, saveHash, repeat === true, signal).catch(error => {
         const known = ['game-already-open', 'bridge-unavailable', 'bridge-build', 'bridge-override-conflict', 'direct-link-failed'];
         if (status.state !== 'cancel-unconfirmed') {
           setStatus(signal.aborted ? 'cancelled' : known.includes(error.message) ? error.message : 'failed');
         }
-      }).finally(() => { controller = undefined; });
+      }).finally(() => { controller = undefined; queueTask = undefined; });
       return status;
     },
     cancel() { controller?.abort(); }

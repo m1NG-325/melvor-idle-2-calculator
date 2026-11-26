@@ -80,7 +80,8 @@ function compareSkillTraining(a, b, ignoreStock) {
 }
 
 function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId, ignoreStock }, shop = false) {
-  const actions = catalogue.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId));
+  const actions = catalogue.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId) &&
+    unlocked(row, character, { requireVerified: true }));
   const { current, candidates, owned, offers } = skillTrainingOptions(catalogue, character, skill, actions, shop);
   if (!actions.length || (shop && !offers.size)) return null;
   const skillCatalogue = { ...catalogue, xpActions: actions };
@@ -176,7 +177,9 @@ function updateSkillTraining(character, settings) {
     return;
   }
   shopSection.hidden = false;
-  const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target, ignoreStock]);
+  const available = catalog.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId) &&
+    unlocked(row, character, { requireVerified: true })).map(row => row.id);
+  const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target, ignoreStock, available]);
   const key = JSON.stringify([scope, goal?.remaining, character.levels, character.stock, character.currencies,
     character.equipped, character.skillToolbelt?.[skill], character.bonuses, character.xpBonuses, character.purchases,
     character.ranks, character.astrologyNodes, character.unlockedPets, character.questProgress, character.recipeStatistics,

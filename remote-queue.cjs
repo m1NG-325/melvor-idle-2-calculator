@@ -23,6 +23,7 @@ function readRemoteInstallation(file) {
 }
 
 function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, installationFile, fetchRemote = globalThis.fetch, interval = 4000 }) {
+  const pauseFile = installationFile && installationFile + '.paused';
   let device;
   let timer;
   let enabling = false;
@@ -31,8 +32,9 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
 
   async function api(route, body, credentials, signal) {
     const response = await fetchRemote(accountOrigin + '/api/remote/' + route, {
-      method: 'POST', redirect: 'error', signal: signal ?? AbortSignal.timeout(10000),
-      headers: { 'Content-Type': 'application/json', ...credentials }, body: JSON.stringify(body)
+      method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: signal ?? AbortSignal.timeout(10000),
+      headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...credentials },
+      body: JSON.stringify(body)
     });
     return { status: response.status, data: await response.json().catch(() => null) };
   }
@@ -48,6 +50,11 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
 
   function execute(command) {
     if (!Number.isSafeInteger(command.expires) || command.expires <= Date.now()) return 'expired';
+    if (command.kind === 'restart') {
+      if (!runner.restart) return 'failed';
+      try { runner.restart(); return 'accepted'; }
+      catch (error) { return error.message === 'busy' ? 'busy' : 'failed'; }
+    }
     if (command.kind === 'stop') {
       runner.cancel();
       return 'accepted';
@@ -80,6 +87,7 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
         queues: queues.map(({ id, name, revision }) => ({ id, name, revision })),
         ready: /^[a-f0-9]{32}$/.test(characterId ?? ''),
         busy: runner.active(),
+        ...(runner.restart && { restart: true }),
         run: { state: runnerState, step, remaining, current, target }, ack: connection.ack
       }, connection.headers, AbortSignal.any([connection.abort.signal, AbortSignal.timeout(10000)]));
       if (device !== connection) return;
@@ -101,14 +109,17 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
     }
   }
 
-  function disable(disconnect = true) {
+  function disable(disconnect = true, paused = false) {
+    if (paused && pauseFile) {
+      try { fs.writeFileSync(pauseFile, 'paused\n'); } catch { /* The account also records the pause. */ }
+    }
     generation++;
     clearTimeout(timer);
     const connection = device;
     device = undefined;
     state = 'disabled';
     connection?.abort.abort();
-    if (disconnect && connection) void api('disconnect', {}, connection.headers).catch(() => {});
+    if (disconnect && connection) return api('disconnect', { paused }, connection.headers).catch(() => {});
   }
 
   async function enable(name = 'Windows') {
@@ -127,10 +138,13 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
       }
       const connection = { headers: { Authorization: 'Bearer ' + item.data.token }, abort: new AbortController() };
       if (started !== generation) {
-        void api('disconnect', {}, connection.headers).catch(() => {});
+        void api('disconnect', { paused: false }, connection.headers).catch(() => {});
         return state;
       }
       device = connection;
+      if (pauseFile) {
+        try { fs.unlinkSync(pauseFile); } catch { /* Missing or read-only local marker. */ }
+      }
       state = 'connecting';
       void poll(connection);
       return state;
@@ -141,7 +155,26 @@ function createRemoteQueue({ runner, readQueues, readCharacter, accountCookie, i
     }
   }
 
-  return { enable, disable, status: () => runner ? enabling ? 'connecting' : state : 'unavailable' };
+  async function devices(restore = false) {
+    const cookie = accountCookie();
+    if (!cookie) return [];
+    const started = generation;
+    const result = await api('devices', undefined, { Cookie: cookie });
+    if (started !== generation || accountCookie() !== cookie) return [];
+    if (result.status !== 200 || !Array.isArray(result.data)) throw new Error('remote-unavailable');
+    const installation = installationFile && fs.existsSync(installationFile) ? readRemoteInstallation(installationFile) : undefined;
+    const entries = result.data.map(row => ({
+      id: row.id, name: row.name, online: row.online, paused: row.paused,
+      local: !!installation && row.installation === installation
+    }));
+    const local = entries.find(row => row.local);
+    if (restore && local && !local.paused && state === 'disabled' && !(pauseFile && fs.existsSync(pauseFile))) {
+      await enable(local.name);
+    }
+    return entries;
+  }
+
+  return { enable, disable, devices, status: () => runner ? enabling ? 'connecting' : state : 'unavailable' };
 }
 
 module.exports = { createRemoteQueue };

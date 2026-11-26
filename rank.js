@@ -113,9 +113,9 @@ function meetsRequirements(group, profile, confirmed = false) {
   return alternativePassed;
 }
 
-function unlocked(action, profile) {
+function unlocked(action, profile, { requireVerified = false } = {}) {
   if (!profile.levels[action.skill] || profile.excluded?.includes(action.id)) return false;
-  const confirmed = profile.confirmed?.includes(action.id);
+  const confirmed = !requireVerified && profile.confirmed?.includes(action.id);
   return action.requirementGroups.every(group => meetsRequirements(group, profile, confirmed));
 }
 
@@ -811,7 +811,7 @@ function canUseAstralOfferings(catalog, profile) {
 
 function evaluateAction(action, profile, catalog, settings) {
   const { levels, stock, currencies, bonuses } = profile;
-  if (!settings.productionPreview && !unlocked(action, profile)) return;
+  if (!settings.productionPreview && !unlocked(action, profile, { requireVerified: settings.experience })) return;
   if (['Farming', 'Ranching', 'GrainMill'].includes(action.kind)) {
     return evaluatePassiveExperience(action, profile, catalog, settings);
   }

@@ -121,6 +121,10 @@
           <label>电脑名称<input id="desktopRemoteName" maxlength="40" placeholder="例如：家里的电脑"></label>
           <button id="desktopRemoteToggle" type="button">开启远程控制</button>
           <p id="desktopRemoteState" class="muted" role="status"></p>
+          <div id="desktopSavedComputers" hidden>
+            <strong data-i18n>已保存的电脑</strong>
+            <ul id="desktopComputerList"></ul>
+          </div>
         </section>
         <p id="desktopAccountStatus" class="muted" role="status"></p>
       </dialog>

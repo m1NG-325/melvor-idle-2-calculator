@@ -744,13 +744,18 @@ async function init() {
     if (profile) renderProfile(true);
     else void renderStatistics();
   }
-  byId('language').addEventListener('change', event => {
-    uiLanguage = supportedLanguage(event.currentTarget.value) ?? 'en';
+  applyAccountLanguage = language => {
+    uiLanguage = language;
     const url = new URL(location.href);
     url.searchParams.set('lang', uiLanguage);
     history.replaceState(null, '', url);
     localizeControls();
     queuePreferences();
+    window.dispatchEvent(new Event('calculator-language'));
+  };
+  byId('language').addEventListener('change', event => {
+    applyAccountLanguage(supportedLanguage(event.currentTarget.value) ?? 'en');
+    accountPreferenceChanged('language', uiLanguage);
   });
   byId('installUpdate')?.addEventListener('click', startUpdate);
   window.addEventListener('hashchange', () => {
@@ -834,6 +839,7 @@ async function init() {
     await refreshSaves();
     if (!webMode) await shopLoad;
     preferencesReady = true;
+    startAccountPreferences();
     renderRuntimeStatus();
     if (webMode) webMode.enableImport();
     else setInterval(() => loadProfile(true), 15000);

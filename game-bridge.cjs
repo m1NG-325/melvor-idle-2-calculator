@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn, execFile } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
+const { once } = require('node:events');
 const { promisify } = require('node:util');
 const { setTimeout: delay } = require('node:timers/promises');
 const { gameAssembly, runtimeFolder, gameAssemblyPath, queueRuntimes } = require('./game-runtime.cjs');
@@ -136,8 +137,41 @@ async function prepareLinkedGame(game, { signal, assemblyFile, link = fs.link, r
 
 const linkFallbackErrors = new Set(['EPERM', 'EACCES', 'EROFS', 'ENOTSUP', 'EINVAL', 'EXDEV', 'EMLINK']);
 
+async function closeInstalledGame(executable, linkedExecutable, signal) {
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    $allowed = @($env:MELVOR_INSTALLED_EXE, $env:MELVOR_LINKED_EXE) | Where-Object { $_ }
+    $games = @(Get-Process -Name Melvor2 -ErrorAction SilentlyContinue)
+    $closing = @()
+    foreach ($gameProcess in $games) {
+      if ($gameProcess.HasExited) { continue }
+      if (-not ($allowed -contains $gameProcess.Path)) { throw 'Unknown game executable' }
+      $closing += $gameProcess
+    }
+    foreach ($gameProcess in $closing) {
+      if ($gameProcess.HasExited) { continue }
+      if (-not $gameProcess.CloseMainWindow() -and -not $gameProcess.HasExited) { throw 'Game window unavailable' }
+      if (-not $gameProcess.WaitForExit(20000)) { throw 'Game did not exit' }
+    }
+  `;
+  await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true, signal, timeout: 25000,
+    env: { ...process.env, MELVOR_INSTALLED_EXE: executable, MELVOR_LINKED_EXE: linkedExecutable ?? '' }
+  });
+}
+
 function createGameBridge(game) {
   let session;
+  async function restart(signal) {
+    await verifyBridgeRuntime(gameAssemblyPath(game), signal);
+    await closeInstalledGame(path.join(game, 'Melvor2.exe'), session?.executable, signal);
+    const previous = session?.child;
+    if (previous && previous.exitCode === null && previous.signalCode === null) {
+      await once(previous, 'exit', { signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]) });
+    }
+    return connect(signal);
+  }
+
   async function connect(signal) {
     if (session && session.child.exitCode === null && session.child.signalCode === null) {
       if (!session.ready) session.ready = await send('hello', {}, signal, 40000) === 'connected';
@@ -192,7 +226,7 @@ function createGameBridge(game) {
       throw error;
     }
     child.unref();
-    session = { child, directory };
+    session = { child, directory, executable: stage.executable };
     child.once('exit', () => {
       if (session?.child === child) session = undefined;
       void removeTemporaryBridgeDirectory(localRoot, directory);
@@ -231,7 +265,7 @@ function createGameBridge(game) {
       await fs.rm(request, { force: true }).catch(() => {});
     }
   }
-  return { connect, send };
+  return { connect, send, restart };
 }
 
 module.exports = { directQueueSkills, createGameBridge, prepareLinkedGame, hasBridgeAssembly };

@@ -4,6 +4,7 @@ const { readPackage, readPackedFile } = require('./game-data.cjs');
 const { makeCatalog } = require('./catalog.cjs');
 const { makeShopCatalog } = require('./shop-catalog.cjs');
 const bundledChineseNames = require('./vendor/game-names-zh.json');
+const ownChineseNames = require('./vendor/own-game-zh.json');
 
 function originalPackage(game, build) {
   const backups = path.join(game, 'Melvor2_简体中文', 'backups');
@@ -88,13 +89,17 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
   } catch {
     // Some game builds omit the Chinese locale. Keep the names that are available.
   }
-  function officialChinese(original) {
-    const translatedName = name => chineseNames?.get(name)?.name ??
+  function chineseLabel(original, alternateName) {
+    const ownName = name => Object.hasOwn(ownChineseNames, name) ? ownChineseNames[name] : undefined;
+    const translatedName = name => ownName(name) ?? chineseNames?.get(name)?.name ??
       (Object.hasOwn(bundledChineseNames, name) ? bundledChineseNames[name] : undefined);
-    const exact = translatedName(original);
-    if (exact || !original?.includes(' · ')) return exact;
+    const preferred = ownName(original);
+    if (preferred) return preferred;
+    if (!original?.includes(' · ')) return hasChinese(alternateName) ? alternateName : translatedName(original);
     const parts = original.split(' · ');
     const translated = parts.map(part => hasChinese(part) ? part : translatedName(part));
+    if (translated.every(Boolean)) return translated.join(' · ');
+    if (hasChinese(alternateName) && alternateName.split(' · ').length === parts.length) return alternateName;
     if (translated.some(Boolean)) return translated.filter(Boolean).join(' · ');
   }
   const label = (source, alternate, id) => {
@@ -102,11 +107,11 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
     const translated = displayText(alternate);
     const names = {};
     if (hasChinese(original)) {
-      names.zh = original;
+      names.zh = translated && !hasChinese(translated) ? chineseLabel(translated, original) : original;
       names.en = translated && !hasChinese(translated) ? translated : humanize(id);
     } else {
       names.en = original;
-      const localized = hasChinese(translated) ? translated : officialChinese(original);
+      const localized = chineseLabel(original, translated);
       if (localized) names.zh = localized;
     }
     return names;
@@ -190,12 +195,12 @@ function addGameLabels(game, build, catalog, shop, useAlternate = true, executab
     const name = displayText(record.name);
     const alternateName = displayText(alternatives.catalog?.itemDetailLabels?.[id]?.name);
     const other = alternateName ?? englishByChinese.get(name);
-    if (id.startsWith('skill:')) record.names = { zh: name, en: id.slice(6) };
+    if (id.startsWith('skill:')) record.names = { zh: chineseLabel(id.slice(6), name), en: id.slice(6) };
     else {
       const neutral = id.startsWith('modifier:') && !/[\p{L}]/u.test(name?.replace(/\{[^{}]*\}/g, '') ?? '');
       record.names = hasChinese(name) ? { zh: name, en: other && !hasChinese(other) ? other : englishByChinese.get(name) } :
         { en: other && !hasChinese(other) ? other : name,
-          zh: neutral ? name : hasChinese(other) ? other : officialChinese(name) };
+          zh: neutral ? name : chineseLabel(name, other) };
     }
   }
 }

@@ -23,6 +23,20 @@ function trainingRequirementsMet(groups, character, style, catalogue) {
   return requirementClauses(groups).every(clause => clause.some(met));
 }
 
+function combatTrainingStyle(model, combat) {
+  const weapon = model.items[combat.equipment.find(row => row.slot === 'Weapon')?.id]?.weapon;
+  return model.stances[combat.stances[baseCombatId(weapon?.Type)]]?.style;
+}
+
+function availableCombatTraining(plan, character, skill) {
+  if (!plan) return null;
+  const { target, area } = plan.enemy;
+  if (skill === 'Slayer' && !character.slayerTasks?.some(task => task.monster === target.id && task.remaining > 0)) return null;
+  const style = combatTrainingStyle(catalog.combatModel, plan.combat);
+  const requirements = [...(area.requirements ?? []), ...(target.requirements ?? [])];
+  return trainingRequirementsMet(requirements, character, style, catalog) ? plan : null;
+}
+
 function trainingEquipment(catalogue, character, recipes = new Map()) {
   const model = catalogue.combatModel;
   const worn = new Map(character.combat.equipment.filter(isCombatEquipment).map(row => [row.slot, row]));
@@ -174,7 +188,10 @@ function combatCardPlans(character, selected, goals) {
   for (const [skill, goal] of goals) {
     if (skill === selected || !(goal?.remaining > 0)) continue;
     const cached = state.results.get(skill);
-    if (cached?.level === goal.target) matches.set(skill, recommendedCombatTraining(cached.summary));
+    if (cached?.level === goal.target) {
+      const plan = recommendedCombatTraining(cached.summary, character, skill);
+      if (plan || cached.key === state.key) matches.set(skill, plan);
+    }
     if (cached?.key !== state.key || cached.remaining !== goal.remaining) waiting.push([skill, goal]);
   }
   if (state.job || combatTraining.pending || !waiting.length) return matches;
@@ -227,9 +244,11 @@ function bestTrainingWithCrafts(owned, craft) {
   return craft && (!owned || compareCombatTraining(craft, owned) < 0) ? craft : owned;
 }
 
-function recommendedCombatTraining(summary) {
-  const ready = bestTrainingWithCrafts(summary?.result, summary?.craftResult);
-  return ready?.goalHours != null ? ready : bestTrainingWithCrafts(ready, summary?.preparedResult);
+function recommendedCombatTraining(summary, character, skill) {
+  const ready = bestTrainingWithCrafts(availableCombatTraining(summary?.result, character, skill),
+    availableCombatTraining(summary?.craftResult, character, skill));
+  return ready?.goalHours != null ? ready : bestTrainingWithCrafts(ready,
+    availableCombatTraining(summary?.preparedResult, character, skill));
 }
 
 function stableCombatTraining(candidate, previous) {
@@ -326,8 +345,10 @@ function updateCombatTraining() {
     if (search) setTimeout(runBatch, 0);
   }
   const current = combatTraining.summary;
-  const owned = current?.result;
-  const expanded = bestTrainingWithCrafts(owned, current?.craftResult);
+  const available = plan => availableCombatTraining(plan, character, skill);
+  const owned = available(current?.result);
+  const expanded = bestTrainingWithCrafts(owned, available(current?.craftResult));
+  const prepared = available(current?.preparedResult);
   const ownedMessage = !current ? '正在比较可用配装和战斗目标…' : current.failed ? '暂时无法计算练级方案。' :
     !owned ? '当前存档没有估出可用的练级方案。请检查可穿戴装备、补给或屠杀任务。' : null;
   const craftMessage = !current ? '正在比较当前等级可制造的装备…' : current.craftFailed ? '暂时无法计算练级方案。' :
@@ -336,9 +357,9 @@ function updateCombatTraining() {
   renderTrainingPlan(result, status, owned, ownedMessage, character);
   const craftPlan = current?.craftFailed || expanded === owned ? null : expanded;
   renderTrainingPlan(craftResult, craftStatus, craftPlan, craftMessage, character);
-  preparedSection.hidden = !current?.preparedResult;
-  if (current?.preparedResult) renderCombatTraining(byId('combatTrainingPreparedResult'), current.preparedResult, character);
-  renderCombatXpOverview(character, skill, owned, craftPlan, current?.preparedResult);
+  preparedSection.hidden = !prepared;
+  if (prepared) renderCombatTraining(byId('combatTrainingPreparedResult'), prepared, character);
+  renderCombatXpOverview(character, skill, owned, craftPlan, prepared);
 }
 
 function renderTrainingPlan(container, status, plan, message, character) {
@@ -640,8 +661,16 @@ function* combatTrainingSearch(catalogue, character, skill, remaining, {
   const casts = Object.entries(spells).filter(([, spell]) => spell.trainable);
   const prayers = trainingPrayers(model, character, skill);
   const modifiers = combatXpModifiers(model, catalogue);
+  const accessByStyle = new Map();
+  function allowedEnemies(style) {
+    if (!accessByStyle.has(style)) accessByStyle.set(style, new Set(enemies.filter(enemy =>
+      trainingRequirementsMet(enemy.requirements, character, style, catalogue))));
+    return accessByStyle.get(style);
+  }
 
   function evaluate(combat, enemy, quick, finishAtGoal = false) {
+    const style = combatTrainingStyle(model, combat);
+    if (!allowedEnemies(style).has(enemy)) return null;
     let actor = { ...character, combat };
     let preparation;
     if (craft) {
@@ -657,8 +686,6 @@ function* combatTrainingSearch(catalogue, character, skill, remaining, {
       } else preparation = undefined;
     }
     const { target, area, requirements } = enemy;
-    const weapon = model.items[combat.equipment.find(row => row.slot === 'Weapon')?.id]?.weapon;
-    const style = model.stances[combat.stances[baseCombatId(weapon?.Type)]]?.style;
     if (!trainingRequirementsMet(requirements, actor, style, catalogue)) return null;
     const spell = style && model.styles[style]?.UsesSpells ? spells[combat.spell] : null;
     if (spell && !trainingRequirementsMet(spell.requirements, actor, style, catalogue)) return null;

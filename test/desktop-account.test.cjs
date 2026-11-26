@@ -10,6 +10,7 @@ test('desktop username authentication keeps credentials and the upstream session
   const calls = [];
   const handle = createDesktopAccount(async (url, options) => {
     calls.push({ url, ...options });
+    if (url.endsWith('/api/preferences')) return Response.json({ account: 'account-id', settings: { language: 'zh' } });
     const route = url.split('/api/auth/')[1];
     if (route === 'get-session') return Response.json({ user, session: { token: 'private-token' } });
     if (route === 'sign-out') return Response.json({ success: true });
@@ -63,4 +64,12 @@ test('desktop username authentication keeps credentials and the upstream session
   await request('login', { username: 'legacy@example.test', password: 'test-password' });
   assert.equal(calls[5].url, 'https://melvor2calc.pages.dev/api/auth/sign-in/email');
   assert.deepEqual(JSON.parse(calls[5].body), { email: 'legacy@example.test', password: 'test-password' });
+
+  assert.equal((await request('preferences', {}, 'https://example.test')).status, 403);
+  assert.deepEqual(await (await request('preferences')).json(), { account: 'account-id', settings: { language: 'zh' } });
+  assert.equal(calls[6].url, 'https://melvor2calc.pages.dev/api/preferences');
+  assert.equal(calls[6].headers.Cookie, cookie);
+  await request('preferences', { account: 'account-id', settings: { language: 'zh' } });
+  assert.equal(calls[7].headers.Origin, 'https://melvor2calc.pages.dev');
+  assert.deepEqual(JSON.parse(calls[7].body), { account: 'account-id', settings: { language: 'zh' } });
 });

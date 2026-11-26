@@ -20,16 +20,21 @@ const defaultTheme = { hue: 173, lightness: 68 };
 const themePresets = [343, 12, 35, 53, 94, 146, 173, 195, 220, 252, 277, 313];
 let theme = defaultTheme;
 
+function validTheme(saved) {
+  return saved && Number.isInteger(saved.hue) && saved.hue >= 0 && saved.hue < 360 &&
+    Number.isInteger(saved.lightness) && saved.lightness >= 55 && saved.lightness <= 83;
+}
+
 function initTheme() {
   const saved = preferences.theme;
-  if (saved && Number.isInteger(saved.hue) && saved.hue >= 0 && saved.hue < 360 &&
-      Number.isInteger(saved.lightness) && saved.lightness >= 55 && saved.lightness <= 83) theme = saved;
+  if (validTheme(saved)) theme = saved;
   const hue = byId('themeHue');
   const lightness = byId('themeLightness');
   function select(next) {
     theme = next;
     renderTheme();
     queuePreferences();
+    accountPreferenceChanged('theme', theme);
   }
   byId('themePresets').replaceChildren(...themePresets.map(color => {
     const button = create('button', undefined, 'theme-swatch');
@@ -161,4 +166,100 @@ function queuePreferences() {
   if (!preferencesReady) return;
   clearTimeout(preferencesTimer);
   preferencesTimer = setTimeout(savePreferences, 120);
+}
+
+let accountPreferencesEnabled = true;
+let accountPreferencesId;
+let accountPreferencesRequest;
+let accountPreferencesTimer;
+let pendingAccountPreferences = {};
+let applyAccountLanguage;
+
+function resetAccountPreferences(enabled) {
+  accountPreferencesEnabled = enabled;
+  accountPreferencesId = undefined;
+  pendingAccountPreferences = {};
+  accountPreferencesRequest?.abort();
+  accountPreferencesRequest = undefined;
+  clearTimeout(accountPreferencesTimer);
+  if (enabled) void syncAccountPreferences();
+}
+
+function accountPreferenceChanged(key, value) {
+  if (!accountPreferencesEnabled) return;
+  pendingAccountPreferences[key] = value;
+  clearTimeout(accountPreferencesTimer);
+  accountPreferencesTimer = setTimeout(syncAccountPreferences, 350);
+}
+
+async function syncAccountPreferences() {
+  if (!preferencesReady || !accountPreferencesEnabled || accountPreferencesRequest) return;
+  const controller = new AbortController();
+  accountPreferencesRequest = controller;
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  const active = () => accountPreferencesRequest === controller && !controller.signal.aborted;
+  const request = data => fetch(webMode ? './api/preferences' : './account/preferences', {
+    method: data ? 'POST' : 'GET', cache: 'no-store', signal: controller.signal,
+    headers: { ...(!webMode ? { 'X-Calculator-Account': '1' } : {}), ...(data ? { 'Content-Type': 'application/json' } : {}) },
+    body: data ? JSON.stringify(data) : undefined
+  });
+  async function read(response) {
+    if (!active()) return;
+    if (response.status === 401 || response.status === 404) return resetAccountPreferences(false);
+    if (response.status === 409) return resetAccountPreferences(true);
+    if (!response.ok) return;
+    const result = await response.json();
+    if (active() && typeof result?.account === 'string' && result.settings) return result;
+  }
+  let completed = false;
+  try {
+    const edits = { ...pendingAccountPreferences };
+    const upload = accountPreferencesId && Object.keys(edits).length > 0;
+    let result = await read(await request(upload ? { account: accountPreferencesId, settings: edits } : undefined));
+    if (!active() || !result) return;
+    if (accountPreferencesId && accountPreferencesId !== result.account) pendingAccountPreferences = {};
+    accountPreferencesId = result.account;
+    if (upload) {
+      for (const [key, value] of Object.entries(edits)) {
+        if (pendingAccountPreferences[key] === value) delete pendingAccountPreferences[key];
+      }
+    }
+    const seed = {};
+    if (!Object.hasOwn(result.settings, 'theme') &&
+        (theme.hue !== defaultTheme.hue || theme.lightness !== defaultTheme.lightness)) seed.theme = theme;
+    if (!Object.hasOwn(result.settings, 'language') && uiLanguage !== 'en') seed.language = uiLanguage;
+    if (Object.keys(seed).length) {
+      result = await read(await request({ account: accountPreferencesId, settings: seed, initialize: true }));
+      if (!active() || !result) return;
+    }
+    const { theme: accountTheme, language } = result.settings;
+    if (!Object.hasOwn(pendingAccountPreferences, 'theme') && validTheme(accountTheme) &&
+        (accountTheme.hue !== theme.hue || accountTheme.lightness !== theme.lightness)) {
+      theme = accountTheme;
+      renderTheme();
+      queuePreferences();
+    }
+    if (!Object.hasOwn(pendingAccountPreferences, 'language') && supportedLanguage(language) && language !== uiLanguage) {
+      applyAccountLanguage(language);
+    }
+    completed = true;
+  } catch {
+    // The local settings remain available. Retry when the connection returns.
+  } finally {
+    clearTimeout(timeout);
+    if (accountPreferencesRequest === controller) {
+      accountPreferencesRequest = undefined;
+      if (completed && Object.keys(pendingAccountPreferences).length) {
+        clearTimeout(accountPreferencesTimer);
+        accountPreferencesTimer = setTimeout(syncAccountPreferences, 350);
+      }
+    }
+  }
+}
+
+function startAccountPreferences() {
+  void syncAccountPreferences();
+  setInterval(() => { if (!document.hidden) void syncAccountPreferences(); }, 15000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void syncAccountPreferences(); });
+  window.addEventListener('online', syncAccountPreferences);
 }

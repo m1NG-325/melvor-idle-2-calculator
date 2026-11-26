@@ -167,7 +167,7 @@ function appendQueuePlan(steps) {
   return true;
 }
 
-const queueBusy = () => ['connecting', 'switching', 'running', 'paused', 'cancelling',
+const queueBusy = () => ['connecting', 'switching', 'running', 'paused', 'cancelling', 'restarting',
   'character-required', 'character-loading', 'character-mismatch', 'busy'].includes(actionQueue.status.state);
 function queueCanRun(step) {
   const target = actionQueue.targets.get(step.key);
@@ -301,6 +301,8 @@ function queueRunMessage({ state, step, remaining, current, target }) {
     unsupported: '第 {step} 步暂不支持直接控制。',
     completed: '队列已完成。',
     cancelled: '队列已取消。',
+    restarting: '正在重启游戏…', 'game-restarted': '游戏已重启。',
+    'restart-failed': '无法重启游戏。请在电脑上检查游戏窗口。',
     failed: '队列执行失败。',
     busy: '已经有队列正在运行。',
     'invalid-queue': '队列包含无法直接执行的步骤。'
@@ -318,7 +320,7 @@ function showQueueRun() {
   byId('queueWebNote').hidden = !webMode;
   byId('queueBridgeUnavailable').hidden = webMode || available || actionQueue.status.state !== 'unavailable';
   byId('queueCancel').hidden = !queueBusy();
-  byId('queueCancel').disabled = queueCommandPending || actionQueue.status.state === 'cancelling';
+  byId('queueCancel').disabled = queueCommandPending || ['cancelling', 'restarting'].includes(actionQueue.status.state);
   byId('queueStatus').textContent = queueRunMessage(actionQueue.status);
   updateQueueTotal();
 }

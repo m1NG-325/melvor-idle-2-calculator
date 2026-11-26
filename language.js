@@ -74,6 +74,14 @@ const english = {
   '请在电脑工具中登录同一账号并开启远程控制。': 'Sign in to the same account on the computer and enable remote control.',
   '电脑': 'Computer',
   '电脑在线。': 'Computer is online.',
+  '已保存的电脑': 'Saved computers',
+  '本机': 'This computer',
+  '重启游戏': 'Restart game',
+  '重启游戏并结束当前挂机队列？': 'Restart the game and end the current idling queue?',
+  '请更新电脑上的工具后重试。': 'Update the desktop tool and try again.',
+  '正在重启游戏…': 'Restarting the game…',
+  '游戏已重启。': 'The game has restarted.',
+  '无法重启游戏。请在电脑上检查游戏窗口。': 'Could not restart the game. Check the game window on the computer.',
   '在线': 'Online',
   '离线': 'Offline',
   '电脑当前离线。': 'The computer is offline.',
@@ -1047,8 +1055,5 @@ function applyLanguage() {
   }
   for (const update of staticLabels) update();
   const language = document.getElementById('language');
-  for (const option of language.options) {
-    option.text = t({ en: '英语', zh: '简体中文', 'zh-Hant': '繁体中文' }[option.value]);
-  }
   language.value = uiLanguage;
 }

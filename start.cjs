@@ -337,10 +337,18 @@ async function launch({ root = __dirname, args = process.argv.slice(2), updateNo
       if (route === 'remote-queue/status' && request.method === 'GET') {
         return json(response, { state: remoteQueue.status() });
       }
+      if (route === 'remote-queue/devices' && request.method === 'GET' || route === 'remote-queue/restore' && request.method === 'POST') {
+        request.resume();
+        void remoteQueue.devices(request.method === 'POST').then(devices =>
+          json(response, { state: remoteQueue.status(), devices }))
+          .catch(() => json(response, { state: remoteQueue.status() }, 503));
+        return;
+      }
       if (route === 'remote-queue/disable' && request.method === 'POST') {
         request.resume();
-        remoteQueue.disable();
-        return json(response, { state: remoteQueue.status() });
+        void Promise.resolve(remoteQueue.disable(true, true))
+          .then(() => json(response, { state: remoteQueue.status() }));
+        return;
       }
       if (route === 'remote-queue/enable' && request.method === 'POST') {
         void (async () => {

@@ -6,7 +6,9 @@ const actions = new Map([
   ['POST login', 'sign-in/username'],
   ['POST register', 'sign-up/username'],
   ['POST claim', 'claim-username'],
-  ['POST logout', 'sign-out']
+  ['POST logout', 'sign-out'],
+  ['GET preferences', 'preferences'],
+  ['POST preferences', 'preferences']
 ]);
 
 async function readAccountJson(request) {
@@ -50,6 +52,28 @@ function createDesktopAccount(fetchAccount = globalThis.fetch, onAccountChange =
     if (!cookie && route === 'logout') {
       onAccountChange();
       return json(response, { ok: true });
+    }
+    if (route === 'preferences') {
+      const session = cookie;
+      if (!session) return json(response, { error: 'sign-in' }, 401);
+      try {
+        const body = request.method === 'POST' ? await readAccountJson(request) : undefined;
+        if (request.method === 'POST' && !body) return json(response, { error: 'invalid' }, 400);
+        if (cookie !== session) return json(response, { error: 'sign-in' }, 401);
+        const upstream = await fetchAccount(accountOrigin + '/api/preferences', {
+          method: request.method,
+          headers: { Cookie: session, ...(body ? { Origin: accountOrigin, 'Content-Type': 'application/json' } : {}) },
+          body: body ? JSON.stringify(body) : undefined,
+          redirect: 'error',
+          signal: AbortSignal.timeout(10000)
+        });
+        const result = await upstream.json().catch(() => null);
+        if (cookie !== session) return json(response, { error: 'sign-in' }, 401);
+        if (!upstream.ok) return json(response, { error: 'preferences-unavailable' }, upstream.status);
+        return json(response, { account: result?.account, settings: result?.settings ?? {} });
+      } catch {
+        return json(response, { error: 'unavailable' }, 503);
+      }
     }
 
     pending = true;

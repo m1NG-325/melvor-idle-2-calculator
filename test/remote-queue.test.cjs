@@ -33,6 +33,39 @@ test('separate tool processes reuse the same installation identity', async t => 
   assert.deepEqual(registrations.map(entry => entry.name), ['Old name', 'New name']);
 });
 
+test('a saved computer reconnects on sign-in unless its owner paused it on the computer', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'melvor-remote-restore-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const installationFile = path.join(root, 'calculator-remote-installation.txt');
+  const id = '585f64fd-f542-4e1f-8fb8-ae5f6abc68f0';
+  await fs.writeFile(installationFile, id);
+  const registeredNames = [];
+  const create = () => createRemoteQueue({
+    runner: { active: () => false, status: () => ({ state: 'idle' }) },
+    readQueues: () => ({ queues: [] }), accountCookie: () => 'session=private', installationFile,
+    fetchRemote: async (url, { method, body }) => {
+      if (url.endsWith('/devices') && method === 'GET') return Response.json([
+        { id: 'saved', installation: id, name: 'Home Windows', online: false, paused: false }
+      ]);
+      if (url.endsWith('/devices')) {
+        registeredNames.push(JSON.parse(body).name);
+        return Response.json({ token: 'device-token' }, { status: 201 });
+      }
+      if (url.endsWith('/disconnect')) throw new Error('no connection');
+      return Response.json({ command: null });
+    }
+  });
+  const first = create();
+  const [saved] = await first.devices(true);
+  assert.equal(saved.local, true);
+  assert.deepEqual(registeredNames, ['Home Windows']);
+  await first.disable(true, true);
+  const reopened = create();
+  await reopened.devices(true);
+  assert.equal(reopened.status(), 'disabled');
+  assert.deepEqual(registeredNames, ['Home Windows']);
+});
+
 test('desktop runs an exact saved queue revision and drops expired and stale commands', async t => {
   const starts = [];
   const replies = [];
@@ -42,8 +75,10 @@ test('desktop runs an exact saved queue revision and drops expired and stale com
   const queue = { id: 'initial', name: 'Mining', steps, repeat: false };
   let polls = 0;
   let stops = 0;
+  let restarts = 0;
   const remote = createRemoteQueue({
-    runner: { start: (...args) => starts.push(args), active: () => false, status: () => ({ state: 'idle' }), cancel: () => stops++ },
+    runner: { start: (...args) => starts.push(args), active: () => false, status: () => ({ state: 'idle' }),
+      cancel: () => stops++, restart: () => restarts++ },
     readQueues: () => ({ characterId, queues: [queue] }),
     readCharacter: id => id === characterId ? { name: 'Player', saveHash } : undefined,
     accountCookie: () => 'session=private',
@@ -59,21 +94,25 @@ test('desktop runs an exact saved queue revision and drops expired and stale com
       const snapshot = JSON.parse(body);
       assert.deepEqual(Object.keys(snapshot.queues[0]).sort(), ['id', 'name', 'revision']);
       assert.equal(snapshot.ready, true);
+      assert.equal(snapshot.restart, true);
       if (snapshot.ack) replies.push(snapshot.ack);
       const command = { id: String(++polls), kind: 'start', queue: queue.id,
         revision: snapshot.queues[0].revision, expires: Date.now() + 1000 };
       if (polls === 2) command.revision = '0'.repeat(32);
       if (polls === 3) command.expires = Date.now() - 1;
       if (polls === 4) command.kind = 'stop';
-      return Response.json({ command: polls <= 4 ? command : null });
+      if (polls === 5 || polls === 6) command.kind = 'restart';
+      if (polls === 6) command.expires = Date.now() - 1;
+      return Response.json({ command: polls <= 6 ? command : null });
     }
   });
   t.after(() => remote.disable());
   assert.equal(await remote.enable(), 'connecting');
-  for (let index = 0; index < 40 && replies.length < 4; index++) await wait(5);
-  assert.deepEqual(replies.map(row => row.result), ['accepted', 'queue-changed', 'expired', 'accepted']);
+  for (let index = 0; index < 40 && replies.length < 6; index++) await wait(5);
+  assert.deepEqual(replies.map(row => row.result), ['accepted', 'queue-changed', 'expired', 'accepted', 'accepted', 'expired']);
   assert.deepEqual(starts, [[steps, 'Player', false, characterId, saveHash]]);
   assert.equal(stops, 1);
+  assert.equal(restarts, 1);
   remote.disable();
   assert.equal(remote.status(), 'disabled');
 });

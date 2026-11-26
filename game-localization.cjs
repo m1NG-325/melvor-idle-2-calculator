@@ -13,7 +13,7 @@ const { gameAssemblyPath, needsRuntimeLocalization, localizeRuntime } = require(
 // The current Steam build registers only en_GB in project.binary.
 const localePath = 'Locale/en_GB.po';
 const marker = /^# Calculator-zh-CN (?:r\d+ )?[a-f0-9]{32}\r?\n/m;
-const currentMarker = /^# Calculator-zh-CN r3 [a-f0-9]{32}\r?\n/;
+const currentMarker = /^# Calculator-zh-CN r5 [a-f0-9]{32}\r?\n/;
 const displayFields = new Set([
   'TemplateString', 'Singular', 'Plural', 'Description', 'DisplayName', 'DisplayNameShort', 'Subtitle', 'Backstory',
   'BackstoryBBCode', 'CompletedDescription', 'DialogueText', 'CustomRewards', 'CustomDescription', 'ResistanceName',
@@ -67,7 +67,7 @@ function translateLocale(original, dictionary, id, additional = runtimeTexts) {
     } else fields.push('msgstr ' + JSON.stringify(translation));
     extra.push(fields.join('\n'));
   }
-  return { bytes: Buffer.from('# Calculator-zh-CN r3 ' + id + '\n' + locale + '\n\n' + extra.join('\n\n') + '\n'),
+  return { bytes: Buffer.from('# Calculator-zh-CN r5 ' + id + '\n' + locale + '\n\n' + extra.join('\n\n') + '\n'),
     count: count + extra.length };
 }
 

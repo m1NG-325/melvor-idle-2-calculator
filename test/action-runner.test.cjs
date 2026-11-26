@@ -77,6 +77,33 @@ test('cancelling stops only the owned action after the game confirms the stop', 
   assert.equal(runner.status().state, 'cancelled');
 });
 
+test('restarting drains the current queue and blocks another queue until the game reconnects', async () => {
+  const calls = [];
+  let finishRestart;
+  const runner = createActionRunner({
+    connect: async () => {},
+    send: async operation => {
+      calls.push(operation);
+      return operation === 'start' ? 'started' : 'stopped';
+    },
+    restart: () => {
+      calls.push('restart');
+      return new Promise(resolve => { finishRestart = resolve; });
+    }
+  }, targets);
+  runner.start(steps, 'Player', false);
+  await turn();
+  runner.restart();
+  assert.equal(runner.status().state, 'restarting');
+  assert.throws(() => runner.restart(), /busy/);
+  assert.throws(() => runner.start(steps, 'Player', false), /busy/);
+  await turn();
+  assert.deepEqual(calls, ['start', 'stop', 'restart']);
+  finishRestart();
+  await turn();
+  assert.equal(runner.status().state, 'game-restarted');
+});
+
 test('loading times out before the next start and retains the selected save fingerprint', async () => {
   let clock = 0;
   const requests = [];

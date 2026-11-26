@@ -56,3 +56,26 @@ test('game data without locale resources still gets bundled names for known item
   assert.equal(action.names.zh, '铁矿石');
   assert.equal(items.ModItem.names.zh, undefined);
 });
+
+test('tool labels prefer the same first-party translation used by the game patch', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'game-labels.cjs'), 'utf8');
+  const dictionary = require('../vendor/own-game-zh.json');
+  const context = {
+    module: { exports: {} },
+    require: id => id === './game-data.cjs'
+      ? { readPackedFile: () => Buffer.from('msgid "Oak Log"\nmsgstr "橡木"') }
+      : id === './vendor/own-game-zh.json' ? dictionary : id.startsWith('node:') ? require(id) : {}
+  };
+  vm.runInNewContext(source, context);
+  const item = { name: 'Oak Log' };
+  const action = { id: 'test', name: 'Oak Log · Normal Tree' };
+  const catalog = { items: { OakLog: item }, actions: [action], xpActions: [action], combatTargets: [],
+    combatSlots: {}, combatSpells: {}, statisticSubjects: {},
+    combatModel: { weaponTypes: {}, stances: {}, styles: {}, attributes: {}, names: {}, prayers: {} },
+    skillShop: { group: { name: 'Shop' }, sections: {} }, questGuide: { quests: [], names: {} } };
+  context.module.exports.addGameLabels('.', 'test', catalog, {
+    groups: [], upgrades: [], referenceUpgrades: [], currencies: {}
+  }, false, 'test.exe');
+  assert.equal(item.names.zh, dictionary['Oak Log']);
+  assert.equal(action.names.zh, dictionary['Oak Log'] + ' · ' + dictionary['Normal Tree']);
+});

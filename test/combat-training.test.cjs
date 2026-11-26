@@ -183,8 +183,10 @@ test('skill training compares unlocked Agility shop equipment and keeps selected
   });
   const fast = action('fast', 60, 5);
   const other = action('other', 120, 7);
+  const needsShopTool = action('needsShopTool', 1, 100, [], [],
+    [{ type: 'ToolbeltItemEquipped', skill, item: 'purchased' }]);
   const catalogue = {
-    actions: [locked], xpActions: [fast, other], equipmentSets: [],
+    actions: [locked], xpActions: [fast, other, needsShopTool], equipmentSets: [],
     skillShop: { purchases: [offer('purchased', 10, [['mark', 2]]), offer('locked', 30), offer('soldOut', 10, [], { buyLimit: 1 })] },
     skillToolSlots: { [skill]: [{ id: 'Gloves', type: 'gloves', requirements: [] }] },
     items: {
@@ -211,6 +213,7 @@ test('skill training compares unlocked Agility shop equipment and keeps selected
   assert.equal(upgrade.preparation.crafts[0].itemsNeeded[0].missing, 1);
   assert.equal(upgrade.row.action.id, 'fast');
   assert.equal(result({ actionId: 'other' }, true).row.action.id, 'other');
+  assert.equal(result({ actionId: 'needsShopTool', ignoreStock: true }, true), null);
   assert.ok(upgrade.target.reaches);
   assert.equal(character.equipped[skill][0], 'saved');
 });

@@ -1,6 +1,17 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { translateLocale, translateBasePackage } = require('../game-localization.cjs');
+const dictionary = require('../vendor/own-game-zh.json');
+
+test('the game locale includes settings labels omitted from the original translation file', () => {
+  const locale = translateLocale('', dictionary, 'a'.repeat(32)).bytes.toString('utf8');
+  for (const label of ['Always show Item Stats in tooltips', 'Show found items in openable item drops',
+    'Queue Mastery Guild Task Notifications', 'Guild notification click behaviour', 'Dismiss current', 'Dismiss all',
+    'Use Gray for Unmet Conditions', 'Anti-Aliasing (MSAA)']) {
+    assert.match(dictionary[label], /\p{Script=Han}/u);
+    assert.ok(locale.includes('msgid ' + JSON.stringify(label) + '\nmsgstr ' + JSON.stringify(dictionary[label])), label);
+  }
+});
 
 test('the owned dictionary translates the active English locale and preserves unmatched entries', () => {
   const input = [

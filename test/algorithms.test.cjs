@@ -47,6 +47,19 @@ test('hourly XP mode includes recipes with no materials while respecting skill r
   assert.deepEqual(rank(data, actor, { ...options, metric: 'net', ignoreStock: true }), []);
 });
 
+test('experience recommendations check the saved toolbelt and purchases even with inventory ignored', () => {
+  const gated = { ...recipe, id: 'Crafting:gated', requirementGroups: [
+    [{ type: 'ToolbeltItemEquipped', skill: 'Crafting', item: 'Mould' }],
+    [{ type: 'ShopPurchase', purchase: 'Permit', amount: 1 }]
+  ] };
+  const data = catalog([gated]);
+  const actor = { ...profile, confirmed: [gated.id], stock: { Mould: 1 }, purchases: { Permit: 1 } };
+  assert.deepEqual(rank(data, actor, { ...options, ignoreStock: true }), []);
+  const equipped = { ...actor, equipped: { Crafting: ['Mould'] } };
+  assert.deepEqual(rank(data, { ...equipped, purchases: {} }, { ...options, ignoreStock: true }), []);
+  assert.deepEqual(rank(data, equipped, { ...options, ignoreStock: true }).map(row => row.action.id), [gated.id]);
+});
+
 test('a two-hit special changes average damage, hit count and turn delay', () => {
   const actor = { min: 4, max: 4, hp: 40, chance: .5, immunity: 0 };
   const result = combatAttackAverage([{ chance: .5, avoidable: false, hits: [
