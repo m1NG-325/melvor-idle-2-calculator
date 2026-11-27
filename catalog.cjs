@@ -337,6 +337,12 @@ function makeCatalog(data) {
     return (data.EntityConfig['MelvorBase:' + skill]?.[key] ?? []).map(row => records.get(localId(row.Id))).filter(Boolean);
   };
   const plainName = row => row.DisplayName?.Singular ?? row.DisplayName;
+  const actionCategoryOrder = Object.fromEntries([...Object.keys(XP_SKILLS), 'Combat'].map(skill => {
+    const config = data.EntityConfig['MelvorBase:' + skill] ?? {};
+    const groups = skill === 'Combat' ? [config.Areas] : [config.Locations, config.Categories, config.MillCategories];
+    return [skill, groups.flatMap(group => [...(group ?? [])].sort((a, b) => (a.Priority ?? 0) - (b.Priority ?? 0))
+      .map(row => localId(row.Id)).filter(Boolean))];
+  }));
 
   for (const skill of [...Object.keys(SKILLS).filter(skill => !['Hunting', 'Farming', 'Ranching'].includes(skill)), 'Astrology']) {
     const recipes = new Map(objects[types[skill] ?? 'ArtisanRecipe'].map(recipe => [recipe.Id, recipe]));
@@ -518,7 +524,7 @@ function makeCatalog(data) {
     const category = localId(recipe.Category);
     const area = millCategories.get(category);
     xpActions.push({ id: 'Farming:Mill:' + recipe.Id, recipe: recipe.Id, category,
-      name: [area?.DisplayName, plainName(recipe)].filter(Boolean).join(' · '),
+      name: [area?.DisplayName, plainName(recipe)].filter(Boolean).join(' · '), area: area?.DisplayName,
       skill: 'Farming', kind: 'GrainMill', baseXp: recipe.BaseExperience, seconds: 300,
       requirementGroups: requirementGroups(millConfig, area, recipe), costs: itemCosts(recipe.Ingredients),
       rewards: recipe.Product ? [product(recipe.Product)] : [] });
@@ -749,7 +755,7 @@ function makeCatalog(data) {
       action.bar, action.stone, action.essence, action.junk].filter(id => items[id]))];
   }
   return { items, actions, itemUpgrades, ...makeItemDetails(data), ...makeCombatTargets(data, items, combatAttacks), combatSlots, combatSpells, combatSupplies, combatModel, statisticSubjects, skillToolSlots, skillShop,
-    skills: SKILLS, xpActions, xpSkills: XP_SKILLS, xpSkillData, shopModifiers, astrologyModifiers,
+    skills: SKILLS, xpActions, xpSkills: XP_SKILLS, xpSkillData, actionCategoryOrder, shopModifiers, astrologyModifiers,
     petModifiers, equipmentSets, mastery, bonfires, sacrificialAnvil, astralOfferings, questGuide: makeQuestGuide(data) };
 }
 

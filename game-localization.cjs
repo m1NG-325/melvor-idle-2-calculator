@@ -13,7 +13,15 @@ const { gameAssemblyPath, needsRuntimeLocalization, localizeRuntime } = require(
 // The current Steam build registers only en_GB in project.binary.
 const localePath = 'Locale/en_GB.po';
 const marker = /^# Calculator-zh-CN (?:r\d+ )?[a-f0-9]{32}\r?\n/m;
-const currentMarker = /^# Calculator-zh-CN r5 [a-f0-9]{32}\r?\n/;
+const currentMarker = /^# Calculator-zh-CN r6 [a-f0-9]{32}\r?\n/;
+const cookingDifficultyTemplates = [
+  '[color=#E9DFC1]Your [color=#FFD16D]Proficiency[/color]: 0[/color]',
+  '[color=#E9DFC1]Your [color=#FFD16D]Proficiency[/color]: {0:N0}[/color]',
+  '[color=#E9DFC1]Product [color=#FFD16D]Difficulty[/color]: 0[/color]',
+  '[color=#E9DFC1]Product [color=#FFD16D]Difficulty[/color]: {0:N0}[/color]',
+  '[color=#E9DFC1]Success Chance: 0.00%[/color]',
+  '[color=#E9DFC1]Success Chance: {0:p2}[/color]'
+];
 const displayFields = new Set([
   'TemplateString', 'Singular', 'Plural', 'Description', 'DisplayName', 'DisplayNameShort', 'Subtitle', 'Backstory',
   'BackstoryBBCode', 'CompletedDescription', 'DialogueText', 'CustomRewards', 'CustomDescription', 'ResistanceName',
@@ -67,8 +75,29 @@ function translateLocale(original, dictionary, id, additional = runtimeTexts) {
     } else fields.push('msgstr ' + JSON.stringify(translation));
     extra.push(fields.join('\n'));
   }
-  return { bytes: Buffer.from('# Calculator-zh-CN r5 ' + id + '\n' + locale + '\n\n' + extra.join('\n\n') + '\n'),
+  return { bytes: Buffer.from('# Calculator-zh-CN r6 ' + id + '\n' + locale + '\n\n' + extra.join('\n\n') + '\n'),
     count: count + extra.length };
+}
+
+function translateCookingDifficultyScene(source, dictionary) {
+  if (source.toString('ascii', 0, 4) !== 'RSRC') return null;
+  const bytes = Buffer.from(source);
+  let count = 0;
+  // The label formats its numeric value before Godot's automatic translation.
+  // Rewrite only complete, same-length scene strings so resource offsets stay valid.
+  for (const key of cookingDifficultyTemplates) {
+    const text = translatedText(key, dictionary);
+    if (!text) continue;
+    const original = Buffer.from(key);
+    const localized = Buffer.from(text);
+    if (original.length !== localized.length) continue;
+    const offset = source.indexOf(original);
+    if (offset < 8 || source[offset + original.length] !== 0 ||
+        source.readUInt32LE(offset - 8) !== 5 || source.readUInt32LE(offset - 4) !== original.length + 1) continue;
+    localized.copy(bytes, offset);
+    count++;
+  }
+  return count ? { bytes, count } : null;
 }
 
 function translateBasePackage(bytes, dictionary) {
@@ -214,7 +243,12 @@ function createGameLocalization(exe, log, isOpen = gameIsOpen) {
       const data = translateBasePackage(originalData, dictionary);
       if (!locale.count && !data.count) return { state: 'unsupported' };
       temporary = path.join(path.dirname(exe), '.calculator-zh-stage-' + id + '.tmp');
-      await stageLocalizedExe(exe, temporary, [[localePath, locale.bytes], [basePackagePath, data.bytes]]);
+      const replacements = [[localePath, locale.bytes], [basePackagePath, data.bytes]];
+      const cookingScene = withGamePack(exe, ({ entries }) =>
+        [...entries.keys()].find(name => name.endsWith('-cooking_difficulty_view.scn')));
+      const cooking = cookingScene && translateCookingDifficultyScene(readPackedFile(exe, cookingScene), dictionary);
+      if (cooking) replacements.push([cookingScene, cooking.bytes]);
+      await stageLocalizedExe(exe, temporary, replacements);
       if (runtime) {
         runtimeStage = assembly + '.' + id + '.tmp';
         runtimeRollback = assembly + '.' + id + '.rollback.tmp';
@@ -238,7 +272,7 @@ function createGameLocalization(exe, log, isOpen = gameIsOpen) {
         throw error;
       }
       log.record('game_localization_installed', { messages: locale.count, dataFields: data.count, runtime: !!runtime });
-      return { state: 'installed', count: locale.count + data.count };
+      return { state: 'installed', count: locale.count + data.count + (cooking?.count ?? 0) };
     } catch (error) {
       log.record('game_localization_failed', { code: error.code ?? error.message });
       if (error.code === 'ENOSPC') return { state: 'no-space' };
@@ -254,4 +288,4 @@ function createGameLocalization(exe, log, isOpen = gameIsOpen) {
   return { status, install };
 }
 
-module.exports = { createGameLocalization, translateLocale, translateBasePackage };
+module.exports = { createGameLocalization, translateLocale, translateBasePackage, translateCookingDifficultyScene };

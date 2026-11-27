@@ -231,7 +231,7 @@ function questSourceList(locations, item, remaining, projections = new Map(), ma
         actionQueue.targets.get(where.actionId)?.action.outputItems?.includes(item)
         ? { type: 'item', item, value: remaining } : null;
       const step = { key: where.actionId, minutes: goal ? 0 : minutes, ...(goal && { goal }) };
-      if (validQueueStep(step)) entry.append(' ', queueButton('加入定时挂机', () => appendQueuePlan([step])));
+      if (validQueueStep(step)) entry.append(' ', queueButton('加入行动列队', () => appendQueuePlan([step])));
     }
     appendQuestRestrictions(entry, restrictions);
     if (!material && where.ingredients.length) {

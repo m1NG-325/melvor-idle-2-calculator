@@ -16,10 +16,12 @@ using GamesByMalcs.Melvor2.Components.CraftingAction;
 using GamesByMalcs.Melvor2.Components.Experience;
 using GamesByMalcs.Melvor2.Components.Inventories;
 using GamesByMalcs.Melvor2.Conditions;
+using GamesByMalcs.Melvor2.Data.Items;
 using GamesByMalcs.Melvor2.Entities.Bank;
 using GamesByMalcs.Melvor2.Entities.Fishing;
 using GamesByMalcs.Melvor2.Entities.Cooking;
 using GamesByMalcs.Melvor2.Entities.Firemaking;
+using GamesByMalcs.Melvor2.Entities.Hunting;
 using GamesByMalcs.Melvor2.Entities.Mining;
 using GamesByMalcs.Melvor2.Entities.Woodcutting;
 using GamesByMalcs.Melvor2.MainMenu;
@@ -249,6 +251,8 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
             WoodcuttingActionComponent wood => StartTree(game, wood, target),
             MiningActionComponent mining => StartRock(game, mining, target),
             FishingActionComponent fishing => StartFishing(game, fishing, target),
+            HuntingActionComponent hunting => StartHunting(game, hunting, target,
+                item => inventory?.GetQuantity(item) > 0),
             CookingActionComponent cooking => StartRecipe(game, cooking, target,
                 cooking.ActiveRecipes.Values, entry => entry.Recipe.Id,
                 entry => CanUse(entry.Recipe, entry.Recipe.Category), cooking.CanCreateRecipe,
@@ -428,6 +432,28 @@ internal sealed class CalculatorBridge(SceneTree tree, string directory)
             }, () => ReferenceEquals(action.CurrentRecipe, recipe));
         }
         return "unsupported";
+    }
+
+    private string StartHunting(GamesByMalcs.Melvor2.Game game, HuntingActionComponent action, string? id,
+        Func<Item, bool> hasTrap)
+    {
+        var animal = action.Animals.Values.FirstOrDefault(entry => entry.Animal.Id == id);
+        if (animal is null) return "unsupported";
+        if (action.IsStarted) return "action-in-use";
+        if (!CanUse(animal.Animal, animal.Animal.Location)) return "locked";
+        if (!action.CanTrackAnimal(animal) && (animal.SelectedTrap is null || action.AutoSwapToNextTrap))
+        {
+            var trap = animal.CompatibleTraps.LastOrDefault(hasTrap);
+            if (trap is not null) animal.SelectTrap(trap);
+            else if (animal.SelectedTrap is null && animal.Animal.EnableTrapless) animal.EnableTrapless();
+        }
+        if (!action.CanTrackAnimal(animal)) return "hunting-trap";
+        return Start(game, action, () =>
+        {
+            action.SelectLocation(animal.Location);
+            action.SelectAnimal(animal);
+            action.StartTracking();
+        }, () => ReferenceEquals(action.CurrentAnimal, animal));
     }
 
     private string StartRecipe<T>(GamesByMalcs.Melvor2.Game game, ActionComponent action, string? id,

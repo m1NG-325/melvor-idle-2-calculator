@@ -1,6 +1,6 @@
 const preferenceFields = [
   'hours', 'metric', 'sell', 'sellFishingSpecial', 'includeRiskyThieving', 'filter', 'search', 'item', 'quantity', 'action',
-  'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'questChoice',
+  'shopScope', 'shopPurchaseFilter', 'shopSearch', 'shopShortages', 'shopLayout', 'questChoice',
   'productionTarget', 'productionMode', 'productionHours', 'productionQuantity', 'productionReserve',
   'productionStock', 'productionSellByproducts', 'productionComparisonItems',
   'statisticsSearch', 'itemLookupSort',
@@ -126,7 +126,7 @@ function savePreferences() {
   const settings = JSON.stringify({
     version: 1, language: uiLanguage, page: location.hash.split('/')[0], theme,
     character: profile?.characterId ?? (profileReadError || byId('save').value ? preferences.character : 'manual'),
-    fields: { xpSkill: xpView.skill, xpSection: experienceSection, statisticsScope: statisticsScope(),
+    fields: { xpSkill: xpView.skill, xpSection: experienceSection, xpCategories: xpView.categories, statisticsScope: statisticsScope(),
       ...Object.fromEntries(preferenceFields.filter(id => byId(id)).map(id => {
       const input = byId(id);
       return [id, input.type === 'checkbox' ? input.checked : input.value];

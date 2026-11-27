@@ -200,20 +200,20 @@ select option, select optgroup { background-color: var(--panel); }
   margin-inline-start: auto;
   overflow-wrap: anywhere;
 }
-#statisticsMetrics {
+#statisticsMetrics, #statisticsTotals {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
   gap: 8px;
   margin: 10px 0 0;
 }
-#statisticsMetrics > div, #statisticsCategories, #statisticsDetail {
+#statisticsMetrics > div, #statisticsTotals > div, #statisticsCategories, #statisticsDetail {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
 }
-#statisticsMetrics > div { padding: 8px 12px; }
-#statisticsMetrics dt { color: var(--muted); }
-#statisticsMetrics dd {
+#statisticsMetrics > div, #statisticsTotals > div { padding: 8px 12px; }
+#statisticsMetrics dt, #statisticsTotals dt { color: var(--muted); }
+#statisticsMetrics dd, #statisticsTotals dd {
   margin: 2px 0 0;
   color: var(--aqua);
   font-size: 1.15rem;
@@ -359,6 +359,8 @@ details > .inputs, details > .scroll, details > p { margin-top: 12px; }
 #shopScopeHelp, #shopCostHelp { font-size: 12px; }
 #shopScopeHelp { margin-top: 5px; }
 #shopTable { margin-top: 12px; }
+.shop-purchase-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.shop-purchase-row input[type="checkbox"] { flex: none; margin: 0; }
 .shop-items { min-width: 480px; --shop-columns: minmax(150px, 1.9fr) repeat(3, minmax(91px, 1fr)); }
 .show-spent .shop-items { min-width: 600px; --shop-columns: minmax(150px, 1.9fr) repeat(4, minmax(91px, 1fr)); }
 .purchased-only .shop-items { min-width: 365px; --shop-columns: minmax(150px, 1.9fr) repeat(2, minmax(91px, 1fr)); }
@@ -375,6 +377,10 @@ details > .inputs, details > .scroll, details > p { margin-top: 12px; }
 .shop-header { background: var(--surface); border-radius: 9px; font-size: 12px; font-weight: 650; padding-left: 29px; }
 summary.shop-row { display: list-item; padding: 0 0 0 9px; border-radius: 9px; }
 summary.shop-row::marker { color: var(--aqua); }
+summary.shop-purchase-summary { display: flex; align-items: center; gap: 9px; padding: 9px 11px 9px 9px; }
+summary.shop-purchase-summary > .shop-purchase-row { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+summary.shop-purchase-summary::before { content: '▸'; flex: none; color: var(--aqua); }
+details[open] > summary.shop-purchase-summary::before { content: '▾'; }
 .shop-row-content { display: inline-grid; width: calc(100% - 15px); }
 .shop-items details { margin-top: 4px; border: 1px solid transparent; border-radius: 11px; }
 .shop-items details > summary:hover, .shop-items details[open] > summary { background: var(--surface); }
@@ -710,6 +716,14 @@ td .xp-progress { min-width: 10rem; }
 .queue-access[data-access="unknown"], .queue-restriction[data-access="unknown"] { color: var(--muted); }
 #queueStepsWrap { overflow-x: auto; }
 .queue-duration input { width: 5.5rem; text-align: center; }
+.queue-eta { display: block; color: var(--muted); margin-block-start: 4px; }
+.queue-current { background: var(--surface); }
+#queueProgress { display: block; width: 100%; height: .65rem; accent-color: var(--aqua); }
+#gameLocalization:disabled, #gameLocalizationInstall:disabled {
+  opacity: .48;
+  cursor: default;
+  border-color: var(--line);
+}
 .queue-edit-dialog form { display: grid; gap: .8rem; }
 .queue-edit-dialog :is(h2, p, input) { margin: 0; }
 .queue-goal-button {

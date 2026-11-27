@@ -5,7 +5,7 @@
   const notice = document.getElementById('gameLocalizationStatus');
 
   const messages = {
-    installed: '自制汉化已安装。',
+    installed: '已汉化（最新版）',
     outdated: '检测到旧版自制汉化，可以直接更新。',
     busy: '正在处理游戏文件，请稍候。',
     'game-open': '请先退出游戏，再试一次。',
@@ -19,9 +19,10 @@
 
   function render() {
     open.hidden = !state || state === 'unavailable';
-    install.hidden = state === 'installed';
+    open.disabled = pending || state === 'installed';
+    open.textContent = t(state === 'installed' ? '已汉化（最新版）' : state === 'outdated' ? '更新自制汉化' : '一键汉化');
     install.disabled = pending || !['available', 'outdated'].includes(state);
-    install.textContent = t(state === 'outdated' ? '更新自制汉化' : '安装自制汉化');
+    install.textContent = t(state === 'installed' ? '已汉化（最新版）' : state === 'outdated' ? '更新自制汉化' : '安装自制汉化');
     notice.textContent = feedback ? t(messages[feedback] ?? '') : '';
   }
 
@@ -35,6 +36,7 @@
   }
 
   async function refresh() {
+    if (pending) return;
     try {
       state = await request('status');
       feedback = state;
@@ -65,8 +67,7 @@
   });
   document.getElementById('gameLocalizationClose').addEventListener('click', () => dialog.close());
   install.addEventListener('click', () => void installTranslation());
-  document.addEventListener('change', event => {
-    if (event.target.id === 'language' && dialog.open) render();
-  });
+  window.addEventListener('calculator-language', render);
+  window.addEventListener('focus', refresh);
   void refresh();
 })();

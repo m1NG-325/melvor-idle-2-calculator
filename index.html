@@ -41,7 +41,7 @@
         </svg><span>挂机收益</span>
       </a>
       <a id="queueLink" href="#action-queue">
-        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>定时挂机</span>
+        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>行动列队</span>
       </a>
       <a id="productionLink" href="#production">
         <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -318,6 +318,7 @@
         <h2 id="xpDetailHeading">行动排行</h2>
         <div class="xp-goal">
           <div class="inputs">
+            <label id="xpCategoryField" hidden>行动分类<select id="xpCategory"></select></label>
             <label class="xp-action-choice">估算行动<select id="xpActionChoice"></select></label>
             <label id="xpGoalLevelField">目标等级<input id="xpGoalLevel" type="number" min="1" max="99" step="1"></label>
             <label id="xpGoalSliderField" class="xp-level-slider">滑动设置目标等级<input id="xpGoalSlider" type="range" min="1" max="99" step="1"></label>
@@ -428,12 +429,15 @@
       <h2 id="shopResourcesTitle">升级资源清单</h2>
       <div class="inputs">
         <label>搜索资源或升级<input id="shopSearch" type="search" placeholder="例如铁锭、仓库、斧头"></label>
+        <label>排列方式<select id="shopLayout"><option value="resource">按资源</option><option value="purchase">按购买项目</option></select></label>
         <label class="check"><input id="shopShortages" type="checkbox">只看有缺口</label>
+        <button id="shopToQueue" type="button" disabled>将所选材料加入行动列队</button>
       </div>
+      <p id="shopQueueStatus" class="muted" role="status"></p>
       <p id="shopEmpty" class="empty muted" hidden></p>
       <div class="scroll" id="shopTable" hidden>
         <div class="shop-items">
-          <div class="shop-row shop-header muted"><span>资源 · 点击查看用途</span><span class="number spent-col">已购用量</span><span class="number pending-col">未购总需</span><span class="number">仓库 / 余额</span><span class="number pending-col">还缺</span></div>
+          <div class="shop-row shop-header muted" id="shopResourceHeader"><span>资源 · 点击查看用途</span><span class="number spent-col">已购用量</span><span class="number pending-col">未购总需</span><span class="number">仓库 / 余额</span><span class="number pending-col">还缺</span></div>
           <div id="shopResources"></div>
         </div>
       </div>
@@ -472,7 +476,7 @@
     <div id="questSteps"></div>
   </div>
   <div id="queuePage" hidden>
-    <h1>定时挂机</h1>
+    <h1>行动列队</h1>
     <section class="panel">
       <div class="inputs queue-library">
         <label>已保存队列<select id="queueSelect"></select></label>
@@ -507,7 +511,7 @@
       <p id="queueEmpty" class="muted">按执行顺序添加挂机行动。</p>
       <div id="queueStepsWrap" class="table-wrap" hidden>
         <table class="production-table">
-          <thead><tr><th>行动</th><th>结束条件</th><th>挂机时长（分钟）</th><th>调整顺序</th></tr></thead>
+          <thead><tr><th>行动</th><th>结束条件</th><th>挂机时长（分钟）</th><th>预计耗时</th><th>调整顺序</th></tr></thead>
           <tbody id="queueSteps"></tbody>
         </table>
       </div>
@@ -540,6 +544,7 @@
         <p class="muted">开始挂机后，工具会打开游戏并自动载入所选角色。如果游戏找不到该存档，请在游戏内载入。</p>
       </div>
       <p id="queueStatus" class="status muted" role="status" hidden></p>
+      <progress id="queueProgress" max="1" hidden></progress>
       <input id="queueDraft" type="hidden" value="[]">
       <input id="queueLibrary" type="hidden">
     </section>
@@ -600,7 +605,8 @@
       <p id="productionRandomNotice" class="muted" hidden></p>
       <p id="productionRevenue" class="muted"></p>
       <p id="productionBank" class="muted"></p>
-      <button type="button" id="productionToQueue" hidden>加入定时挂机</button>
+      <button type="button" id="productionToQueue" hidden>加入行动列队</button>
+      <p id="productionXp" class="muted" hidden></p>
       <p id="productionQueueNote" class="status muted" hidden></p>
       <details id="productionByproducts" class="production-byproducts" hidden>
         <summary>剩余副产物</summary>
@@ -623,6 +629,7 @@
     </section>
     <div id="statisticsResults" hidden>
       <dl id="statisticsMetrics"></dl>
+      <dl id="statisticsTotals" class="statistics-totals"></dl>
       <p class="panel muted" id="statisticsEmpty" hidden>没有匹配的统计。</p>
       <div id="statisticsSections">
         <nav id="statisticsCategories" aria-label="统计分类"></nav>

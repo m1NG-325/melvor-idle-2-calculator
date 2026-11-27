@@ -89,11 +89,11 @@ function independentProductionBatches(sources, missing, costOf) {
 }
 
 function planProduction(catalog, profile, index, target, hours, useStock, evaluateCycle,
-  { preview = false, items, sellByproducts = false, keptItems = new Set(), targetQuantity, reservePercent = 0 } = {}) {
-  const byQuantity = targetQuantity != null;
+  { preview = false, items, sellByproducts = false, keptItems = new Set(), targetQuantity, reservePercent = 0, shopping } = {}) {
+  const byQuantity = targetQuantity != null || Boolean(shopping);
   if (target && !index.producers.has(target)) return [];
-  if (byQuantity ? !Number.isSafeInteger(targetQuantity) || targetQuantity < 1 || (!target && !items) :
-    !Number.isFinite(hours) || hours <= 0) return [];
+  if (!shopping && (byQuantity ? !Number.isSafeInteger(targetQuantity) || targetQuantity < 1 || (!target && !items) :
+    !Number.isFinite(hours) || hours <= 0)) return [];
   const budget = byQuantity ? Infinity : hours * 3600;
   const models = new Map();
   const modelFor = action => {
@@ -108,7 +108,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
           if (drop.random ?? !Number.isInteger(drop.quantity)) randomItems.add(drop.id);
         }
         models.set(action.id, { action, output, randomItems, seconds: row.seconds, duration: row.durationForCycles, direct: row.direct,
-          inputs: row.inputs, restrictions: row.restrictions ?? [], sacrifice: row.sacrifice });
+          inputs: row.inputs, restrictions: row.restrictions ?? [], sacrifice: row.sacrifice, xpForCycles: row.xpForCycles });
       }
     }
     return models.get(action.id);
@@ -330,6 +330,7 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
     state.wallet.set('GoldPieces', (state.wallet.get('GoldPieces') ?? 0) + direct);
     state.seconds += seconds;
     state.steps.push({ action: model.action, cycles, seconds, used, output, restrictions, randomOutput: model.randomItems.size > 0,
+      xp: model.xpForCycles?.(cycles) ?? 0,
       sacrificeGp: (model.sacrifice?.gp ?? 0) * cycles });
     return true;
   }
@@ -430,6 +431,26 @@ function planProduction(catalog, profile, index, target, hours, useStock, evalua
       sales, byproducts, byproductSales, materials, net, sacrifice,
       netPerHour: elapsedHours > 0 ? net / elapsedHours : null, seconds: result.seconds,
       direct: result.direct, goldCost: result.goldCost, steps: result.steps, bankUsed: result.bankUsed, externalCost: result.externalCost, preview };
+  }
+  if (shopping) {
+    let state = newState();
+    const missing = [];
+    const demand = new Map();
+    for (const [id, quantity] of shopping) {
+      const reserved = Math.min(quantity, profile.stock?.[id] ?? 0);
+      state.bank.set(id, Math.max(0, (state.bank.get(id) ?? 0) - reserved));
+      if (quantity > reserved) demand.set(id, quantity - reserved);
+    }
+    for (const [id, quantity] of demand) {
+      const shortfall = quantity - inventory(state, id);
+      const next = shortfall > 1e-9 ? bestSource(state, id, shortfall, new Set(), Infinity, { quantityMix: true }) : state;
+      if (!next) { missing.push(id); continue; }
+      state = next;
+      const made = Math.min(state.made.get(id) ?? 0, quantity);
+      state.made.set(id, (state.made.get(id) ?? 0) - made);
+      state.bank.set(id, Math.max(0, (state.bank.get(id) ?? 0) - (quantity - made)));
+    }
+    return { steps: state.steps, missing, shoppingTargets: [...demand.keys()], targetQuantity: 0 };
   }
   const targets = items ?? (target ? (preview || byQuantity ? [target] : productionFamily(index, target)) : [...index.producers]
     .filter(([, actions]) => actions.some(action => action.costs.length)).map(([id]) => id));
@@ -599,10 +620,13 @@ function renderProduction() {
   if (selected) {
     byId('productionHeading').textContent = t(selected.preview ? '目标产线 · 条件预估' : target ? '目标物品产线' : '已比较产线中的最高收益');
     byId('productionWinner').textContent = gameName(catalog.items[selected.item]);
+    const totalXp = selected.steps.reduce((sum, step) => sum + (step.xp ?? 0), 0);
     byId('productionMetrics').replaceChildren(...[
       ['预计净收益', formatGp(selected.net)], ['净 GP/小时', selected.netPerHour == null ? '—' : fullNumber(selected.netPerHour)],
       [selected.sacrifice ? '预计献祭数量' : '预计数量', decimals.format(selected.quantity)],
-      ['产线耗时', formatDuration(selected.seconds / 3600)]
+      ['产线耗时', formatDuration(selected.seconds / 3600)],
+      ...(totalXp > 0 && selected.seconds > 0 && selected.steps.every(step => step.seconds != null)
+        ? [['产线总 XP／小时', formatXp(totalXp * 3600 / selected.seconds)]] : [])
     ].map(([label, value]) => {
       const metric = create('div', t(label));
       metric.append(create('strong', value));
@@ -706,6 +730,9 @@ function productionStepTiming(step) {
       body.append(create('small', t('平均每次产出 {items}', { items: products(1 / step.cycles) })));
       if (step.seconds > 0) body.append(create('small', t('预计每小时产出 {items}', { items: products(3600 / step.seconds) })));
     }
+    if (step.xp > 0) body.append(create('small', t('本步骤 {xp} XP · 每小时 {rate} XP', {
+      xp: formatXp(step.xp), rate: step.seconds > 0 ? formatXp(step.xp * 3600 / step.seconds) : '—'
+    })));
   }
   return body;
 }
@@ -751,7 +778,7 @@ function productionQueueSteps(plan) {
     const target = actionQueue.targets.get(key);
     const minutes = Math.ceil(step.seconds / 60);
     const needed = new Set(plan.steps.slice(index + 1).flatMap(next => next.used.map(row => row.id)));
-    needed.add(plan.item);
+    for (const id of plan.shoppingTargets ?? [plan.item]) needed.add(id);
     const products = step.output.filter(row => needed.has(row.id));
     if (products.length === 1 && queueGoalItems('item', target).includes(products[0].id)) {
       const { id, quantity } = products[0];
@@ -806,6 +833,15 @@ function renderProductionDetail(plan) {
     quantity: currency && id === 'GoldPieces' ? fullNumber(quantity) : expectedQuantity(quantity)
   })).join(' · ');
   byId('productionDetailTitle').textContent = t('{name}的产线', { name: itemName(plan.item) });
+  const chainXp = new Map();
+  for (const step of plan.steps) if (step.xp > 0 && step.action?.skill) {
+    const skill = step.action.skill;
+    chainXp.set(skill, (chainXp.get(skill) ?? 0) + step.xp);
+  }
+  byId('productionXp').hidden = !chainXp.size || !(plan.seconds > 0) || plan.steps.some(step => step.seconds == null);
+  byId('productionXp').textContent = plan.seconds > 0 ? t('按整条产线耗时计算经验／小时：{rates}', {
+    rates: [...chainXp].map(([skill, xp]) => skillName(skill, catalog.xpSkills) + ' ' + formatXp(xp * 3600 / plan.seconds)).join(' · ')
+  }) : '';
   const notice = byId('productionPreview');
   const external = plan.steps.some(step => step.restrictions.some(r => r.type === 'external'));
   const overTime = plan.steps.some(step => step.restrictions.some(r => r.type === 'time'));

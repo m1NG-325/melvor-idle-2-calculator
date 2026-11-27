@@ -46,7 +46,15 @@ function initExperience(catalog) {
   const skill = Object.hasOwn(catalog.xpSkills, saved) && !COMBAT_XP_SKILLS.includes(saved) ? saved :
     Object.keys(catalog.xpSkills).find(id => !COMBAT_XP_SKILLS.includes(id));
   xpView = { catalog, character: null, bonusesByCharacter: new Map(), goalsByCharacter: new Map(),
-    actionsByCharacter: new Map(), skill };
+    actionsByCharacter: new Map(), categories: { ...preferences.fields?.xpCategories }, skill };
+  byId('xpCategory').addEventListener('change', event => {
+    xpView.categories[xpView.skill] = event.target.value;
+    const choices = experienceActionChoices();
+    const previous = catalog.xpActions.find(action => action.id === choices[xpView.skill]);
+    if (event.target.value && previous && experienceCategory(previous) !== event.target.value) delete choices[xpView.skill];
+    renderExperience();
+    queuePreferences();
+  });
   byId('xpIgnoreStock').addEventListener('change', () => {
     renderExperience();
     queuePreferences();
@@ -149,22 +157,80 @@ function experienceActionChoices(character = xpView.character) {
   return xpView.actionsByCharacter.get(key);
 }
 
-function experienceActionName(action) {
-  const name = gameName(action);
+function experienceActionName(action, category) {
+  let name = gameName(action);
   const area = localizedName(action?.areaNames, action?.area);
-  if (!name || !area || area === t('未知名称') || name === area || name.startsWith(area + ' · ')) return name;
-  return area + ' - ' + name;
+  const scoped = category && action && experienceCategory(action) === category;
+  const embedded = area && [' · ', ' - '].find(separator => name?.startsWith(area + separator));
+  if (scoped && embedded) name = name.slice(area.length + embedded.length);
+  const label = scoped || !name || !area || area === t('未知名称') || name === area || embedded ? name : area + ' - ' + name;
+  if (action?.skill !== 'Fishing') return label;
+  const fish = [...new Set(action.fish?.map(([id]) => gameName(xpView?.catalog.items[id])).filter(Boolean))];
+  return fish.length ? label + ' · ' + fish.join(' / ') : label;
+}
+
+const experienceCategory = action => action.location ?? action.category ?? action.area ?? 'other';
+
+const questActionOnly = action => action.category === 'Quests' || Boolean(action.requirementGroups?.flat()
+  .some(req => req.type === 'QuestStepActive' || req.type === 'QuestTaskGoalActive'));
+
+function questOnlyCategories(actions) {
+  const flags = new Map();
+  for (const [id, questOnly] of actions) flags.set(id, (flags.get(id) ?? true) && questOnly);
+  return new Set([...flags].filter(([, questOnly]) => questOnly).map(([id]) => id));
+}
+
+function orderedActionCategories(categories, catalogue, skill, questCategories) {
+  const gameOrder = (catalogue.actionCategoryOrder?.[skill] ?? []).filter(id => categories.has(id));
+  const remaining = [...categories.keys()].filter(id => !gameOrder.includes(id));
+  const ordinary = [];
+  const quests = [];
+  for (const id of new Set([...gameOrder, ...remaining])) {
+    const target = questCategories.has(id) || /^Quests?$|^Quest[A-Z_-]/.test(id) ? quests : ordinary;
+    target.push([id, categories.get(id)]);
+  }
+  return [...ordinary, ...quests];
+}
+
+function filterExperienceCategory(rows, skill) {
+  const input = byId('xpCategory');
+  const actions = xpView.catalog.xpActions.filter(action => action.skill === skill);
+  const categories = new Map(actions.map(action =>
+    [experienceCategory(action), localizedName(action.areaNames, action.area) ?? t('其他行动')]));
+  const ordered = orderedActionCategories(categories, xpView.catalog, skill,
+    questOnlyCategories(actions.map(action => [experienceCategory(action), questActionOnly(action)])));
+  const options = [['', t('全部分类')], ...ordered];
+  if (input.options.length !== options.length || options.some(([id, name], index) =>
+    input.options[index]?.value !== id || input.options[index]?.text !== name)) {
+    input.replaceChildren(...options.map(([id, name]) => new Option(name, id)));
+  }
+  byId('xpCategoryField').hidden = categories.size <= 1;
+  const saved = xpView.categories[skill];
+  input.value = categories.size > 1 && categories.has(saved) ? saved : '';
+  return input.value ? rows.filter(row => experienceCategory(row.action) === input.value) : rows;
+}
+
+function experienceStockTiming(plan) {
+  if (!plan) return '—';
+  if (plan.reaches) return formatXpDuration(plan.hours);
+  if ((!plan.reason || plan.reason === '当前库存不足') && Number.isFinite(plan.totalHours)) {
+    return t('库存可支持 {available}／需 {total}', {
+      available: plan.hours > 0 ? formatXpDuration(plan.hours) : t('0 秒'), total: formatXpDuration(plan.totalHours)
+    });
+  }
+  return t(plan.reason ?? '当前库存不足');
 }
 
 function selectExperienceAction(rows, target, ignoreStock) {
+  const name = action => experienceActionName(action, byId('xpCategory').value);
   const input = byId('xpActionChoice');
   const saved = experienceActionChoices()[xpView.skill];
   const best = rows[0];
   const selected = rows.find(row => row.action.id === saved);
   const label = ignoreStock ? '经验速率最高 · {action}' : target?.remaining === 0 ? '已达到目标' :
     best?.targetPlan?.reaches ? '最快升级 · {action}' : '当前库存经验最多 · {action}';
-  const options = [new Option(best ? t(label, { action: experienceActionName(best.action) }) : t('暂无可用行动'), '')];
-  for (const row of rows) options.push(new Option(experienceActionName(row.action), row.action.id));
+  const options = [new Option(best ? t(label, { action: name(best.action) }) : t('暂无可用行动'), '')];
+  for (const row of rows) options.push(new Option(name(row.action), row.action.id));
   if (saved && !selected) {
     const previous = xpView.catalog.xpActions.find(action => action.id === saved);
     const unavailable = new Option(t('{action}（暂不可用）', { action: experienceActionName(previous) ?? t('未知行动') }), saved);
@@ -220,7 +286,7 @@ function renderExperienceGoal(goal, row, unavailable) {
   const plan = row?.targetPlan ?? row?.planXp(goal.remaining);
   const blocked = plan && !plan.reaches;
   const timing = goal.remaining === 0 ? t('已达到目标') :
-    blocked ? t(plan.reason ?? '当前库存不足') : formatXpDuration(plan?.hours);
+    experienceStockTiming(plan);
   const labels = [
     ['等级', t('{current} → {target}', { current: goal.level, target: goal.target })],
     ['剩余 XP', fullNumber(Math.ceil(goal.remaining))],
@@ -228,7 +294,7 @@ function renderExperienceGoal(goal, row, unavailable) {
   ];
   if (blocked) labels.push([plan.reason && plan.reason !== '当前库存不足' ? '时段内可获 XP' : '库存可获 XP', formatXp(plan.xp)]);
   const note = [
-    row && goal.remaining > 0 && t('按「{action}」的经验收益估算', { action: experienceActionName(row.action) }),
+    row && goal.remaining > 0 && t('按「{action}」的经验收益估算', { action: experienceActionName(row.action, byId('xpCategory').value) }),
     unavailable && t('所选行动暂不可用，当前按推荐行动估算'),
     blocked && row.stockLimit && t('{time}后缺{item}', {
       time: formatDuration(plan.hours, true), item: limitName({ limit: row.stockLimit })
@@ -294,13 +360,28 @@ function renderExperience() {
   }));
   if (focusedSkill) grid.querySelector(`[data-skill="${focusedSkill}"]`)?.focus({ preventScroll: true });
 
-  const rows = groups[selected];
+  const rows = filterExperienceCategory(groups[selected], selected);
   const goal = targets[selected];
+  if (!ignoreStock && goal?.remaining > 0) {
+    const limited = new Map(rows.filter(row => row.targetPlan && !row.targetPlan.reaches &&
+      !Number.isFinite(row.targetPlan.totalHours) && (!row.targetPlan.reason || row.targetPlan.reason === '当前库存不足'))
+      .map(row => [row.action.id, row]));
+    if (limited.size) {
+      const unrestricted = rank({ ...catalog, xpActions: [...limited.values()].map(row => row.action) },
+        { ...character, xpBonuses: experienceBonuses() },
+        { hours: experienceCandidateHours, metric: 'xp', ignoreStock: true });
+      for (const row of unrestricted) {
+        const target = row.planXp(goal.remaining);
+        if (target?.reaches) limited.get(row.action.id).targetPlan.totalHours = target.hours;
+      }
+    }
+  }
   const choice = selectExperienceAction(rows, goal, ignoreStock);
   if (!ignoreStock) renderExperienceGoal(goal, choice.row, choice.unavailable);
   updateSkillTraining({ ...character, xpBonuses: experienceBonuses() }, {
     skill: selected, hours: experienceCandidateHours, goal: ignoreStock ? null : goal, ignoreStock,
-    actionId: choice.unavailable ? '' : experienceActionChoices()[selected]
+    actionId: choice.unavailable ? '' : experienceActionChoices()[selected],
+    category: byId('xpCategory').value
   });
   byId('xpTable').hidden = !rows.length;
   byId('xpEmpty').hidden = !!rows.length;
@@ -349,7 +430,7 @@ function renderExperience() {
     if (row.manualXpPercent) note.push(t('额外 {value}%', { value: decimals.format(row.manualXpPercent) }));
     if (row.cooking) {
       const { proficiency, difficulty, success, preserveOnFail } = row.cooking;
-      note.push(t('烹饪精通 {value}', { value: decimals.format(proficiency) }),
+      note.push(t('烹饪熟练度 {value}', { value: decimals.format(proficiency) }),
         t('产品难度 {value}', { value: decimals.format(difficulty) }),
         t('成功几率 {value}', { value: percent(success) }),
         t('烹饪失败时无经验和产物'));
@@ -366,6 +447,8 @@ function renderExperience() {
     }
     if (row.fishing) {
       note.push(t('杂物几率 {value}，仍可获得经验', { value: percent(row.fishing.junkChance) }));
+      const products = [...new Set(row.action.outputItems)].map(id => gameName(catalog.items[id])).filter(Boolean);
+      if (products.length) note.push(t('可能产出 {items}', { items: products.join(' · ') }));
       if (row.fishing.priority) note.push(t('优先鱼获 {item}', {
         item: gameName(catalog.items[row.fishing.priority]) ?? t('未知物品')
       }));
@@ -400,8 +483,7 @@ function renderExperience() {
       time: formatDuration(plan.hours, true), item: limitName({ limit: row.stockLimit })
     }));
     if (row.risky) note.push(t('失败可受伤，未计生存时间'));
-    const eta = create('td', goal?.remaining === 0 ? t('已达到目标') : plan && !plan.reaches ?
-      t(plan.reason ?? '当前库存不足') : formatXpDuration(plan?.hours));
+    const eta = create('td', goal?.remaining === 0 ? t('已达到目标') : experienceStockTiming(plan));
     const passiveLimit = plan?.limit;
     if (passiveLimit) note.push(t('缺少 {item}', { item: gameName(catalog.items[passiveLimit]) ?? shopCurrencyName(passiveLimit) }));
     if (row.risky && !ignoreStock) eta.append(create('small', t('受伤风险'), 'xp-risk'));
@@ -414,7 +496,7 @@ function renderExperience() {
     const amount = plan?.xp;
     const activeRate = ignoreStock ? experienceHourlyRate(row) : plan?.rate;
     const active = create('td', activeRate == null ? '—' : formatXp(activeRate), 'number gold');
-    item.append(create('td', experienceActionName(row.action)));
+    item.append(create('td', experienceActionName(row.action, byId('xpCategory').value)));
     if (!ignoreStock) item.append(create('td', amount == null ? '—' : formatXp(amount), 'number'));
     item.append(active);
     if (!ignoreStock) item.append(eta);

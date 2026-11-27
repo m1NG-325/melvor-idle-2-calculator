@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setImmediate: turn } = require('node:timers/promises');
 const { createActionRunner } = require('../action-runner.cjs');
-const { createGameBridge, prepareLinkedGame } = require('../game-bridge.cjs');
+const { createGameBridge, prepareLinkedGame, directQueueSkills } = require('../game-bridge.cjs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -173,6 +173,10 @@ test('goal mode validates the expected product and stops at the time limit', asy
   await turn();
   assert.deepEqual(commands[0].payload.goal, step.goal);
   assert.equal(snapshots.at(-1).current, 4);
+  assert.equal(snapshots.at(-1).initial, 0);
+  assert.equal(snapshots.at(-1).round, 1);
+  assert.equal(snapshots.at(-1).totalSteps, 1);
+  assert.equal(snapshots.at(-1).stepKey, step.key);
   assert.deepEqual(commands.map(row => row.operation), ['start', 'inspect', 'inspect']);
   assert.equal(runner.status().state, 'goal-timeout');
 });
@@ -198,10 +202,11 @@ test('queue accepts crafting, stock and spending goals, including zero remaining
 });
 
 test('a completed product target advances to the next condition and uses a new lease', async () => {
-  const stone = 'Mining:Stone';
+  const chicken = 'Hunting:WildChicken';
   const bar = 'Smithing:AdamantiteBar';
+  assert(directQueueSkills.includes('Hunting'));
   const targets = new Map([
-    [stone, { skill: 'Mining', target: 'MelvorBase:Stone', items: ['Stone'] }],
+    [chicken, { skill: 'Hunting', target: 'MelvorBase:WildChicken', items: ['RawChicken'] }],
     [bar, { skill: 'Smithing', target: 'MelvorBase:AdamantiteBar', crafting: true, materials: ['AdamantiteOre'] }]
   ]);
   const replies = ['started', 'running:595000:2:3', 'completed', 'completed'];
@@ -212,7 +217,7 @@ test('a completed product target advances to the next condition and uses a new l
     return replies.shift();
   } }, targets, { wait: async () => progress.push(runner.status()) });
   runner.start([
-    { key: stone, minutes: 0, goal: { type: 'item', item: 'Stone', value: 3 } },
+    { key: chicken, minutes: 0, goal: { type: 'item', item: 'RawChicken', value: 3 } },
     { key: bar, minutes: 10, goal: { type: 'remaining', item: 'AdamantiteOre', value: 1946 } }
   ], 'Player', false);
   await turn();
@@ -220,6 +225,8 @@ test('a completed product target advances to the next condition and uses a new l
   assert.equal(progress.at(-1).target, 3);
   assert.deepEqual(requests.map(({ operation }) => operation), ['start', 'inspect', 'inspect', 'start']);
   assert.equal(requests[0].request.minutes, 0);
+  assert.equal(requests[0].request.skill, 'Hunting');
+  assert.equal(requests[0].request.target, 'MelvorBase:WildChicken');
   assert.notEqual(requests[0].request.lease, requests.at(-1).request.lease);
   assert.equal(runner.status().state, 'completed');
 });

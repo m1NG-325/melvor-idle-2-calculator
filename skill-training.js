@@ -79,8 +79,9 @@ function compareSkillTraining(a, b, ignoreStock) {
   return (b.target?.xp ?? 0) - (a.target?.xp ?? 0);
 }
 
-function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId, ignoreStock }, shop = false) {
+function* skillTrainingSearch(catalogue, character, { skill, hours, goal, actionId, ignoreStock, category }, shop = false) {
   const actions = catalogue.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId) &&
+    (!category || experienceCategory(row) === category) &&
     unlocked(row, character, { requireVerified: true }));
   const { current, candidates, owned, offers } = skillTrainingOptions(catalogue, character, skill, actions, shop);
   if (!actions.length || (shop && !offers.size)) return null;
@@ -164,7 +165,7 @@ let skillTrainingState = {};
 function updateSkillTraining(character, settings) {
   const panel = byId('skillTraining');
   if (panel.closest('[hidden]')) return;
-  const { skill, actionId, hours, goal, ignoreStock } = settings;
+  const { skill, actionId, hours, goal, ignoreStock, category } = settings;
   const ownedStatus = byId('skillTrainingOwnedStatus');
   const shopStatus = byId('skillTrainingShopStatus');
   const ownedResult = byId('skillTrainingOwnedResult');
@@ -178,6 +179,7 @@ function updateSkillTraining(character, settings) {
   }
   shopSection.hidden = false;
   const available = catalog.xpActions.filter(row => row.skill === skill && (!actionId || row.id === actionId) &&
+    (!category || experienceCategory(row) === category) &&
     unlocked(row, character, { requireVerified: true })).map(row => row.id);
   const scope = JSON.stringify([character.characterId, skill, hours, actionId, goal?.target, ignoreStock, available]);
   const key = JSON.stringify([scope, goal?.remaining, character.levels, character.stock, character.currencies,
@@ -244,14 +246,14 @@ function showSkillTrainingPlan(container, status, result, message, ignoreStock) 
   for (const [label, value] of ignoreStock ? [['XP／小时', formatXp(experienceHourlyRate(row))]] : [
     ['预计可获 XP', formatXp(target?.xp ?? row.xp)],
     ['行动中 XP／小时', formatXp(target?.rate ?? row.activeXpPerHour)],
-    ['到目标需时', target?.reaches ? formatXpDuration(target.hours) : target ? t(target.reason ?? '当前库存不足') : '—']
+    ['到目标需时', experienceStockTiming(target)]
   ]) {
     const metric = create('div', t(label));
     metric.append(create('strong', value));
     metrics.append(metric);
   }
   const summary = create('div', undefined, 'skill-training-summary');
-  summary.append(create('strong', experienceActionName(row.action), 'skill-training-action'), metrics);
+  summary.append(create('strong', experienceActionName(row.action, byId('xpCategory').value), 'skill-training-action'), metrics);
   const children = [summary];
   const gear = create('dl', undefined, 'combat-training-gear');
   for (const id of new Set([...loadout, ...current].map(item => item.slot))) {

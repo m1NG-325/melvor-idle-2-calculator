@@ -14,7 +14,7 @@ const localBridge = path.join(__dirname, bridgeAssembly + '.dll');
 const packagedBridge = path.join(__dirname, 'vendor', 'calculator-queue-bridge.json');
 const hasBridgeAssembly = () => existsSync(localBridge) || existsSync(packagedBridge);
 const directQueueSkills = ['Woodcutting', 'Mining', 'Fishing', 'Cooking', 'Smithing', 'Crafting',
-  'Fletching', 'Runecrafting', 'Beastcrafting', 'Firemaking'];
+  'Fletching', 'Runecrafting', 'Beastcrafting', 'Firemaking', 'Hunting'];
 async function verifyBridgeRuntime(file, signal) {
   const { size } = await fs.stat(file);
   if (![...queueRuntimes.values()].includes(size)) throw new Error('bridge-build');

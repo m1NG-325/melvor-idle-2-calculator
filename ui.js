@@ -25,7 +25,7 @@ let profileReadError;
 const profileRenderErrors = new Set();
 const profileSections = {
   settings: '技能修正', idle: '挂机收益', shop: '商店升级', experience: '经验收益',
-  combat: '战斗收益', production: '连锁产线', queue: '定时挂机', statistics: '数据统计', quests: '任务材料'
+  combat: '战斗收益', production: '连锁产线', queue: '行动列队', statistics: '数据统计', quests: '任务材料'
 };
 let runtimeStatus;
 let updateActionPending = false;
@@ -88,9 +88,9 @@ function initIdleDurations() {
   }
 }
 
-async function get(route) {
+async function get(route, options) {
   if (webMode) return webMode.get(route);
-  const response = await fetch(route);
+  const response = await fetch(route, options);
   const body = await response.json();
   if (!response.ok) throw new Error(body.error);
   return body;
@@ -668,7 +668,7 @@ async function init() {
       if (key === page) {
         link.setAttribute('aria-current', 'page');
         byId('activePage').textContent = t({ rank: '挂机收益', xp: '经验收益', shop: '商店升级', combat: '战斗收益',
-          quests: '任务材料', production: '连锁产线', statistics: '数据统计', queue: '定时挂机', itemLookup: '物品检索' }[page]);
+          quests: '任务材料', production: '连锁产线', statistics: '数据统计', queue: '行动列队', itemLookup: '物品检索' }[page]);
       } else link.removeAttribute('aria-current');
     }
     if (page === 'xp' && experienceSection === 'combat') updateCombatTraining();

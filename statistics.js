@@ -248,6 +248,32 @@ async function renderStatistics() {
   }
 }
 
+function statisticsTotals(sections) {
+  const metrics = new Map(sections.flatMap(section => section.statistics.map(stat => [stat.id, stat])));
+  const sum = (ids, subject) => {
+    const values = ids.flatMap(id => {
+      const stat = metrics.get(id);
+      if (!stat) return [];
+      return stat.rows ? [stat.rows.reduce((total, row) => total + (!subject || row.id === subject ? row.value : 0), 0)] :
+        Number.isFinite(stat.value) && !subject ? [stat.value] : [];
+    });
+    return values.length ? values.reduce((a, b) => a + b, 0) : null;
+  };
+  const ids = [...metrics.keys()];
+  return [
+    ['总行动次数', sum(['WoodcuttingActions', 'MiningRocksHit', 'FishingTotalCatches', 'FiremakingFiresLit',
+      'CookingRecipesAttempted', ...ids.filter(id => id.endsWith('RecipesCreated') && id !== 'CookingRecipesCreated'),
+      'FarmingRecipeHarvested', 'HuntingAnimalTrapped', 'HuntingAnimalEscaped', 'AgilityCourseCompleted',
+      'CombatTotalAttacksMade', 'ThievingSuccessfulAction', 'ThievingFailedAction', 'AstrologyTotalStudyActions'])],
+    ['总消耗金币', sum([...ids.filter(id => /CurrencySpent$/.test(id)), 'FarmingCurrencySpentAutomating',
+      'RanchingCurrencySpentOnAnimals', 'QuestCurrencyGiven', 'CombatPrayerTotalCurrencyConsumed'], 'GoldPieces')],
+    ['总造成伤害', sum(['CombatTotalDamageDealt', 'WoodcuttingDamageDealt'])],
+    ['总获得物品', sum(['BankItemFound'])],
+    ['总消耗物品', sum([...ids.filter(id => id.endsWith('ItemSpent')), 'CombatItemUsed', 'CombatFoodItemEaten',
+      'QuestItemGiven', 'BankItemOpened', 'BankItemBuried'])]
+  ];
+}
+
 function renderStatisticsContent() {
   const { data, failed } = statisticsState;
   const status = byId('statisticsStatus');
@@ -279,6 +305,11 @@ function renderStatisticsContent() {
   metrics.replaceChildren(...summary.map(([label, value]) => {
     const card = create('div');
     card.append(create('dt', label), create('dd', value));
+    return card;
+  }));
+  byId('statisticsTotals').replaceChildren(...statisticsTotals(sections).map(([label, value]) => {
+    const card = create('div');
+    card.append(create('dt', t(label)), create('dd', value == null ? '—' : fullNumber(value)));
     return card;
   }));
   const query = byId('statisticsSearch').value.trim().toLocaleLowerCase();

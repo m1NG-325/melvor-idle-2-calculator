@@ -673,7 +673,7 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
   }
   if (!phases.length) return;
 
-  function simulate(seconds, runs = Infinity) {
+  function simulate(seconds, runs = Infinity, respectStock = !settings.ignoreStock) {
     const inventory = new Map();
     const segments = [];
     let cycles = 0;
@@ -691,7 +691,7 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
         }
         const available = inventory.get(key);
         const batch = input.qty / (row.agility?.entries ?? 1);
-        const usable = settings.ignoreStock ? Infinity :
+        const usable = !respectStock ? Infinity :
           available < batch ? 0 : input.quantity > 0 ? 1 + (available - batch) / input.quantity : Infinity;
         if (usable < count) {
           count = usable;
@@ -762,7 +762,7 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
   const payout = direct + sales - goldCost;
   const net = payout - materialCost;
   const activeHours = completed.elapsed / 3600;
-  function plan(target, amount) {
+  function plan(target, amount, includeTotal = false) {
     if (!(target > 0)) return null;
     const positive = phases.map(({ row }) => amount(row)).filter(value => value > 0);
     if (!positive.length) return null;
@@ -770,18 +770,23 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
     const cap = Number.isFinite(zeroRuns) ? Math.ceil(target / Math.min(...positive) + zeroRuns) + 1 :
       phases.reduce((sum, phase) => sum + (Number.isFinite(phase.runs) ? phase.runs : 0), 0);
     const valueOf = result => result.segments.reduce((sum, segment) => sum + segment.count * amount(segment.row), 0);
-    const possible = Math.floor(simulate(Infinity, cap).cycles + 1e-9);
-    let low = 0;
-    let high = possible;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (valueOf(simulate(Infinity, middle)) >= target) high = middle;
-      else low = middle + 1;
+    function findRun(respectStock) {
+      let low = 0;
+      let high = Math.floor(simulate(Infinity, cap, respectStock).cycles + 1e-9);
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (valueOf(simulate(Infinity, middle, respectStock)) >= target) high = middle;
+        else low = middle + 1;
+      }
+      return simulate(Infinity, low, respectStock);
     }
-    const result = simulate(Infinity, low);
+    const result = findRun(!settings.ignoreStock);
     const value = valueOf(result);
     const hours = result.elapsed / 3600;
-    return { hours, xp: value, rate: hours > 0 ? value / hours : 0, reaches: value >= target, limit: scheduled.limit };
+    const reaches = value >= target;
+    const total = includeTotal && !reaches && !settings.ignoreStock ? findRun(false) : result;
+    return { hours, totalHours: valueOf(total) >= target ? total.elapsed / 3600 : null,
+      xp: value, rate: hours > 0 ? value / hours : 0, reaches, limit: scheduled.limit };
   }
   return { ...phases[0].row, cycles, activeHours, xp: completed.xp, xpPerHour: completed.xp / settings.hours,
     activeXpPerHour: completed.xp / activeHours, xpPerCycle: completed.xp / cycles, seconds: completed.elapsed / cycles,
@@ -791,7 +796,7 @@ function evaluateSkillCharges(action, profile, catalog, settings, charges) {
     payoutPerHour: payout / settings.hours, activeNetPerHour: net / activeHours,
     risky: completed.segments.some(phase => phase.row.risky),
     skillCharges: [...chargeSpent].map(([id, quantity]) => ({ id, quantity })),
-    planXp: amount => plan(amount, row => row.xp),
+    planXp: amount => plan(amount, row => row.xp, true),
     timeForItems: settings.itemProjection ? (id, quantity) => {
       const estimate = plan(quantity, row => row.drops.filter(drop => drop.id === id && !drop.target)
         .reduce((sum, drop) => sum + drop.quantity, 0));
@@ -1083,6 +1088,7 @@ function evaluateAction(action, profile, catalog, settings) {
   }
   let stockCycles = Infinity;
   let stockLimit = '';
+  const inputStockCycles = settings.production ? new Map() : null;
   const possibleCycles = (available, quantity) => {
     const firstBatch = quantity / entryFactor;
     if (available < firstBatch) return 0;
@@ -1095,6 +1101,7 @@ function evaluateAction(action, profile, catalog, settings) {
   for (const [id, qty] of ingredients) {
     const available = profile.keep?.includes(id) ? 0 : stock[id] ?? 0;
     const possible = settings.ignoreStock ? Infinity : possibleCycles(available, qty);
+    inputStockCycles?.set('item:' + id, possible);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
@@ -1103,6 +1110,7 @@ function evaluateAction(action, profile, catalog, settings) {
   for (const [id, qty] of currencyIngredients) {
     const available = currencies[id] ?? 0;
     const possible = settings.ignoreStock ? Infinity : possibleCycles(available, qty);
+    inputStockCycles?.set('currency:' + id, possible);
     if (possible < stockCycles) {
       stockCycles = possible;
       stockLimit = id;
@@ -1168,7 +1176,8 @@ function evaluateAction(action, profile, catalog, settings) {
     if (!Number.isFinite(available)) return null;
     const hours = durationForCycles(available) / 3600;
     const xp = xpForCycles(available);
-    return { hours, xp, rate: hours > 0 ? xp / hours : 0, reaches: attempts <= stockCycles };
+    return { hours, totalHours: Number.isFinite(attempts) ? durationForCycles(attempts) / 3600 : null,
+      xp, rate: hours > 0 ? xp / hours : 0, reaches: attempts <= stockCycles };
   };
   const knowledge = action.knowledge == null ? null : Math.max(0,
     (action.knowledge + stat('FlatKnowledge')) * (1 + stat('PercentKnowledge')));
@@ -1184,6 +1193,7 @@ function evaluateAction(action, profile, catalog, settings) {
   });
   return {
     action, cycles, net, payout, limit, activeHours, timeForItems, durationForCycles,
+    stockCycles, inputStockCycles, successfulCycles: count => cooking ? cooking.total(count, 'success') : count,
     direct, directSources: directSources?.map(row => ({ ...row, value: row.value * cycles })),
     sales, materialCost, goldCost, drops, inputs, seconds, knowledge, percentInterval, flatInterval,
     netPerHour: net / settings.hours, payoutPerHour: payout / settings.hours,
@@ -1191,7 +1201,7 @@ function evaluateAction(action, profile, catalog, settings) {
     xp: xpPerReward * effectiveCycles, xpPerHour: xpPerReward * effectiveCycles / settings.hours,
     activeXpPerHour: xpPerReward * effectiveCycles / activeHours, stockLimit, knownXpPercent, manualXpPercent, risky,
     wood, mining, cooking, thieving, fishing, brewing, craftingSteps, agility, hunting, preservation, consumption, sacrifice,
-    planXp, doubleOutput, flatXp: stat('FlatXPGained'), xpPerCycle
+    planXp, xpForCycles, doubleOutput, flatXp: stat('FlatXPGained'), xpPerCycle
   };
 }
 

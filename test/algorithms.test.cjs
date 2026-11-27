@@ -158,6 +158,20 @@ test('a fish-to-cooking chain uses the catch rate and cooking success without re
   assert.equal(result.quantity, 1);
   assert.equal(result.seconds, 12);
   assert.equal(result.net, 30);
+  assert.ok(result.steps.every(step => step.xp > 0));
+  assert.equal(result.steps[1].xp, cooking.baseXp);
+});
+
+test('shopping reserves owned targets and shares gathered materials across purchases', () => {
+  const gather = { ...recipe, id: 'Crafting:ore', costs: [], rewards: [['ore', 1, 1]], seconds: 1 };
+  const craft = { ...recipe, costs: [['ore', 2]], rewards: [['bar', 1, 1]], seconds: 1 };
+  const data = catalog([gather, craft]);
+  const actor = { ...profile, stock: { ore: 1 } };
+  const plan = planProduction(data, actor, indexProduction(data), null, 0, true, productionCycle,
+    { shopping: new Map([['bar', 1], ['ore', 1]]) });
+  assert.deepEqual(plan.missing, []);
+  assert.deepEqual(plan.steps.map(step => [step.action.id, step.cycles]), [[gather.id, 2], [craft.id, 1]]);
+  assert.equal(actor.stock.ore, 1);
 });
 
 test('instant item upgrades consume each ingredient and do not spend production time', () => {

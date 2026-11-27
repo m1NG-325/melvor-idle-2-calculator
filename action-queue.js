@@ -7,6 +7,7 @@ const actionQueue = { targets: new Map(), steps: [], queues: [], status: { state
 let queueCommandPending = false;
 let queueCommandVersion = 0;
 let queueStatusPending = false;
+let queueStatusStale = false;
 const validQueueMinutes = value => Number.isInteger(value) && value >= 0 && value <= maxQueueMinutes;
 const queueItemName = id => gameName(catalog.items[id]) ?? t('未知物品');
 const productGoal = type => type === 'item' || type === 'owned';
@@ -35,8 +36,7 @@ function queueTargets(catalog) {
     if (!targets.has(key)) targets.set(key, { skill: action.skill, id: action.recipe, action,
       category: action.location ?? action.category, areaLabel: action.area,
       areaNames: action.areaNames, groups: action.requirementGroups,
-      questOnly: action.category === 'Quests' || action.requirementGroups?.flat()
-        .some(req => ['QuestStepActive', 'QuestTaskGoalActive'].includes(req.type))
+      questOnly: questActionOnly(action)
     });
   }
   for (const enemy of catalog.combatTargets ?? []) {
@@ -79,7 +79,9 @@ function queueLabel(target, scope = 'full') {
   const skill = queueSkillLabel(target.skill);
   const area = target.areaLabel && queueArea(target);
   const title = gameName(target.action) ?? t('未知行动');
-  const name = target.skill === 'Agility' ? title.split(' · ')[0] : title;
+  let name = target.skill === 'Agility' ? title.split(' · ')[0] : title;
+  const embedded = area && [' · ', ' - '].find(separator => name.startsWith(area + separator));
+  if (embedded) name = name.slice(area.length + embedded.length);
   const parts = scope === 'full' ? [skill, area, name] : scope === 'all' ? [area, name] : [name];
   return parts.filter((part, index) => part && parts.indexOf(part) === index).join(' · ');
 }
@@ -112,6 +114,92 @@ function queueButton(text, action) {
   button.type = 'button';
   button.addEventListener('click', action);
   return button;
+}
+
+function queueForecast(steps, character, catalogue, targets) {
+  const actor = character && { ...character, stock: { ...character.stock }, currencies: { ...character.currencies },
+    levels: { ...character.levels }, skillXp: { ...character.skillXp }, keep: [] };
+  let canProjectStock = Boolean(actor?.characterId);
+  return steps.map(({ key, minutes, goal }) => {
+    const limit = minutes > 0 ? minutes * 60 : null;
+    if (!goal && limit === null) {
+      canProjectStock = false;
+      return { reason: '无时限' };
+    }
+    const target = targets.get(key);
+    const fallback = !goal ? { seconds: limit } : { reason: '暂无法估算' };
+    if (!canProjectStock || !target?.action.costs || !(actor.levels[target.skill] > 0)) {
+      canProjectStock = false;
+      return fallback;
+    }
+    const { action, skill } = target;
+    const stock = Math.round(actor.stock[goal?.item] ?? 0);
+    const xpGoal = goal?.type === 'level' && xpGoalProgress(actor.levels[skill], actor.skillXp[skill], goal.value);
+    const needed = goal?.type === 'owned' ? Math.max(0, goal.value - stock) : goal?.type === 'remaining' ?
+      Math.max(0, stock - goal.value) : goal?.type === 'level' ? xpGoal?.remaining : goal?.value;
+    if (needed === 0) return { seconds: 0 };
+    const model = productionCycle(action, actor, catalogue);
+    if (!model?.durationForCycles) {
+      canProjectStock = false;
+      return fallback;
+    }
+    const { durationForCycles } = model;
+    let { stockCycles } = model;
+    let cycles;
+    if (goal) {
+      const material = materialGoal(goal.type) && model.inputs.find(input => !input.currency && input.id === goal.item);
+      const rate = goal.type === 'level' ? model.xpPerCycle :
+        goal.type === 'recipes' ? model.successfulCycles(1) :
+        materialGoal(goal.type) ? material?.quantity :
+        model.drops.filter(drop => !drop.target && drop.id === goal.item).reduce((sum, drop) => sum + drop.quantity, 0);
+      const attempts = needed / rate;
+      cycles = Number.isFinite(attempts) && attempts > 0 ? Math.ceil(attempts - attempts * Number.EPSILON) : Infinity;
+      if (material?.qty > 0) {
+        const reachable = Math.floor(stock / material.qty) * material.qty >= needed;
+        if (reachable) {
+          // The last material batch is discrete even when preservation makes the average fractional.
+          const targetKey = 'item:' + goal.item;
+          stockCycles = Math.min(...[...model.inputStockCycles].map(([id, count]) =>
+            id === targetKey ? Math.max(count, cycles) : count));
+        }
+      }
+    } else {
+      let lower = 0;
+      let upper = 1;
+      while (durationForCycles(upper) <= limit && upper < Number.MAX_SAFE_INTEGER / 2) upper *= 2;
+      while (upper - lower > 1) {
+        const middle = Math.floor((lower + upper) / 2);
+        if (durationForCycles(middle) <= limit) lower = middle;
+        else upper = middle;
+      }
+      cycles = lower;
+    }
+    const expected = Number.isFinite(cycles) ? durationForCycles(cycles) : Infinity;
+    if (cycles > stockCycles || !Number.isFinite(expected) || (goal && limit !== null && expected > limit)) {
+      canProjectStock = false;
+      const stockBound = cycles > stockCycles ? durationForCycles(stockCycles) : Infinity;
+      const seconds = Math.min(stockBound, limit ?? Infinity);
+      return { seconds: Number.isFinite(seconds) ? seconds : undefined,
+        reason: stockBound <= (limit ?? Infinity) && Number.isFinite(stockBound) ? '预计材料不足' :
+          limit !== null ? '预计到时仍未达标' : '暂无法估算' };
+    }
+    for (const input of model.inputs) {
+      const balances = input.currency ? actor.currencies : actor.stock;
+      balances[input.id] = Math.max(0, (balances[input.id] ?? 0) - input.quantity * cycles);
+    }
+    if (goal?.type === 'remaining') actor.stock[goal.item] = Math.min(actor.stock[goal.item], goal.value);
+    for (const drop of model.drops) {
+      if (!drop.target) actor.stock[drop.id] = (actor.stock[drop.id] ?? 0) + drop.quantity * cycles;
+    }
+    actor.currencies.GoldPieces = (actor.currencies.GoldPieces ?? 0) + model.direct * cycles;
+    const gained = model.xpForCycles(cycles);
+    if (gained > 0 && actor.levels[skill] <= XP_LEVEL_CAP) {
+      const progress = xpGoalProgress(actor.levels[skill], actor.skillXp[skill], actor.levels[skill]);
+      actor.skillXp[skill] = progress.xp + gained;
+      actor.levels[skill] = levelFor(actor.skillXp[skill]);
+    }
+    return { seconds: goal ? expected : limit };
+  });
 }
 
 function queueStatus(message = '', args = {}) {
@@ -252,12 +340,26 @@ function updateQueueTotal() {
   hint.hidden = !access;
   hint.textContent = access?.description ?? '';
   hint.dataset.access = access?.state ?? '';
-  byId('queueStart').disabled = busy || (steps.length ? !valid || !steps.every(queueCanRun) : !queueCanRun(draft));
+  byId('queueStart').disabled = busy || queueStatusStale || (steps.length ? !valid || !steps.every(queueCanRun) : !queueCanRun(draft));
   byId('queueTotal').hidden = !valid;
-  if (valid) byId('queueTotal').textContent = t(steps.some(step => step.minutes === 0) ? '队列包含无时限步骤' :
-    steps.some(step => step.goal) ? '每轮最多 {duration}' : '每轮计划时长 {duration}', {
-    duration: formatDuration(steps.reduce((sum, step) => sum + step.minutes, 0) / 60, true)
-  });
+  const key = JSON.stringify(steps);
+  if (actionQueue.forecastKey !== key || (!busy && actionQueue.forecastProfile !== profile)) {
+    actionQueue.forecastKey = key;
+    actionQueue.forecastProfile = profile;
+    actionQueue.forecast = queueForecast(steps, profile, catalog, actionQueue.targets);
+  }
+  const forecast = actionQueue.forecast;
+  for (const row of byId('queueSteps').rows) {
+    const estimate = forecast[row.dataset.queueIndex];
+    const duration = Number.isFinite(estimate?.seconds) ? formatXpDuration(estimate.seconds / 3600) : '';
+    row.querySelector('.queue-eta').textContent = [duration, estimate?.reason && t(estimate.reason)].filter(Boolean).join(' · ');
+  }
+  if (valid) {
+    const seconds = forecast.reduce((sum, estimate) => sum + (estimate.seconds ?? 0), 0);
+    const incomplete = forecast.some(estimate => estimate.reason);
+    byId('queueTotal').textContent = t(incomplete ? seconds > 0 ? '已估算时长 {duration}，列队总时长未定' :
+      '列队总时长未定' : '每轮预计总时长 {duration}', { duration: formatXpDuration(seconds / 3600) });
+  }
 }
 
 function queueStepFromForm(key = selectedQueueTarget(), prefix = 'queue') {
@@ -289,13 +391,14 @@ function queueRunMessage({ state, step, remaining, current, target }) {
     'character-mismatch': '游戏中打开的角色与工具所选角色不同。',
     'game-already-open': '请先关闭已打开的游戏，再由工具启动并连接。',
     'bridge-unavailable': '游戏连接未响应。请检查游戏是否已启动。',
-    'bridge-build': '游戏运行文件与定时挂机组件不兼容，队列未启动。',
-    'bridge-override-conflict': '当前汉化或模组加载器使用了独立的游戏入口。定时挂机已停止，游戏文件和汉化设置保持原样。',
+    'bridge-build': '游戏运行文件与行动列队组件不兼容，队列未启动。',
+    'bridge-override-conflict': '当前汉化或模组加载器使用了独立的游戏入口。行动列队已停止，游戏文件和汉化设置保持原样。',
     'direct-link-failed': '无法链接已安装的游戏。请检查游戏目录权限；跨盘符号链接可能需要 Windows 开发人员模式。',
     'action-changed': '游戏中的行动已停止或被切换，队列已结束。',
     'game-error': '游戏未能执行第 {step} 步。',
     locked: '游戏判定第 {step} 步尚未解锁。',
     materials: '第 {step} 步缺少开工材料，队列已结束。',
+    'hunting-trap': '第 {step} 步无法开始狩猎。请在游戏中检查陷阱设置和库存。',
     'goal-timeout': '第 {step} 步已到最长等待时间，目标尚未达成。',
     'goal-product-unavailable': '第 {step} 步在游戏当前的奖励模式下无法产出目标物品，队列已停止。',
     unsupported: '第 {step} 步暂不支持直接控制。',
@@ -321,7 +424,33 @@ function showQueueRun() {
   byId('queueBridgeUnavailable').hidden = webMode || available || actionQueue.status.state !== 'unavailable';
   byId('queueCancel').hidden = !queueBusy();
   byId('queueCancel').disabled = queueCommandPending || ['cancelling', 'restarting'].includes(actionQueue.status.state);
-  byId('queueStatus').textContent = queueRunMessage(actionQueue.status);
+  const status = actionQueue.status;
+  const message = queueStatusStale ? t('暂时无法读取挂机状态，正在重试。') : queueRunMessage(status);
+  const target = actionQueue.targets.get(status.stepKey);
+  const step = !queueStatusStale && queueBusy() && status.step && status.totalSteps;
+  const statusLabel = step ? t('第 {round} 轮 · 第 {step} / {total} 步', {
+    round: status.round ?? 1, step: status.step, total: status.totalSteps
+  }) : '';
+  const notice = byId('queueStatus');
+  notice.hidden = !message;
+  const text = [statusLabel, target && step && queueLabel(target), message].filter(Boolean).join(' · ');
+  if (notice.textContent !== text) notice.textContent = text;
+  const progress = byId('queueProgress');
+  progress.hidden = !step;
+  progress.setAttribute('aria-label', t('当前行动进度'));
+  const goalRange = status.target - status.initial;
+  const fraction = status.current != null ? (goalRange ? (status.current - status.initial) / goalRange : null) :
+    !status.goalType && status.duration > 0 && status.remaining >= 0 ? 1 - status.remaining / status.duration : null;
+  if (Number.isFinite(fraction)) progress.value = Math.max(0, Math.min(1, fraction));
+  else progress.removeAttribute('value');
+  for (const row of byId('queueSteps').rows) {
+    const index = Number(row.dataset.queueIndex);
+    const active = Boolean(step && status.totalSteps === actionQueue.steps.length && status.step === index + 1 &&
+      actionQueue.steps[index]?.key === status.stepKey);
+    row.classList.toggle('queue-current', active);
+    if (active) row.setAttribute('aria-current', 'step');
+    else row.removeAttribute('aria-current');
+  }
   updateQueueTotal();
 }
 
@@ -330,13 +459,14 @@ async function pollQueueRun() {
   queueStatusPending = true;
   const version = queueCommandVersion;
   try {
-    const status = await get('action-runner/status');
+    const status = await get('action-runner/status', { signal: AbortSignal.timeout(3000) });
     if (version !== queueCommandVersion) return;
+    queueStatusStale = false;
     actionQueue.status = status;
     showQueueRun();
   } catch {
-    if (version === queueCommandVersion && !queueBusy()) {
-      actionQueue.status = { state: 'unavailable' };
+    if (version === queueCommandVersion && !queueStatusStale) {
+      queueStatusStale = true;
       showQueueRun();
     }
   } finally {
@@ -517,7 +647,8 @@ function renderActionQueue() {
       saveActionQueue();
     });
     const time = create('td', undefined, 'queue-duration');
-    time.append(step.minutes === 0 && !step.goal ? t('无时限') : duration);
+    if (step.minutes !== 0 || step.goal) time.append(duration);
+    const estimate = create('small', '', 'queue-eta');
     const controls = create('td', undefined, 'queue-row-controls');
     const handle = create('button', '☰', 'queue-handle');
     handle.type = 'button';
@@ -549,7 +680,9 @@ function renderActionQueue() {
     remove.setAttribute('aria-label', remove.title);
     remove.textContent = '×';
     controls.append(handle, remove);
-    row.append(target, condition, time, controls);
+    const estimatedTime = create('td');
+    estimatedTime.append(estimate);
+    row.append(target, condition, time, estimatedTime, controls);
     return row;
   }));
   refreshActionQueue();
@@ -563,9 +696,11 @@ function localizeQueueTargets(category = byId('queueCategory').value) {
   const targets = [...actionQueue.targets].filter(([, target]) =>
     target.skill === byId('queueSkill').value && (showQuests || !target.questOnly));
   const categories = new Map(targets.map(([, target]) => [target.category ?? 'other', queueArea(target)]));
-  const groupOrder = new Map([...categories.keys()].map((id, index) => [id, index]));
+  const ordered = orderedActionCategories(categories, catalog, byId('queueSkill').value,
+    questOnlyCategories(targets.map(([, target]) => [target.category ?? 'other', target.questOnly])));
+  const groupOrder = new Map(ordered.map(([id], index) => [id, index]));
   const select = byId('queueCategory');
-  select.replaceChildren(new Option(t('全部分类'), 'all'), ...[...categories].map(([id, label]) => new Option(label, id)));
+  select.replaceChildren(new Option(t('全部分类'), 'all'), ...ordered.map(([id, label]) => new Option(label, id)));
   select.value = categories.has(category) ? category : 'all';
   const options = localizedSuggestions(targets
     .filter(([, target]) => select.value === 'all' || (target.category ?? 'other') === select.value)
@@ -719,7 +854,7 @@ function initActionQueue(catalog) {
 }
 
 async function startQueue(steps, repeat) {
-  if (queueBusy() || !steps.length || !steps.every(queueCanRun)) return;
+  if (queueBusy() || queueStatusStale || !steps.length || !steps.every(queueCanRun)) return;
   actionQueue.status = { ...actionQueue.status, state: 'switching', step: 1 };
   await sendQueueCommand('start', { steps, character: profile.name, characterId: profile.characterId, repeat });
 }
@@ -730,8 +865,10 @@ async function sendQueueCommand(command, payload) {
   showQueueRun();
   try {
     actionQueue.status = { ...actionQueue.status, ...await queueRequest(command, payload) };
+    queueStatusStale = false;
   } catch {
     // The command may have reached the runner. Let its next status determine whether editing is safe.
+    queueStatusStale = true;
   } finally {
     queueCommandPending = false;
   }
